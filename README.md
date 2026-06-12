@@ -13,6 +13,7 @@ No Arch bootstrap, no setup script, no dotfile surgery. It's just... done.
 [![license: MIT](https://img.shields.io/badge/license-MIT-45DDBC.svg)](LICENSE)
 [![base](https://img.shields.io/badge/base-Arch%20Linux-1E202B.svg)](https://archlinux.org)
 [![rice](https://img.shields.io/badge/rice-Illogical%20Impulse-45DDBC.svg)](https://github.com/end-4/dots-hyprland)
+[![downloads](https://img.shields.io/sourceforge/dt/illogical-impulse-iso?color=45DDBC&label=downloads)](https://sourceforge.net/projects/illogical-impulse-iso/files/)
 
 <img src="overlay/calamares/branding/illogical-impulse/slides/01-desktop.png" width="85%" alt="desktop"/>
 
@@ -45,6 +46,17 @@ No Arch bootstrap, no setup script, no dotfile surgery. It's just... done.
   command), `doctor` health checks, the welcome card
 - **Tracks upstream automatically** — the dots are a pinned submodule with a
   one-command, policy-gated bump
+
+## Download
+
+Grab the latest ISO from the [**Releases page**](https://github.com/El3ssar/illogical-impulse-iso/releases)
+— each release links the download (served by SourceForge's mirror network)
+and ships `SHA256SUMS` for verification. All builds are also browsable
+[directly on SourceForge](https://sourceforge.net/projects/illogical-impulse-iso/files/).
+
+```sh
+sha256sum -c SHA256SUMS   # with the ISO in the same directory
+```
 
 ## Build your own
 
