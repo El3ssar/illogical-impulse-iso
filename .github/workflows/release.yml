@@ -116,11 +116,33 @@ jobs:
           printf '%s\n' "${{ secrets.SF_SSH_KEY }}" > ~/.ssh/sf_key
           chmod 600 ~/.ssh/sf_key
           VER='${{ steps.meta.outputs.ver }}'
+          ISO_NAME=$(basename '${{ steps.meta.outputs.iso }}')
           STAGE=$(mktemp -d)
           mkdir -p "$STAGE/$VER"
           cp '${{ steps.meta.outputs.iso }}' out/SHA256SUMS "$STAGE/$VER/"
-          rsync -av -e "ssh -i ~/.ssh/sf_key -o StrictHostKeyChecking=accept-new" \
-            "$STAGE/" "$SF_USER@frs.sourceforge.net:/home/frs/project/$SF_PROJECT/"
+          SSH="ssh -i $HOME/.ssh/sf_key -o StrictHostKeyChecking=accept-new -o ServerAliveInterval=30 -o ServerAliveCountMax=10"
+          # SourceForge's FRS rejects chmod/utimes on its directories, which
+          # makes `rsync -a` fail (exit 23) and abort mid-transfer. Plain
+          # recursive transfer, no attributes; --partial makes the 6 GB file
+          # resumable across retries.
+          ok=0
+          for attempt in 1 2 3 4 5; do
+            if rsync -rv --partial --timeout=120 -e "$SSH" \
+                 "$STAGE/" "$SF_USER@frs.sourceforge.net:/home/frs/project/$SF_PROJECT/"; then
+              ok=1; break
+            fi
+            echo "rsync attempt $attempt failed — retrying in 30s"; sleep 30
+          done
+          [ "$ok" = 1 ] || { echo "::error::upload failed after 5 attempts"; exit 1; }
+          # Trust nothing: byte-compare the remote file before publishing.
+          LOCAL=$(stat -c%s "$STAGE/$VER/$ISO_NAME")
+          REMOTE=$(printf 'ls -l %s/%s\n' "$VER" "$ISO_NAME" \
+            | sftp -b - -i ~/.ssh/sf_key -o StrictHostKeyChecking=accept-new \
+                "$SF_USER@frs.sourceforge.net:/home/frs/project/$SF_PROJECT" \
+            | awk -v n="$ISO_NAME" '$NF == n {print $5}')
+          echo "local=$LOCAL remote=${REMOTE:-<missing>}"
+          [ -n "$REMOTE" ] && [ "$LOCAL" = "$REMOTE" ] \
+            || { echo "::error::remote size mismatch after upload"; exit 1; }
 
       - name: GitHub release (notes + checksums; ISO lives on SourceForge)
         env:
