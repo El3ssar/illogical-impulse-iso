@@ -1,0 +1,63 @@
+#!/usr/bin/env bash
+# Create ~/.local/state/quickshell/.venv and install upstream Python
+# requirements from the offline wheelhouse (or network as fallback).
+#
+# Must run as the target user (venv activate scripts bake $HOME absolute
+# paths, so this cannot live in /etc/skel).
+#
+# Idempotent: if venv exists AND has Pillow+materialyoucolor, exits 0.
+
+set -u
+
+LOG_TAG='[ii-ensure-venv]'
+REQ=/usr/share/illogical-impulse/sdata/uv/requirements.txt
+WHEELS=/usr/share/ii-python-wheels
+export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-/usr/share/uv/python}"
+
+[[ "$(id -u)" -eq 0 ]] && { echo "$LOG_TAG run as the desktop user, not root" >&2; exit 1; }
+command -v uv >/dev/null || { echo "$LOG_TAG uv not installed" >&2; exit 1; }
+[[ -f "$REQ" ]]          || { echo "$LOG_TAG missing $REQ" >&2; exit 1; }
+
+HOME="${HOME:?HOME must be set}"
+XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+VENV="${ILLOGICAL_IMPULSE_VIRTUAL_ENV:-$XDG_STATE_HOME/quickshell/.venv}"
+export ILLOGICAL_IMPULSE_VIRTUAL_ENV="$VENV"
+
+ready() { [[ -x "$VENV/bin/python" ]] && "$VENV/bin/python" -c 'import materialyoucolor, PIL' 2>/dev/null; }
+ready && exit 0
+
+mkdir -p "$(dirname "$VENV")"
+
+if [[ ! -x "$VENV/bin/python" ]]; then
+  echo "$LOG_TAG creating venv at $VENV"
+  if ! uv venv --prompt .venv "$VENV" -p 3.12 2>/dev/null; then
+    echo "$LOG_TAG no python 3.12 — installing via uv"
+    mkdir -p "$UV_PYTHON_INSTALL_DIR"
+    uv python install 3.12 || { echo "$LOG_TAG uv python install 3.12 failed" >&2; exit 1; }
+    uv venv --prompt .venv "$VENV" -p 3.12
+  fi
+fi
+
+pip_args=( --python "$VENV/bin/python" -r "$REQ" )
+if [[ -d "$WHEELS" ]] && find "$WHEELS" -maxdepth 1 -type f \
+       \( -name '*.whl' -o -name '*.tar.gz' -o -name '*.zip' \) -print -quit | grep -q .; then
+  echo "$LOG_TAG using offline wheelhouse at $WHEELS"
+  pip_args+=( --offline --find-links "$WHEELS" )
+fi
+
+if ! uv pip install "${pip_args[@]}"; then
+  if [[ " ${pip_args[*]} " == *" --offline "* ]]; then
+    echo "$LOG_TAG offline install failed — retrying online"
+    uv pip install --python "$VENV/bin/python" -r "$REQ" \
+      || { echo "$LOG_TAG online install also failed" >&2; exit 1; }
+  else
+    echo "$LOG_TAG uv pip install failed" >&2
+    exit 1
+  fi
+fi
+
+ready || { echo "$LOG_TAG venv still missing Pillow/materialyoucolor:" >&2
+           "$VENV/bin/python" -c 'import materialyoucolor, PIL' 2>&1 || true
+           exit 1; }
+
+echo "$LOG_TAG ready (Pillow $($VENV/bin/python -c 'import PIL; print(PIL.__version__)'))"

@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# Calamares shellprocess@finish-boot hook. Runs INSIDE the installed chroot
+# AFTER the bootloader module. Patches loader entries + installs EFI fallback.
+
+set -euo pipefail
+LOG=/var/log/ii-finish-systemd-boot.log
+mkdir -p "$(dirname "$LOG")"
+exec 3>&1; exec > >(tee -a "$LOG" >&3); exec 2>&1
+log() { echo "[ii-finish-systemd-boot] $*"; }
+trap 'log "FATAL: unexpected error at line $LINENO: $BASH_COMMAND"' ERR
+
+ESP="${ESP:-/boot/efi}"
+[[ -d "$ESP" ]] || { log "no ESP at $ESP — skipping (non-UEFI install?)"; exit 0; }
+
+# Kernel cmdline (ii-prepare-bootloader writes it; recompute here as fallback).
+CMDLINE_FILE=/etc/kernel/cmdline.d/illogical-impulse.conf
+if [[ ! -s "$CMDLINE_FILE" ]]; then
+  log "cmdline drop-in missing — recomputing from fstab"
+  parts=(loglevel=4 rootwait rw)
+  root_line=$(grep -E '^\S+\s+/\s+' /etc/fstab 2>/dev/null | head -1 || true)
+  if [[ -n "$root_line" ]]; then
+    parts+=("root=$(awk '{print $1}' <<< "$root_line")")
+    subvol=$(grep -oE 'subvol=[^,]+' <<< "$(awk '{print $4}' <<< "$root_line")" | cut -d= -f2 || true)
+    [[ -n "$subvol" ]] && parts+=("rootflags=subvol=$subvol")
+  fi
+  mkdir -p /etc/kernel/cmdline.d
+  echo "${parts[*]}" > "$CMDLINE_FILE"
+fi
+CMDLINE=$(tr '\n' ' ' < "$CMDLINE_FILE" | sed 's/  */ /g;s/^ //;s/ $//')
+log "cmdline: ${CMDLINE:-<empty>}"
+
+# kernel-install layout
+mkdir -p /etc/kernel/cmdline.d
+[[ -f /etc/kernel/install.conf ]] || cat > /etc/kernel/install.conf <<'KIC'
+layout=bls
+initrd_generator=mkinitcpio
+KIC
+
+# install systemd-boot + EFI fallback binary
+command -v bootctl >/dev/null && bootctl install --esp-path="$ESP" --no-variables-warn 2>&1 \
+  | sed 's/^/[ii-finish-systemd-boot]   /' || true
+SB_SRC=/usr/lib/systemd/boot/efi/systemd-bootx64.efi
+[[ -f "$SB_SRC" ]] && install -Dm 0644 "$SB_SRC" "$ESP/EFI/BOOT/BOOTX64.EFI" \
+                   && log "installed $ESP/EFI/BOOT/BOOTX64.EFI"
+
+# refresh loader entries
+if command -v kernel-install >/dev/null; then
+  shopt -s nullglob
+  for d in /usr/lib/modules/*/; do
+    kver=$(basename "$d")
+    pkgbase=$(< "${d}pkgbase"); pkgbase="${pkgbase//[$'\t\r\n ']/}"
+    [[ -f "/boot/vmlinuz-$pkgbase" ]] || continue
+    kernel-install add "$kver" "/boot/vmlinuz-$pkgbase" 2>&1 \
+      | sed 's/^/[ii-finish-systemd-boot]   /' || true
+  done
+  shopt -u nullglob
+fi
+
+# patch every loader entry's `options` line with our computed cmdline
+shopt -s nullglob
+for entry in "$ESP"/loader/entries/*.conf "$ESP"/EFI/*/loader/entries/*.conf; do
+  [[ -f "$entry" && -n "$CMDLINE" ]] || continue
+  if grep -q '^options ' "$entry"; then
+    sed -i "s|^options .*|options $CMDLINE|" "$entry"
+  else
+    echo "options $CMDLINE" >> "$entry"
+  fi
+  log "patched $(basename "$entry")"
+done
+shopt -u nullglob
+
+# loader.conf
+LC="$ESP/loader/loader.conf"
+if [[ -f "$LC" ]]; then
+  grep -q '^timeout ' "$LC" && sed -i 's/^timeout .*/timeout 5/' "$LC" || echo 'timeout 5' >> "$LC"
+else
+  mkdir -p "$(dirname "$LC")"
+  cat > "$LC" <<'LOADER'
+timeout 5
+default *
+editor  no
+LOADER
+fi
+
+# hibernation: if swap partition exists, default lid to hibernate
+if grep -qE '^\S+\s+none\s+swap' /etc/fstab 2>/dev/null; then
+  mkdir -p /etc/systemd/logind.conf.d
+  cat > /etc/systemd/logind.conf.d/hibernate.conf <<'HIB'
+[Login]
+HandleLidSwitch=hibernate
+HandleLidSwitchExternalPower=hibernate
+HIB
+  log "hibernation swap detected — logind set to hibernate on lid close"
+fi
+
+log "done"

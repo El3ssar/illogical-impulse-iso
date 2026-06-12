@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Install Illogical Impulse
+GenericName=System Installer
+Comment=Install Illogical Impulse Linux to your disk
+Exec=/usr/local/bin/ii-launch-installer
+Icon=system-software-install
+Terminal=false
+Type=Application
+Categories=System;Settings;
+Keywords=installer;setup;install;illogical;impulse;

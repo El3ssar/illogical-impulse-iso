@@ -1,0 +1,31 @@
+# Maintainer: Illogical Impulse ISO build pipeline
+#
+# Locally maintained PKGBUILD for otf-space-grotesk.
+#
+# Why this exists: on the AUR, otf-space-grotesk is one split package from
+# pkgbase 38c3-styles (git clone URL is 38c3-styles.git, not
+# otf-space-grotesk.git — the latter is an empty repo). The upstream
+# PKGBUILD also pulls a huge CCC styleguide zip and needs fontforge,
+# html2markdown, etc., just to ship four OTF files.
+#
+# We build directly from the official Space Grotesk GitHub release instead.
+
+pkgname=otf-space-grotesk
+pkgver=2.0.0
+pkgrel=1
+pkgdesc='Space Grotesk OTF font (Florian Karsten)'
+arch=('any')
+url='https://github.com/floriankarsten/space-grotesk'
+license=('OFL-1.1')
+depends=()
+makedepends=()
+source=("${url}/releases/download/${pkgver}/SpaceGrotesk-${pkgver}.zip")
+sha256sums=('53b415577d4139248555300710bea0d268c7a5be67b93de53b716a9736cabffd')
+
+package() {
+  install -dm755 "${pkgdir}/usr/share/fonts/OTF"
+  install -m644 "${srcdir}/SpaceGrotesk-${pkgver}/otf/"*.otf \
+    "${pkgdir}/usr/share/fonts/OTF/"
+  install -Dm644 "${srcdir}/SpaceGrotesk-${pkgver}/OFL.txt" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/OFL.txt"
+}

@@ -1,0 +1,176 @@
+#!/usr/bin/env bash
+# Calamares shellprocess@verify-install hook. Final sanity gate; auto-repairs
+# common failures where it can. If anything is still broken at the end, exit
+# non-zero — Calamares aborts the install (better than handing the user a
+# brick).
+#
+# On all-pass, this also wipes ISO-only helpers from /usr/local/bin so the
+# installed system carries no ISO-builder scripts beyond what's strictly needed.
+
+set -u
+LOG=/var/log/ii-verify.log
+mkdir -p "$(dirname "$LOG")"
+[[ -f /usr/local/lib/ii/session-offline.sh ]] \
+  && { source /usr/local/lib/ii/session-offline.sh; ii_tee_log "$LOG"; } \
+  || { exec 3>&1; exec > >(tee -a "$LOG" >&3); exec 2>&1; }
+
+T() { echo "[ii-verify] $*"; }
+PASS=() FAIL=() FIX=()
+pass()   { T "  ok    $*"; PASS+=("$*"); }
+fail()   { T "  FAIL  $*"; FAIL+=("$*"); }
+fix()    { T "  fix   $*"; FIX+=("$*"); }
+
+T "==== $(date -u +%FT%TZ) ===="
+
+# ── /boot artefacts ────────────────────────────────────────────────────────
+declare -A MIN=( [vmlinuz-linux]=$((1*1024*1024))
+                 [initramfs-linux.img]=$((5*1024*1024))
+                 [initramfs-linux-fallback.img]=$((5*1024*1024)) )
+
+# Repair: missing fallback initramfs → fix preset, rebuild
+if [[ -f /boot/initramfs-linux.img && ! -f /boot/initramfs-linux-fallback.img ]]; then
+  P=/etc/mkinitcpio.d/linux.preset
+  if [[ -f "$P" ]] && ! grep -qE "^PRESETS=\(.*\bfallback\b.*\)" "$P"; then
+    sed -i "s|^PRESETS=.*$|PRESETS=('default' 'fallback')|" "$P"
+    grep -q '^fallback_image=' "$P" || cat >> "$P" <<'F'
+fallback_image="/boot/initramfs-linux-fallback.img"
+fallback_options="-S autodetect"
+F
+    fix "patched $P to enable fallback preset"
+  fi
+  mkinitcpio -p linux 2>&1 | sed 's/^/[ii-verify]     /' \
+    && fix "built initramfs-linux-fallback.img"
+fi
+
+for f in vmlinuz-linux initramfs-linux.img initramfs-linux-fallback.img; do
+  p="/boot/$f"
+  if [[ ! -e "$p" ]]; then fail "$p missing"; continue; fi
+  sz=$(stat -c %s "$p" 2>/dev/null || echo 0)
+  (( sz >= MIN[$f] )) && pass "$p ($sz B)" || fail "$p too small ($sz B, need ≥ ${MIN[$f]})"
+done
+[[ -f /boot/.ii-boot-state.json ]] && pass "boot-state.json present" || fail "boot-state.json missing"
+
+# ── archiso hooks must NOT survive on the installed system ─────────────────
+rebuild_initramfs=false
+if compgen -G '/etc/mkinitcpio.conf.d/archiso*.conf' >/dev/null; then
+  fix "removing live-only /etc/mkinitcpio.conf.d/archiso*.conf"
+  rm -f /etc/mkinitcpio.conf.d/archiso*.conf
+  rebuild_initramfs=true
+else
+  pass "no archiso mkinitcpio drop-ins"
+fi
+P=/etc/mkinitcpio.d/linux.preset
+if [[ -f "$P" ]] && grep -qE 'archiso_config|PRESETS=.*archiso' "$P"; then
+  fail "$P references archiso"
+  cat > "$P" <<'EOF'
+ALL_kver="/boot/vmlinuz-linux"
+PRESETS=('default' 'fallback')
+default_image="/boot/initramfs-linux.img"
+fallback_image="/boot/initramfs-linux-fallback.img"
+fallback_options="-S autodetect"
+EOF
+  fix "rewrote $P"
+  rebuild_initramfs=true
+fi
+if [[ -f /boot/initramfs-linux.img ]] && command -v lsinitcpio >/dev/null \
+   && lsinitcpio /boot/initramfs-linux.img 2>/dev/null | grep -q '/hooks/archiso'; then
+  fail "initramfs-linux.img contains archiso hook"
+  rebuild_initramfs=true
+fi
+if $rebuild_initramfs; then
+  if [[ -x /usr/local/bin/ii-prepare-bootloader ]]; then
+    /usr/local/bin/ii-prepare-bootloader 2>&1 | sed 's/^/[ii-verify]     /' \
+      && fix "re-ran ii-prepare-bootloader"
+    [[ -x /usr/local/bin/ii-finish-systemd-boot ]] \
+      && /usr/local/bin/ii-finish-systemd-boot 2>&1 | sed 's/^/[ii-verify]     /' \
+      && fix "re-ran ii-finish-systemd-boot"
+  else
+    mkinitcpio -P 2>&1 | sed 's/^/[ii-verify]     /' && fix "rebuilt initramfs"
+  fi
+fi
+
+# ── EFI bootloader ─────────────────────────────────────────────────────────
+if [[ -d /sys/firmware/efi && -d /boot/efi ]]; then
+  ESP=/boot/efi
+  primary=""
+  [[ -f "$ESP/EFI/systemd/systemd-bootx64.efi" ]] && primary="$ESP/EFI/systemd/systemd-bootx64.efi"
+  if [[ -z "$primary" ]]; then
+    for g in "$ESP"/EFI/*/systemd-bootx64.efi; do
+      [[ "$(dirname "$g")" == */EFI/BOOT ]] && continue
+      [[ -f "$g" ]] && primary="$g" && break
+    done
+  fi
+  [[ -n "$primary" ]] && pass "systemd-boot at $primary" || fail "systemd-bootx64.efi missing on ESP"
+
+  fb="$ESP/EFI/BOOT/BOOTX64.EFI"
+  if compgen -G "$ESP/EFI/BOOT/BOOT[Xx]64.EFI" >/dev/null; then
+    pass "EFI fallback present"
+  elif [[ -n "$primary" ]]; then
+    install -d -m 0755 "$ESP/EFI/BOOT"
+    cp -f "$primary" "$fb" && fix "wrote $fb from $primary" || fail "cp → $fb failed"
+  else
+    fail "$fb missing AND no systemd-boot binary to copy from"
+  fi
+
+  shopt -s nullglob
+  count=0
+  for entry in "$ESP"/loader/entries/*.conf "$ESP"/EFI/*/loader/entries/*.conf; do
+    ((count++))
+    grep -qE '^(linux|efi)' "$entry" && grep -q '^options .*root=' "$entry" \
+      && pass "loader entry $(basename "$entry") ok" \
+      || fail "loader entry $(basename "$entry") missing linux/efi or root="
+  done
+  shopt -u nullglob
+  (( count > 0 )) || fail "no loader entries"
+  [[ -s /etc/kernel/cmdline.d/illogical-impulse.conf ]] \
+    && pass "cmdline drop-in present" || fail "cmdline drop-in missing"
+else
+  T "non-UEFI or no /boot/efi — skipping EFI checks"
+fi
+
+# ── fstab + new user + greetd ──────────────────────────────────────────────
+grep -qE '^\s*(UUID|PARTUUID)=.+\s+/\s' /etc/fstab 2>/dev/null \
+  && pass "/etc/fstab has root entry" || fail "/etc/fstab has no root entry"
+
+NEW_USER=$(getent passwd | awk -F: '$3>=1000 && $3<65534 && $1!="liveuser" && $1!="nobody" {print $1; exit}')
+[[ -n "$NEW_USER" ]] && pass "new user: $NEW_USER" || fail "no non-system user (Calamares users module failed)"
+
+if [[ -f /etc/greetd/config.toml ]]; then
+  if [[ -n "$NEW_USER" ]] && grep -q "user = \"$NEW_USER\"" /etc/greetd/config.toml; then
+    pass "greetd autologin → $NEW_USER"
+  elif grep -q "@NEW_USER@" /etc/greetd/config.toml; then
+    fail "greetd config still has @NEW_USER@ — post-install didn't substitute"
+  fi
+else
+  fail "/etc/greetd/config.toml missing"
+fi
+id liveuser &>/dev/null && fail "liveuser still exists on installed system" \
+                        || pass "liveuser removed"
+
+if [[ -n "$NEW_USER" ]]; then
+  H=$(getent passwd "$NEW_USER" | cut -d: -f6)
+  [[ -d /etc/skel/.config/quickshell/ii ]] && pass "/etc/skel has quickshell" \
+                                           || fail "/etc/skel missing quickshell (ISO built without dotfiles)"
+  [[ -d "$H/.config/quickshell/ii" ]] && pass "$NEW_USER has quickshell config" \
+                                      || fail "$NEW_USER missing quickshell config (skel not copied)"
+fi
+
+# ── summary + ISO-only purge ───────────────────────────────────────────────
+T ""
+(( ${#FIX[@]}  > 0 )) && { T "repairs:"; for r in "${FIX[@]}";  do T "  + $r"; done; }
+(( ${#FAIL[@]} > 0 )) && { T "FAIL:";    for r in "${FAIL[@]}"; do T "  - $r"; done; }
+T "pass ${#PASS[@]}  fix ${#FIX[@]}  fail ${#FAIL[@]}"
+
+if (( ${#FAIL[@]} == 0 )); then
+  T "purging ISO-only helpers from /usr/local/bin"
+  for b in ii-post-install ii-prepare-bootloader ii-finish-systemd-boot ii-verify \
+           ii-build-wheelhouse ii-ensure-venv ii-session ii-launch-installer ii-live-welcome; do
+    rm -f "/usr/local/bin/$b"
+  done
+  rm -rf /usr/local/lib/ii /usr/share/ii-python-wheels
+  T "done — installed system is clean (greetd → /usr/bin/start-hyprland directly)"
+  exit 0
+else
+  T "FAIL — see $LOG and /var/log/ii-prepare-bootloader.log"
+  exit 1
+fi

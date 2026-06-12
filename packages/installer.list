@@ -1,0 +1,5 @@
+# packages/installer.list — live-ISO/installer infrastructure. Present in
+# the live environment, PURGED from the installed system by ii-post-install.
+
+calamares
+kpmcore

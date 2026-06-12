@@ -1,0 +1,49 @@
+componentName: illogical-impulse
+
+strings:
+  productName:         "Illogical Impulse"
+  shortProductName:    "Illogical Impulse"
+
+  version:             ""
+  shortVersion:        ""
+
+  versionedName:       "Illogical Impulse"
+  shortVersionedName:  "Illogical Impulse"
+
+  bootloaderEntryName: "Illogical Impulse"
+
+  productUrl:          "https://github.com/end-4/dots-hyprland"
+  supportUrl:          "https://github.com/end-4/dots-hyprland/discussions"
+  knownIssuesUrl:      "https://github.com/end-4/dots-hyprland/issues"
+  releaseNotesUrl:     ""
+
+images:
+  productLogo:    "logo.png"
+  productIcon:    "logo.png"
+  productWelcome: "welcome.png"
+
+slideshow: "slideshow.qml"
+slideshowAPI: 2
+
+stylesheet: "stylesheet.qss"
+
+style:
+  SidebarBackground:         "#181825"
+  SidebarText:               "#bac2de"
+
+  SidebarBackgroundCurrent:  "#313244"
+  SidebarTextCurrent:        "#cdd6f4"
+
+  sidebarBackground:         "#181825"
+  sidebarText:               "#bac2de"
+
+  sidebarTextHighlight:      "#313244"
+  sidebarTextSelect:         "#cdd6f4"
+
+windowSize: "1280px,760px"
+windowPlacement: "center"
+
+windowExpanding: false
+welcomeExpandingLogo: false
+
+welcomeStyleCalamares: false

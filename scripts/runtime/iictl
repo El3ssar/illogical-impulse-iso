@@ -1,0 +1,153 @@
+#!/usr/bin/env bash
+# iictl — the Illogical Impulse distro CLI. Ships on installed systems
+# (exempt from ii-verify's purge). Strictly additive over upstream: update
+# drives end-4's own ./setup the supported way, nothing here patches the
+# rice.
+#
+#   iictl update            update the dots (clones upstream, runs ./setup --noask)
+#   iictl update --system   full system upgrade first (paru: repos + AUR), then dots
+#   iictl doctor            health checks (venv, greetd, boot, pacman)
+#   iictl venv              rebuild the Quickshell python venv
+#   iictl welcome [--auto]  the distro welcome card (--auto: first-boot logic)
+#   iictl version           distro build + dots commit
+
+set -u
+
+C_G=$'\e[32m' C_R=$'\e[31m' C_Y=$'\e[33m' C_B=$'\e[1m' C_0=$'\e[0m'
+ok()   { echo "  ${C_G}ok${C_0}   $*"; }
+bad()  { echo "  ${C_R}FAIL${C_0} $*"; }
+warn() { echo "  ${C_Y}warn${C_0} $*"; }
+die()  { echo "${C_R}error:${C_0} $*" >&2; exit 1; }
+
+RELEASE_FILE=/etc/illogical-impulse/release
+DOTS_REPO=https://github.com/end-4/dots-hyprland
+DOTS_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/iictl/dots-hyprland"
+VENV="${XDG_STATE_HOME:-$HOME/.local/state}/quickshell/.venv"
+REQS=/usr/share/illogical-impulse/sdata/uv/requirements.txt
+UP_MARKER="${XDG_STATE_HOME:-$HOME/.local/state}/quickshell/user/first_run.txt"
+OUR_MARKER="${XDG_STATE_HOME:-$HOME/.local/state}/illogical-impulse/welcome_shown"
+WELCOME_QML=/usr/share/illogical-impulse/welcome
+
+_not_root() { [[ $EUID -ne 0 ]] || die "run as your user, not root (sudo is used where needed)"; }
+
+cmd_version() {
+  if [[ -f "$RELEASE_FILE" ]]; then
+    echo "${C_B}Illogical Impulse${C_0}"
+    sed 's/^/  /' "$RELEASE_FILE"
+  else
+    warn "no $RELEASE_FILE — not an ISO install?"
+  fi
+  command -v Hyprland >/dev/null && echo "  HYPRLAND=$(Hyprland --version 2>/dev/null | head -1 | awk '{print $2}')"
+}
+
+cmd_update() {
+  _not_root
+  if [[ "${1:-}" == "--system" ]]; then
+    echo "${C_B}>> full system upgrade (repos + AUR via paru)${C_0}"
+    if command -v paru >/dev/null; then
+      paru -Syu || die "system upgrade failed"
+    else
+      warn "paru not found — falling back to pacman (no AUR updates)"
+      sudo pacman -Syu || die "system upgrade failed"
+    fi
+  fi
+  echo "${C_B}>> updating Illogical Impulse dots (upstream ./setup)${C_0}"
+  command -v git >/dev/null || die "git missing — pacman -S git"
+  if [[ -d "$DOTS_CACHE/.git" ]]; then
+    git -C "$DOTS_CACHE" fetch --depth=1 origin && \
+    git -C "$DOTS_CACHE" reset --hard origin/HEAD || die "dots fetch failed"
+  else
+    mkdir -p "$(dirname "$DOTS_CACHE")"
+    git clone --depth=1 "$DOTS_REPO" "$DOTS_CACHE" || die "dots clone failed"
+  fi
+  # Upstream's own updater: respects custom/, backs up changed files.
+  ( cd "$DOTS_CACHE" && ./setup install --noask ) || die "upstream setup failed — see output above"
+  ok "dots updated to $(git -C "$DOTS_CACHE" rev-parse --short HEAD)"
+}
+
+cmd_venv() {
+  _not_root
+  command -v uv >/dev/null || die "uv missing — pacman -S uv"
+  [[ -f "$REQS" ]] || die "$REQS missing"
+  echo "${C_B}>> rebuilding Quickshell venv${C_0}"
+  rm -rf "$VENV"
+  uv venv --prompt .venv "$VENV" -p 3.12 || die "uv venv failed"
+  VIRTUAL_ENV="$VENV" uv pip install -r "$REQS" || die "wheel install failed"
+  "$VENV/bin/python" -c 'import materialyoucolor, PIL' || die "venv sanity import failed"
+  ok "venv rebuilt at $VENV"
+}
+
+cmd_doctor() {
+  local fails=0
+  echo "${C_B}Illogical Impulse doctor${C_0}"
+
+  [[ -f "$RELEASE_FILE" ]] && ok "release stamp present" || { warn "no release stamp"; }
+
+  if [[ -x "$VENV/bin/python" ]] && "$VENV/bin/python" -c 'import materialyoucolor, PIL' 2>/dev/null; then
+    ok "Quickshell venv (Pillow + materialyoucolor)"
+  else
+    bad "Quickshell venv broken — run: iictl venv"; fails=$((fails+1))
+  fi
+
+  if [[ -f /etc/greetd/config.toml ]] && grep -q start-hyprland /etc/greetd/config.toml; then
+    ok "greetd configured"
+  else
+    bad "greetd config missing/odd"; fails=$((fails+1))
+  fi
+  systemctl is-enabled greetd &>/dev/null && ok "greetd enabled" \
+    || { bad "greetd not enabled"; fails=$((fails+1)); }
+
+  local d pkgbase missing=0
+  for d in /usr/lib/modules/*/; do
+    [[ -f "${d}pkgbase" ]] || continue
+    pkgbase=$(< "${d}pkgbase")
+    [[ -f "/boot/vmlinuz-$pkgbase" && -f "/boot/initramfs-$pkgbase.img" ]] \
+      || { bad "boot artifacts missing for kernel $pkgbase"; missing=1; }
+  done
+  (( missing )) && fails=$((fails+1)) || ok "kernel + initramfs present for every installed kernel"
+
+  if [[ -d /sys/module/nvidia || -e /dev/nvidia0 ]]; then
+    ok "nvidia driver loaded"
+  elif compgen -G '/usr/lib/modules/*/updates/dkms/nvidia*' >/dev/null 2>&1; then
+    warn "nvidia modules built but not loaded (reboot pending?)"
+  fi
+
+  [[ -f /var/lib/pacman/db.lck ]] && { bad "pacman db locked (stale /var/lib/pacman/db.lck?)"; fails=$((fails+1)); } \
+                                  || ok "pacman db unlocked"
+
+  local free
+  free=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
+  (( free >= 5 )) && ok "root fs: ${free}G free" || { warn "root fs low: ${free}G free"; }
+
+  echo
+  if (( fails == 0 )); then echo "${C_G}all good${C_0}"; else echo "${C_R}$fails problem(s)${C_0}"; exit 1; fi
+}
+
+cmd_welcome() {
+  if [[ "${1:-}" == "--auto" ]]; then
+    # First-boot sequencing: upstream's welcome owns the FIRST login (it
+    # writes first_run.txt and shows its app). Our card takes the next
+    # login, exactly once. Never both in the same session.
+    [[ -f "$UP_MARKER" ]]   || exit 0
+    [[ -f "$OUR_MARKER" ]]  && exit 0
+    mkdir -p "$(dirname "$OUR_MARKER")"
+    : > "$OUR_MARKER"
+    sleep 3   # let the shell settle
+  fi
+  command -v qs >/dev/null || die "quickshell (qs) not found"
+  ISO_RELEASE_VERSION="$(awk -F= '/^ISO_VERSION/{print $2}' "$RELEASE_FILE" 2>/dev/null)" \
+  ISO_RELEASE_DOTS="$(awk -F= '/^DOTS_COMMIT/{print $2}' "$RELEASE_FILE" 2>/dev/null)" \
+    exec qs -p "$WELCOME_QML"
+}
+
+case "${1:-help}" in
+  version)  shift; cmd_version "$@" ;;
+  update)   shift; cmd_update  "$@" ;;
+  venv)     shift; cmd_venv    "$@" ;;
+  doctor)   shift; cmd_doctor  "$@" ;;
+  welcome)  shift; cmd_welcome "$@" ;;
+  help|--help|-h)
+    sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *) die "unknown command: $1 (try: iictl help)" ;;
+esac

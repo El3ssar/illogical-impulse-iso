@@ -1,0 +1,5 @@
+# Passwordless sudo for the wheel group on the LIVE ISO.
+# The installed system's Calamares users module writes its own sudoers entry
+# for the new user; this file lives only in the squashfs and is excluded
+# from unpack via unpackfs.conf so it doesn't leak to the installed system.
+%wheel ALL=(ALL:ALL) NOPASSWD: ALL

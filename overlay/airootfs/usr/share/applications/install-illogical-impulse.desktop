@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Install Illogical Impulse
+Comment=Install Illogical Impulse Linux to your hard drive
+Exec=/usr/local/bin/ii-launch-installer
+Icon=calamares
+Terminal=false
+Type=Application
+Categories=System;Settings;
+Keywords=installer;setup;install;illogical;impulse;calamares;

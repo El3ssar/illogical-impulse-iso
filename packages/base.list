@@ -1,0 +1,16 @@
+# packages/base.list — distro baseline: present on the live ISO AND the
+# installed system. Identity tools + login infrastructure only.
+#
+# NOT here: upstream rice deps (scraped from upstream PKGBUILDs by
+# prepare.d/40-packages.sh), installer-only packages (installer.list),
+# default apps (goodies.list), install-time choices (optional/*.list).
+
+greetd
+greetd-agreety
+polkit
+dbus-broker
+xorg-xwayland
+fastfetch
+zram-generator
+libnotify
+chafa

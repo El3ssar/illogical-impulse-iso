@@ -1,0 +1,22 @@
+# /etc/greetd/config.toml — LIVE ISO greetd configuration.
+#
+# The live system has no real users to log in as, so we autologin `liveuser`
+# (created in /etc/passwd) directly into the Illogical Impulse Hyprland session via
+# /usr/local/bin/ii-session. That wrapper exec's the real
+# /usr/bin/start-hyprland watchdog (which sets up systemd/dbus env) and
+# falls back to Xorg+Calamares if Hyprland can't start.
+#
+# This file is REPLACED by ii-post-install on the installed system
+# with one that autologins the Calamares-created user instead of liveuser.
+# See /etc/greetd/config.toml.installed.template.
+
+[terminal]
+vt = 1
+
+[initial_session]
+command = "/usr/local/bin/ii-session"
+user = "liveuser"
+
+[default_session]
+command = "agreety --cmd /usr/local/bin/ii-session"
+user = "greeter"

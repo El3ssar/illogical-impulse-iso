@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Greetd session command on the LIVE ISO. Sets up Wayland/Qt env, then runs
+# /usr/bin/start-hyprland (upstream watchdog). Does NOT exec — we want to
+# observe fast crashes and log them to a fixed path the tty2 rescue shell
+# can read without journalctl knowledge.
+#
+# On the installed system this script is purged; greetd runs start-hyprland
+# directly.
+
+set -u
+
+LOGDIR="${XDG_STATE_HOME:-$HOME/.local/state}/ii-live"
+mkdir -p "$LOGDIR" 2>/dev/null || LOGDIR="/tmp/ii-live-$(id -u)"
+mkdir -p "$LOGDIR"
+LOG="$LOGDIR/hyprland.log"
+SYS=/var/log/ii-session.log
+log() { local m="[ii-session $(date -u +%FT%TZ)] $*"
+        echo "$m" | tee -a "$LOG" 2>/dev/null | tee -a "$SYS" 2>/dev/null; }
+
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null || true
+chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null || true
+
+export XDG_CURRENT_DESKTOP=Hyprland
+export XDG_SESSION_TYPE=wayland
+export XDG_SESSION_DESKTOP=Hyprland
+export QT_QPA_PLATFORM=wayland
+export QT_QPA_PLATFORMTHEME=qt6ct
+export MOZ_ENABLE_WAYLAND=1
+export GDK_BACKEND=wayland,x11
+export SDL_VIDEODRIVER=wayland
+export CLUTTER_BACKEND=wayland
+
+log "starting session for $(id -un) ($(id -u)), HOME=$HOME, VT=${XDG_VTNR:-?}"
+
+if [[ ! -x /usr/bin/start-hyprland ]]; then
+  log "FATAL: /usr/bin/start-hyprland missing — hyprland package not installed?"
+  sleep 10
+  exit 127
+fi
+
+t0=$(date +%s)
+/usr/bin/start-hyprland >>"$LOG" 2>&1
+rc=$?
+dt=$(( $(date +%s) - t0 ))
+
+if (( dt < 5 )); then
+  log "Hyprland exited after ${dt}s with rc=$rc — looks like startup failure"
+  log "last 50 lines of $LOG:"
+  tail -50 "$LOG" 2>/dev/null | sed 's/^/    /' | tee -a "$SYS"
+  log "sleeping 30s so you can read this on the VT"
+  sleep 30
+else
+  log "Hyprland session ended after ${dt}s with rc=$rc (normal logout)"
+fi
+exit $rc

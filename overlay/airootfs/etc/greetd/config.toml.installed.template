@@ -1,0 +1,22 @@
+# Template for the INSTALLED-system greetd config. ii-post-install
+# substitutes @NEW_USER@ with the Calamares-created user, then writes the
+# result to /etc/greetd/config.toml on the target.
+#
+# We hand off directly to /usr/bin/start-hyprland — the upstream watchdog from
+# the hyprland package. Wayland/Qt env is set by the dotfiles' own
+# hypr/hyprland/env.lua, so no wrapper script is needed. (The live ISO uses
+# ii-session for crash logging, but on an installed system journalctl is
+# the canonical source.)
+#
+# To disable autologin later, delete the [initial_session] block and reboot.
+
+[terminal]
+vt = 1
+
+[initial_session]
+command = "/usr/bin/start-hyprland"
+user = "@NEW_USER@"
+
+[default_session]
+command = "agreety --cmd /usr/bin/start-hyprland"
+user = "greeter"

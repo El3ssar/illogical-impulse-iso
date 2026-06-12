@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+# Calamares shellprocess@post-install hook. Runs INSIDE the installed chroot
+# AFTER unpackfs + users module. Finishes user-facing setup that can't be
+# expressed as static files.
+#
+# Fail-soft by design: a failed `try` warns but doesn't abort the install.
+# A bricked install is worse than a missed tweak the user can fix later.
+
+set -u
+LOG=/var/log/ii-post-install.log
+mkdir -p "$(dirname "$LOG")"
+[[ -f /usr/local/lib/ii/session-offline.sh ]] && source /usr/local/lib/ii/session-offline.sh
+type ii_tee_log &>/dev/null && ii_tee_log "$LOG" \
+  || { exec 3>&1; exec > >(tee -a "$LOG" >&3); exec 2>&1; }
+
+T()   { echo "[post-install] $*"; }
+try() { local d="$1"; shift; if "$@"; then T "  ok    $d"; else T "  warn  $d (rc=$?)"; fi; }
+
+T "==== $(date -u +%FT%TZ) ===="
+
+# ── identify the user Calamares just created ───────────────────────────────
+NEW_USER=$(getent passwd 2>/dev/null \
+  | awk -F: '$3>=1000 && $3<65534 && $1!="liveuser" && $1!="nobody" {print $1; exit}')
+T "new user: ${NEW_USER:-<unknown>}"
+
+# ── groups ─────────────────────────────────────────────────────────────────
+if [[ -n "$NEW_USER" ]]; then
+  try "groupadd i2c"               groupadd -f i2c
+  try "usermod -aG ... $NEW_USER"  usermod -aG video,input,i2c,render,audio,wheel "$NEW_USER"
+fi
+
+# ── drop liveuser ──────────────────────────────────────────────────────────
+if id liveuser &>/dev/null; then
+  try "userdel -r liveuser" userdel -r liveuser
+fi
+
+# ── remove live gnupg tmpfs mount (else it hides the real keyring) ─────────
+# /etc/pacman.d/gnupg itself is KEPT (built in the squashfs by customize_air-
+# ootfs.sh, copied to disk by unpackfs). We just need the tmpfs unit gone.
+try "drop live gnupg tmpfs mount" bash -c '
+  systemctl disable etc-pacman.d-gnupg.mount 2>/dev/null || true
+  rm -f /etc/systemd/system/etc-pacman.d-gnupg.mount
+  rm -f /etc/systemd/system/multi-user.target.wants/etc-pacman.d-gnupg.mount
+'
+
+# ── remove Calamares + chroot build deps from the installed system ────────
+T "removing Calamares + ISO build deps from installed system"
+pacman -Rns --noconfirm calamares kpmcore 2>/dev/null \
+  || pacman -Rdd --noconfirm calamares kpmcore 2>/dev/null || true
+rm -rf /etc/calamares /usr/share/calamares
+rm -f /usr/share/applications/{calamares,calamares-launch-oem,install-illogical-impulse}.desktop \
+      /usr/local/share/applications/calamares.desktop \
+      /usr/local/bin/ii-launch-installer
+# NOTE: git + base-devel are deliberately NOT purged — they're part of the
+# baked dev tooling and paru/iictl-update need them at runtime.
+pacman -Rns --noconfirm meson meson-python ninja 2>/dev/null || true
+pacman -Rns --noconfirm grub syslinux 2>/dev/null || true
+
+# ── NVIDIA: detect hardware, install the right driver offline ─────────────
+# The stash (built by chroot.sh, copied here by unpackfs) is a tiny pacman
+# repo with both driver variants + dep closure. Classification is by PCI
+# device id — supported-gpus.json no longer ships anywhere, and NVIDIA ids
+# grow monotonically per generation:
+#   >= 0x1E00          Turing+ (TU102 and newer)  → nvidia-open-dkms
+#   0x1300 .. 0x1DFF   Maxwell/Pascal/Volta       → nvidia-580xx (legacy)
+#   <  0x1300          Kepler and older           → nouveau (nothing)
+# A mixed system with any legacy GPU gets the legacy driver (580xx also
+# drives Turing+; the open driver cannot drive pre-Turing at all).
+NVSTASH=/usr/share/illogical-impulse/nvidia
+if [[ -f "$NVSTASH/ii-nvidia.db.tar.gz" ]]; then
+  mapfile -t NV_IDS < <(
+    for d in /sys/bus/pci/devices/*; do
+      [[ "$(cat "$d/vendor" 2>/dev/null)" == "0x10de" ]] || continue
+      case "$(cat "$d/class" 2>/dev/null)" in 0x03*) cat "$d/device" ;; esac
+    done)
+  if (( ${#NV_IDS[@]} > 0 )); then
+    T "NVIDIA GPU(s) detected: ${NV_IDS[*]}"
+    NV_VARIANT=none
+    for id in "${NV_IDS[@]}"; do
+      dec=$(( 16#${id#0x} ))
+      if   (( dec >= 16#1300 && dec < 16#1E00 )); then NV_VARIANT=legacy; break
+      elif (( dec >= 16#1E00 )); then NV_VARIANT=open
+      fi
+    done
+    if [[ "$NV_VARIANT" != none ]]; then
+      cat > /etc/pacman-ii-nvidia.conf <<NVCONF
+[options]
+Architecture = auto
+SigLevel = Optional TrustAll
+
+[ii-nvidia]
+Server = file://$NVSTASH
+NVCONF
+      try "sync nvidia stash repo" pacman --config /etc/pacman-ii-nvidia.conf -Sy --noconfirm
+      if [[ "$NV_VARIANT" == open ]]; then
+        try "install nvidia-open-dkms" pacman --config /etc/pacman-ii-nvidia.conf \
+          -S --noconfirm nvidia-open-dkms nvidia-utils linux-headers linux-lts-headers
+      else
+        try "install nvidia-580xx-dkms (pre-Turing GPU)" pacman --config /etc/pacman-ii-nvidia.conf \
+          -S --noconfirm nvidia-580xx-dkms nvidia-580xx-utils linux-headers linux-lts-headers
+      fi
+    else
+      T "only pre-Maxwell NVIDIA found — staying on nouveau"
+    fi
+  else
+    T "no NVIDIA hardware — skipping driver install"
+  fi
+  rm -f /etc/pacman-ii-nvidia.conf /var/lib/pacman/sync/ii-nvidia.db*
+  rm -rf "$NVSTASH"
+fi
+
+# ── docker (baked): socket activation + group membership ──────────────────
+if [[ -e /usr/lib/systemd/system/docker.socket ]]; then
+  install -d /etc/systemd/system/sockets.target.wants
+  ln -sf /usr/lib/systemd/system/docker.socket /etc/systemd/system/sockets.target.wants/docker.socket
+  [[ -n "$NEW_USER" ]] && getent group docker >/dev/null \
+    && try "docker group" usermod -aG docker "$NEW_USER"
+fi
+if [[ -n "$NEW_USER" ]]; then
+  H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
+  if [[ -n "$H" && -d "$H" ]]; then
+    rm -f "$H/Desktop/Install"*.desktop \
+          "$H/.local/share/applications/"{calamares,install-illogical-impulse}.desktop 2>/dev/null
+  fi
+fi
+
+# ── greetd: installed template substituted with new user ──────────────────
+T "/etc/greetd/config.toml"
+TPL=/etc/greetd/config.toml.installed.template
+if [[ -f "$TPL" && -n "$NEW_USER" ]]; then
+  [[ -f /etc/greetd/config.toml ]] && cp /etc/greetd/config.toml /etc/greetd/config.toml.bak
+  sed "s|@NEW_USER@|$NEW_USER|g" "$TPL" > /etc/greetd/config.toml
+  T "  wrote /etc/greetd/config.toml (autologin: $NEW_USER)"
+fi
+
+# ── kernel module + ydotool user service ──────────────────────────────────
+mkdir -p /etc/modules-load.d
+echo 'i2c-dev' > /etc/modules-load.d/i2c-dev.conf
+[[ -f /usr/lib/systemd/system/ydotool.service && ! -e /usr/lib/systemd/user/ydotool.service ]] \
+  && ln -sf /usr/lib/systemd/system/ydotool.service /usr/lib/systemd/user/ydotool.service
+[[ -n "$NEW_USER" ]] && type ii_enable_linger &>/dev/null \
+  && try "linger $NEW_USER" ii_enable_linger "$NEW_USER"
+
+# ── system services (declarative + needed-on-install) ─────────────────────
+# The static overlay symlinks in /etc/systemd/system/*.wants/ get copied by
+# unpackfs and survive — we just need to make sure greetd is wired as the
+# display-manager and a few optional packages get enabled if installed.
+T "system services"
+install -d /etc/systemd/system/graphical.target.wants /etc/systemd/system/multi-user.target.wants
+if [[ -e /usr/lib/systemd/system/greetd.service ]]; then
+  ln -sf /usr/lib/systemd/system/greetd.service /etc/systemd/system/graphical.target.wants/greetd.service
+  ln -sf /usr/lib/systemd/system/greetd.service /etc/systemd/system/display-manager.service
+fi
+for svc in NetworkManager bluetooth sshd; do
+  [[ -e /usr/lib/systemd/system/$svc.service ]] \
+    && ln -sf /usr/lib/systemd/system/$svc.service /etc/systemd/system/multi-user.target.wants/$svc.service
+done
+ln -sf /usr/lib/systemd/system/graphical.target /etc/systemd/system/default.target
+
+# ── dconf + KDE defaults ──────────────────────────────────────────────────
+T "dconf defaults (font + dark mode)"
+mkdir -p /etc/dconf/profile /etc/dconf/db/local.d
+cat > /etc/dconf/profile/user <<'EOF'
+user-db:user
+system-db:local
+EOF
+cat > /etc/dconf/db/local.d/00-defaults <<'EOF'
+[org/gnome/desktop/interface]
+font-name='Google Sans Flex Medium 11 @opsz=11,wght=500'
+color-scheme='prefer-dark'
+EOF
+try "dconf update" dconf update
+
+if [[ -n "$NEW_USER" ]]; then
+  H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
+  if [[ -n "$H" && -d "$H" ]] && type ii_systemd_running &>/dev/null; then
+    if ii_systemd_running && command -v kwriteconfig6 &>/dev/null; then
+      try "kdeglobals Darkly" sudo -u "$NEW_USER" kwriteconfig6 \
+        --file kdeglobals --group KDE --key widgetStyle Darkly
+    else
+      try "kdeglobals Darkly (offline)" ii_set_kde_widget_style "$NEW_USER" "$H" Darkly
+    fi
+  fi
+fi
+
+# ── skel fallback (if Calamares useradd -m skipped skel — e.g. reused /home) ──
+if [[ -n "$NEW_USER" ]]; then
+  H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
+  if [[ -n "$H" && -d "$H" ]] && [[ ! -d "$H/.config/quickshell/ii" ]]; then
+    T "/etc/skel was not copied → rsync-ing $H from /etc/skel"
+    try "skel fallback" bash -c "rsync -a /etc/skel/ '$H/' && chown -R '$NEW_USER:$NEW_USER' '$H'"
+  fi
+fi
+
+# ── Quickshell venv at the new user's real $HOME (offline wheelhouse) ────
+# The ONLY user-state work we do — venvs bake absolute paths into activate
+# scripts, so this can't live in /etc/skel. Color generation, kitty theming,
+# etc. are NOT pre-rendered: Quickshell FirstRunExperience.qml handles those
+# in a real Hyprland session on first login.
+if [[ -n "$NEW_USER" ]]; then
+  H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
+  VENV="$H/.local/state/quickshell/.venv"
+  if [[ -n "$H" && -d "$H" && -x /usr/local/bin/ii-ensure-venv ]]; then
+    try "ii-ensure-venv $NEW_USER" sudo -u "$NEW_USER" env \
+      HOME="$H" XDG_CONFIG_HOME="$H/.config" \
+      XDG_STATE_HOME="$H/.local/state" XDG_CACHE_HOME="$H/.cache" \
+      UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-/usr/share/uv/python}" \
+      /usr/local/bin/ii-ensure-venv
+  fi
+  if [[ -x "$VENV/bin/python" ]]; then
+    sudo -u "$NEW_USER" env HOME="$H" "$VENV/bin/python" -c 'import materialyoucolor, PIL' 2>/dev/null \
+      && T "  ok    Quickshell venv (Pillow + materialyoucolor)" \
+      || T "  CRIT  Quickshell venv missing Pillow/materialyoucolor — first-boot color gen will fail"
+  else
+    T "  CRIT  no Quickshell venv at $VENV"
+  fi
+fi
+
+# ── refresh systemd-boot loader after fstab/cmdline tweaks ────────────────
+if [[ -x /usr/bin/bootctl && -d /boot/efi && -x /usr/local/bin/ii-finish-systemd-boot ]]; then
+  try "ii-finish-systemd-boot" /usr/local/bin/ii-finish-systemd-boot
+fi
+
+T ""
+T "==== done — $(date -u +%FT%TZ) ===="
+exit 0

@@ -1,0 +1,4 @@
+[submodule "upstream/illogical-impulse"]
+	path = upstream/illogical-impulse
+	url = https://github.com/end-4/dots-hyprland.git
+	branch = main

@@ -1,0 +1,55 @@
+# packages/goodies.list — the batteries. Everything here is baked into the
+# image: no install-time selection, the distro ships complete (decision
+# revised in docs/BLUEPRINT.md §14 — we don't ask, we deliver).
+#
+# NVIDIA drivers are NOT here: blindly installing them blacklists nouveau
+# and breaks non-NVIDIA machines. ii-post-install auto-detects the GPU and
+# installs the right variant from the on-ISO stash (packages/nvidia.list).
+
+# CLI quality-of-life stack
+btop
+eza
+bat
+ripgrep
+ripgrep-all
+repgrep
+fd
+fzf
+skim
+zellij
+7zip
+lazygit
+
+# Desktop
+brave-bin
+vlc
+kdeconnect
+strawberry
+
+# Fallback/stability kernel — `linux` is always present as the primary
+linux-lts
+linux-lts-headers
+
+# Office & creative
+onlyoffice-bin
+inkscape
+gimp
+obs-studio
+
+# Dev
+base-devel
+git
+neovim
+code
+cursor-bin
+rustup
+uv
+docker
+docker-compose
+podman
+claude-code
+
+# System
+snapper
+snap-pac
+flatpak

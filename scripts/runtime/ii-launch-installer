@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# Launch Calamares from a non-root Hyprland session, forwarding the env vars
+# Qt + Wayland need so the installer window actually paints.
+# Live ISO only — excluded by unpackfs and purged by ii-verify.
+
+set -u
+
+ENV_FORWARD=( DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR XDG_SESSION_TYPE
+              XDG_CURRENT_DESKTOP XCURSOR_SIZE QT_QPA_PLATFORM QT_QPA_PLATFORMTHEME
+              QT_WAYLAND_DISABLE_WINDOWDECORATION HOME )
+
+export DISPLAY="${DISPLAY:-}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export XDG_SESSION_TYPE="${XDG_SESSION_TYPE:-wayland}"
+export XDG_CURRENT_DESKTOP="${XDG_CURRENT_DESKTOP:-Hyprland}"
+export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}"
+export QT_WAYLAND_DISABLE_WINDOWDECORATION=1
+
+[[ "$EUID" -eq 0 ]] && exec calamares "$@"
+exec sudo --preserve-env="$(IFS=,; echo "${ENV_FORWARD[*]}")" calamares "$@"

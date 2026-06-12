@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# Calamares shellprocess@copy-kernel hook. Runs INSIDE the installed chroot
+# before the bootloader module. Sets up /boot for the installed system.
+
+set -euo pipefail
+LOG=/var/log/ii-prepare-bootloader.log
+mkdir -p "$(dirname "$LOG")"
+exec 3>&1; exec > >(tee -a "$LOG" >&3); exec 2>&1
+log() { echo "[ii-prepare-bootloader] $*"; }
+die() { log "FATAL: $*"; exit 1; }
+# set -e kills silently otherwise — a build was lost to an invisible death.
+trap 'log "FATAL: unexpected error at line $LINENO: $BASH_COMMAND"' ERR
+
+STASH=/usr/share/illogical-impulse/boot-stash
+
+log "uname: $(uname -a)"
+
+# ── sanity ─────────────────────────────────────────────────────────────────
+command -v mkinitcpio >/dev/null || die "mkinitcpio not installed"
+shopt -s nullglob; kver_dirs=( /usr/lib/modules/*/ ); shopt -u nullglob
+(( ${#kver_dirs[@]} > 0 )) || die "no kernels in /usr/lib/modules/"
+for d in "${kver_dirs[@]}"; do
+  [[ -f "${d}vmlinuz" ]] || die "${d}vmlinuz missing"
+  [[ -f "${d}pkgbase" ]] || die "${d}pkgbase missing"
+done
+install -d -m 0755 /boot
+
+# ── purge live archiso mkinitcpio leftovers ────────────────────────────────
+rm -f /etc/mkinitcpio.conf.d/archiso*.conf
+
+# ── /etc/mkinitcpio.conf — deterministic universal config ──────────────────
+# No autodetect → installed initramfs ships every driver. Bulletproof when
+# the install hardware differs from the live medium. Tune later by hand.
+HOOKS=(base udev microcode modconf kms keyboard keymap consolefont block)
+[[ -f /etc/crypttab    ]] && grep -qvE '^\s*(#|$)' /etc/crypttab    && HOOKS+=(encrypt)
+grep -qE '^\S+\s+none\s+swap' /etc/fstab 2>/dev/null              && HOOKS+=(resume)
+HOOKS+=(filesystems fsck)
+
+cat > /etc/mkinitcpio.conf <<MKI
+# Written by ii-prepare-bootloader. Universal (no autodetect) ships every
+# driver, safe across hardware. Edit + \`mkinitcpio -P\` to slim down later.
+MODULES=()
+BINARIES=()
+FILES=()
+HOOKS=(${HOOKS[*]})
+COMPRESSION="zstd"
+COMPRESSION_OPTIONS=()
+MKI
+log "wrote /etc/mkinitcpio.conf (hooks: ${HOOKS[*]})"
+
+# ── kernel cmdline (read by systemd-boot via kernel-install) ───────────────
+write_cmdline() {
+  local -a parts=(loglevel=4 rootwait rw)
+  local root_line
+  root_line=$(grep -E '^\S+\s+/\s+' /etc/fstab 2>/dev/null | head -1 || true)
+  if [[ -n "$root_line" ]]; then
+    parts+=("root=$(awk '{print $1}' <<< "$root_line")")
+    local opts subvol
+    opts=$(awk '{print $4}' <<< "$root_line")
+    subvol=$(grep -oE 'subvol=[^,]+' <<< "$opts" | head -1 | cut -d= -f2 || true)
+    [[ "$(awk '{print $3}' <<< "$root_line")" == btrfs && -n "$subvol" ]] \
+      && parts+=("rootflags=subvol=$subvol")
+  fi
+  if [[ -f /etc/crypttab ]]; then
+    while IFS= read -r line; do
+      [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+      local m u
+      m=$(awk '{print $1}' <<< "$line")
+      u=$(awk '{print $2}' <<< "$line"); u=${u#UUID=}
+      [[ -n "$m" && -n "$u" ]] && parts+=("cryptdevice=UUID=$u:$m")
+    done < /etc/crypttab
+  fi
+  local swap
+  swap=$(grep -E '^\S+\s+none\s+swap' /etc/fstab 2>/dev/null | head -1 || true)
+  [[ -n "$swap" ]] && parts+=("resume=$(awk '{print $1}' <<< "$swap")")
+  mkdir -p /etc/kernel/cmdline.d
+  echo "${parts[*]}" > /etc/kernel/cmdline.d/illogical-impulse.conf
+}
+write_cmdline
+log "wrote /etc/kernel/cmdline.d/illogical-impulse.conf"
+
+# ── restore CPU microcode from the chroot stash ────────────────────────────
+# mkarchiso wipes /boot/* from the airootfs after customize_airootfs.sh
+# runs; without this restore the installed system has no microcode loaded.
+for f in intel-ucode.img amd-ucode.img; do
+  [[ -f "$STASH/$f" ]] && install -m 0644 "$STASH/$f" "/boot/$f" \
+                       && log "restored /boot/$f"
+done
+
+# ── copy each kernel + per-kernel preset (default + fallback) ──────────────
+# Upstream mkinitcpio ships PRESETS=('default') with fallback commented out.
+# We always want both — fallback is the rescue image after a broken upgrade.
+install -d -m 0755 /etc/mkinitcpio.d
+copied=0
+for d in "${kver_dirs[@]}"; do
+  pkgbase=$(< "${d}pkgbase"); pkgbase="${pkgbase//[$'\t\r\n ']/}"
+  [[ -n "$pkgbase" ]] || die "empty pkgbase in $d"
+  install -m 0644 "${d}vmlinuz" "/boot/vmlinuz-$pkgbase"
+  cat > "/etc/mkinitcpio.d/$pkgbase.preset" <<PRE
+# Written by ii-prepare-bootloader.
+ALL_kver="/boot/vmlinuz-$pkgbase"
+PRESETS=('default' 'fallback')
+default_image="/boot/initramfs-$pkgbase.img"
+fallback_image="/boot/initramfs-$pkgbase-fallback.img"
+fallback_options="-S autodetect"
+PRE
+  log "kernel $pkgbase: vmlinuz + preset"
+  # NOT ((copied++)): post-increment of 0 returns 1 and set -e kills the
+  # script silently — exactly how the two-kernel install died.
+  copied=$((copied + 1))
+done
+(( copied > 0 )) || die "no kernels copied"
+
+# ── build initramfs images ─────────────────────────────────────────────────
+mkinitcpio -P || { ls -la /boot >&2; die "mkinitcpio -P failed"; }
+
+# ── state file for ii-verify ───────────────────────────────────────────────
+expected=()
+for d in "${kver_dirs[@]}"; do
+  pkgbase=$(< "${d}pkgbase"); pkgbase="${pkgbase//[$'\t\r\n ']/}"
+  expected+=("/boot/vmlinuz-$pkgbase"
+             "/boot/initramfs-$pkgbase.img"
+             "/boot/initramfs-$pkgbase-fallback.img")
+done
+{
+  echo '{'
+  echo "  \"generated\": \"$(date -u +%FT%TZ)\","
+  echo "  \"kernels_copied\": $copied,"
+  echo '  "expected_paths": ['
+  first=1
+  for p in "${expected[@]}"; do
+    (( first )) && first=0 || echo ','
+    printf '    "%s"' "$p"
+  done
+  echo
+  echo '  ]'
+  echo '}'
+} > /boot/.ii-boot-state.json
+
+log "done — /boot:"
+ls -la /boot | sed 's/^/[ii-prepare-bootloader]   /'

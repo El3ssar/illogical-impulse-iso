@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Live-session-only: a visible, hard-to-miss path to the installer.
+#
+# Quickshell has no desktop-icon layer, so the Desktop/*.desktop file is
+# invisible until you search the launcher. Instead we raise a persistent
+# notification (rendered by the rice's own notification UI) with an action
+# button. Dismissing it is final for the session — Super+I and the
+# launcher entry remain as quiet fallbacks.
+#
+# Launched by /etc/skel-live .config/hypr/custom/execs.lua on "try" boots.
+# Never present on installed systems (unpackfs-excluded + ii-verify purge).
+
+set -u
+
+# Let Quickshell's notification daemon come up.
+sleep 8
+
+command -v notify-send >/dev/null || exit 0
+
+resp=$(notify-send --wait \
+  -a "Illogical Impulse" \
+  -u critical \
+  -A install="Install to disk" \
+  -A later="Keep exploring" \
+  "Welcome to Illogical Impulse" \
+  "You're in a live session — nothing you do here persists. Like it? Install it. (Super+I works anytime.)" \
+  2>/dev/null) || exit 0
+
+[[ "$resp" == "install" ]] && exec /usr/local/bin/ii-launch-installer
+exit 0

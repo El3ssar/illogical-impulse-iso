@@ -1,0 +1,38 @@
+# distro.toml — single source of truth for distro identity + build knobs.
+# Read by every pipeline script through scripts/lib/toml-get; the justfile
+# and (later) CI read the same file. Change identity here, nowhere else.
+
+[distro]
+id          = "illogical-impulse"
+name        = "Illogical Impulse"
+pretty_name = "Illogical Impulse"
+publisher   = "Illogical Impulse — Arch-based Hyprland live distribution"
+application = "Illogical Impulse — Live & Installer"
+home_url    = "https://github.com/end-4/dots-hyprland"
+docs_url    = "https://ii.clsty.link"
+bug_url     = "https://github.com/end-4/dots-hyprland/issues"
+ansi_color  = "38;2;203;166;247"
+
+[iso]
+# out/<name_prefix>-<YYYY.MM.DD>-x86_64.iso, volume label <label_prefix>_<YYYYMM>.
+# ISO version is always the build date (set SOURCE_DATE_EPOCH to override).
+name_prefix  = "illogical-impulse"
+label_prefix = "ILLIMP"
+workdir      = "/var/tmp/ii-iso-work"
+
+[upstream]
+repo = "https://github.com/end-4/dots-hyprland"
+# Bump policy for `just update --check` (and the CI cron later): bump when
+# there are new upstream commits AND the pinned commit is at least this old.
+min_days_between_releases = 15
+require_new_commits = true
+
+[repo]
+# Local pacman repo of prebuilt AUR/local packages; mkarchiso pulls from it
+# during pacstrap (see overlay/pacman.conf).
+name = "ii-extra"
+path = "/var/cache/ii-extra-repo"
+
+[build]
+# Canonical containerized build image (phase 4 — not wired yet).
+container_image = "ii-builder:latest"

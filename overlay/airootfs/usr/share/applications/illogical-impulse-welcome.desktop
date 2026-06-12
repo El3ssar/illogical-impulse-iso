@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Welcome
+GenericName=Illogical Impulse Welcome
+Comment=Distro welcome card — update, health check, tips
+Exec=/usr/local/bin/iictl welcome
+Icon=illogical-impulse
+Terminal=false
+Type=Application
+Categories=System;Settings;
+Keywords=illogical;impulse;welcome;update;doctor;iictl;

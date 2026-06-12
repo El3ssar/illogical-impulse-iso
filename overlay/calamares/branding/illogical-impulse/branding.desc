@@ -1,0 +1,53 @@
+---
+componentName: illogical-impulse
+
+strings:
+  productName:         "Illogical Impulse"
+  shortProductName:    "Illogical Impulse"
+
+  version:             ""
+  shortVersionedName:  "Illogical Impulse"
+
+  versionedName:       "Illogical Impulse"
+  shortVersion:        ""
+
+  bootloaderEntryName: "Illogical Impulse"
+
+  productUrl:          "https://github.com/end-4/dots-hyprland"
+  supportUrl:          "https://github.com/end-4/dots-hyprland/discussions"
+  knownIssuesUrl:      "https://github.com/end-4/dots-hyprland/issues"
+
+images:
+  productLogo:    "logo.png"
+  productIcon:    "logo.png"
+  productWelcome: "welcome.png"
+
+slideshow: "slideshow.qml"
+slideshowAPI: 2
+
+stylesheet: "stylesheet.qss"
+
+style:
+  SidebarBackground:         "#181825"
+  SidebarText:               "#bac2de"
+
+  SidebarBackgroundCurrent:  "#313244"
+  SidebarTextCurrent:        "#cdd6f4"
+
+  sidebarBackground:         "#181825"
+  sidebarText:               "#bac2de"
+
+  sidebarTextHighlight:      "#313244"
+  sidebarTextSelect:         "#cdd6f4"
+
+windowSize: "1280px,760px"
+windowPlacement: "center"
+
+windowExpanding: false
+welcomeExpandingLogo: false
+
+# true → welcome.png (productWelcome above) renders as the hero banner on the
+# welcome page. false → compact layout, productWelcome is ignored. This is the
+# canonical place for the setting; some Calamares docs mention welcome.conf
+# but branding takes precedence in practice.
+welcomeStyleCalamares: true

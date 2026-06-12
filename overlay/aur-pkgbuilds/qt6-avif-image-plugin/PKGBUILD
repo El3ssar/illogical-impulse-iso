@@ -1,0 +1,64 @@
+# Maintainer: Illogical Impulse ISO build pipeline
+#
+# Locally maintained PKGBUILD for qt6-avif-image-plugin.
+#
+# Why this exists: the upstream AUR repo at
+#   https://aur.archlinux.org/qt6-avif-image-plugin.git
+# is currently an empty git tree (AUR RPC metadata exists, but the git
+# repo has zero commits). We sidestep that by building from the GitHub
+# release tarball directly.
+#
+# CMake variable: the upstream project picks Qt5 vs Qt6 via the standard
+# KDE Frameworks variable `QT_MAJOR_VERSION`. It does NOT have its own
+# BUILD_QT_5 / BUILD_QT_6 flags (an earlier version of this PKGBUILD
+# passed those — they were silently ignored and produced a *Qt5* build
+# named libqavif5.so in /usr/lib/qt/, which is not what we need).
+# Output with QT_MAJOR_VERSION=6: /usr/lib/qt6/plugins/imageformats/libqavif6.so
+
+pkgname=qt6-avif-image-plugin
+pkgver=0.10.1
+pkgrel=1
+pkgdesc='Qt6 plug-in to allow Qt6 and KDE 6 based applications to read/write AVIF images'
+arch=('x86_64')
+url='https://github.com/novomesk/qt-avif-image-plugin'
+license=('BSD-2-Clause')
+depends=('libavif' 'qt6-base')
+makedepends=('cmake' 'ninja' 'extra-cmake-modules' 'qt6-base')
+source=("${url}/archive/v${pkgver}.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  cd "qt-avif-image-plugin-${pkgver}"
+
+  # QT_MAJOR_VERSION=6 selects the Qt6 path through KDE's CMake helpers,
+  # which puts the .so at /usr/lib/qt6/plugins/imageformats/libqavif6.so
+  # (the only file Quickshell actually needs).
+  cmake -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DQT_MAJOR_VERSION=6
+  cmake --build build
+}
+
+check() {
+  # Verify we actually produced a libqavif6.so. If the upstream changes
+  # variable names in a future release this build step won't fail — but
+  # the check will — and the user will see a clear error instead of an
+  # invisible bug at runtime where AVIF support is missing.
+  cd "qt-avif-image-plugin-${pkgver}"
+  if [[ ! -f build/bin/imageformats/libqavif6.so ]]; then
+    echo "ERROR: build produced no libqavif6.so." >&2
+    echo "       Contents of build/bin/imageformats/:" >&2
+    ls build/bin/imageformats/ >&2 || true
+    echo "       (Was the cmake QT_MAJOR_VERSION flag honoured?)" >&2
+    return 1
+  fi
+}
+
+package() {
+  cd "qt-avif-image-plugin-${pkgver}"
+  DESTDIR="${pkgdir}" cmake --install build
+
+  install -Dm644 LICENSE \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

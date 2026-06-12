@@ -1,0 +1,36 @@
+# validate.yml — static validation on every push/PR.
+#
+# Runs `just prepare && just validate` in an Arch container: no root build,
+# no AUR compilation, no ISO — just the full ~55-check audit of the
+# assembled mkarchiso profile. The future release pipeline (BLUEPRINT §12)
+# extends this same recipe surface with `just build` + QEMU smoke testing.
+name: validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    steps:
+      - name: Install build dependencies
+        run: pacman -Syu --noconfirm git rsync python archiso just
+
+      - name: Checkout (with dots submodule)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory '*'
+
+      - name: Assemble profile
+        run: just prepare
+
+      - name: Static audit
+        run: just validate

@@ -1,0 +1,15 @@
+# packages/nvidia.list — NOT baked into the image. chroot.sh downloads
+# these (+ full dependency closure) into a tiny pacman repo at
+# /usr/share/illogical-impulse/nvidia inside the squashfs; ii-post-install
+# detects NVIDIA hardware on the installed machine and installs the right
+# variant from it, fully offline, no questions asked:
+#
+#   GPU in supported-gpus.json with "kernelopen" (Turing+) → nvidia-open-dkms
+#   older NVIDIA (Maxwell/Pascal)                          → nvidia-580xx-dkms (AUR legacy)
+#   no NVIDIA                                              → nothing; stash removed
+nvidia-open-dkms
+nvidia-utils
+nvidia-580xx-dkms
+nvidia-580xx-utils
+linux-headers
+linux-lts-headers

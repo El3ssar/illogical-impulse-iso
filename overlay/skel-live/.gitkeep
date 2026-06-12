@@ -1,0 +1,6 @@
+# Live-session-only home overrides (installer icon, live Hyprland hooks).
+# Merged onto liveuser during ISO build — never copied to installed users.
+#
+# Example:
+#   overlay/skel-live/Desktop/Install end4 Hyprland.desktop
+#   overlay/skel-live/.config/hypr/custom/execs.lua

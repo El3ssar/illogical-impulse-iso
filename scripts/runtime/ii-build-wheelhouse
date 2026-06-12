@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+# Build /usr/share/ii-python-wheels from upstream requirements during the
+# mkarchiso chroot. The wheelhouse lets ii-ensure-venv install offline at
+# install time (and on first boot if needed).
+#
+# uv pip's offline mode can't compile sdists, so we build every wheel here
+# while the chroot has network + base-devel + pygobject/dbus-python build
+# deps available.
+
+set -u
+T() { echo "[ii-build-wheelhouse] $*"; }
+
+REQ=/usr/share/illogical-impulse/sdata/uv/requirements.txt
+WHEELS=/usr/share/ii-python-wheels
+STAGING=/var/tmp/ii-python-staging
+FROZEN=/var/tmp/ii-python-frozen.txt
+export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-/usr/share/uv/python}"
+
+[[ -f "$REQ" ]] || { T "missing $REQ"; exit 1; }
+command -v uv >/dev/null || { T "uv not installed"; exit 1; }
+
+T "building wheelhouse at $WHEELS"
+rm -rf "$STAGING" "$WHEELS" "$FROZEN"
+mkdir -p "$WHEELS" "$UV_PYTHON_INSTALL_DIR"
+
+uv python install 3.12 || { T "uv python install 3.12 failed"; exit 1; }
+uv venv "$STAGING" -p 3.12
+uv pip install --python "$STAGING/bin/python" -r "$REQ" pip \
+  || { T "staging install failed"; exit 1; }
+uv pip freeze --python "$STAGING/bin/python" | grep -Ev '^pip==' > "$FROZEN"
+
+T "pip wheel → $WHEELS ($(wc -l < "$FROZEN") packages)"
+"$STAGING/bin/pip" wheel -r "$FROZEN" -w "$WHEELS" \
+  || { T "pip wheel failed"; exit 1; }
+
+n=$(find "$WHEELS" -maxdepth 1 -type f -name '*.whl' | wc -l)
+T "$n wheels"
+(( n >= 25 )) || { T "FATAL: wheelhouse too small"; exit 1; }
+
+# Verify offline replay works in a throwaway venv.
+V=/var/tmp/ii-python-verify
+rm -rf "$V"; uv venv "$V" -p 3.12
+uv pip install --python "$V/bin/python" --offline --find-links "$WHEELS" -r "$REQ" \
+  || { T "FATAL: offline verify failed"; exit 1; }
+"$V/bin/python" -c 'import materialyoucolor, PIL' \
+  || { T "FATAL: verify venv missing materialyoucolor/Pillow"; exit 1; }
+rm -rf "$V" "$STAGING" "$FROZEN"
+T "verified — offline install works from $WHEELS"

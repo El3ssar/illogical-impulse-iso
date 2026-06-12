@@ -1,0 +1,33 @@
+#!/usr/bin/env python3
+"""toml-get FILE KEY [KEY ...] — print scalar TOML values, one per line.
+
+KEY is dotted, e.g.:  toml-get distro.toml iso.label_prefix
+Booleans print as true/false. Missing keys exit 1 with no partial output.
+"""
+import sys
+import tomllib
+
+
+def main() -> int:
+    if len(sys.argv) < 3:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    with open(sys.argv[1], "rb") as f:
+        data = tomllib.load(f)
+    out = []
+    for key in sys.argv[2:]:
+        cur = data
+        for part in key.split("."):
+            if not isinstance(cur, dict) or part not in cur:
+                print(f"toml-get: missing key: {key}", file=sys.stderr)
+                return 1
+            cur = cur[part]
+        if isinstance(cur, bool):
+            cur = "true" if cur else "false"
+        out.append(str(cur))
+    print("\n".join(out))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
