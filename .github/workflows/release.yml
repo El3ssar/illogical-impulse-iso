@@ -1,0 +1,142 @@
+# release.yml — automated ISO releases.
+#
+# Daily cron runs the bump-policy gate (`just update --check`, knobs in
+# distro.toml [upstream]): new dots commits AND the pin old enough → bump
+# the submodule, build, smoke-test, publish. workflow_dispatch forces a
+# release from the current pin (no bump) — use it for ISO-side changes.
+#
+# The ISO itself goes to SourceForge (GitHub caps release assets at 2 GiB);
+# the GitHub release carries SHA256SUMS + notes + the download link.
+# Secret: SF_SSH_KEY — dedicated ed25519 key, public half registered on the
+# SourceForge account.
+name: release
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+env:
+  SF_USER: el3ssar
+  SF_PROJECT: illogical-impulse-iso
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      go: ${{ steps.check.outputs.go }}
+      bump: ${{ steps.check.outputs.bump }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - id: check
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "go=yes"  >> "$GITHUB_OUTPUT"
+            echo "bump=no" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ./scripts/update.sh --check; then
+            echo "go=yes"   >> "$GITHUB_OUTPUT"
+            echo "bump=yes" >> "$GITHUB_OUTPUT"
+          else
+            echo "go=no"  >> "$GITHUB_OUTPUT"
+            echo "bump=no" >> "$GITHUB_OUTPUT"
+          fi
+
+  release:
+    needs: gate
+    if: needs.gate.outputs.go == 'yes'
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Reclaim runner disk (the build needs ~25 GB scratch)
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+                      /opt/hostedtoolcache /usr/local/.ghcup /usr/share/swift
+          df -h / | tail -1
+
+      - name: Bump dots pin (cron-triggered releases only)
+        if: needs.gate.outputs.bump == 'yes'
+        run: |
+          ./scripts/update.sh
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add upstream/illogical-impulse
+          git commit -m "chore: bump dots to $(git -C upstream/illogical-impulse rev-parse --short HEAD) [release cron]"
+          git push
+
+      - name: Restore AUR package cache
+        uses: actions/cache@v4
+        with:
+          path: .ii-cache
+          key: ii-extra-${{ hashFiles('packages/*.list', 'overlay/aur-pkgbuilds/**') }}-${{ github.run_id }}
+          restore-keys: |
+            ii-extra-${{ hashFiles('packages/*.list', 'overlay/aur-pkgbuilds/**') }}-
+            ii-extra-
+
+      - name: Build ISO (same `just docked` as local builds)
+        run: |
+          sudo apt-get -qq update && sudo apt-get -qq install -y just
+          mkdir -p .ii-cache
+          II_CACHE_DIR="$PWD/.ii-cache" just docked
+
+      - name: Fix ownership for caching + checksums
+        run: sudo chown -R "$(id -u):$(id -g)" out .ii-cache
+
+      - name: Smoke test (headless boot to graphical session)
+        run: |
+          sudo apt-get -qq install -y qemu-system-x86 ovmf
+          just smoke --timeout 420
+
+      - name: Checksums + version
+        id: meta
+        run: |
+          ISO=$(ls -t out/*.iso | head -1)
+          VER=$(basename "$ISO" | sed -E 's/^.*-([0-9]{4}\.[0-9]{2}\.[0-9]{2})-.*$/\1/')
+          ( cd out && sha256sum "$(basename "$ISO")" > SHA256SUMS )
+          echo "iso=$ISO"  >> "$GITHUB_OUTPUT"
+          echo "ver=$VER"  >> "$GITHUB_OUTPUT"
+
+      - name: Upload to SourceForge
+        run: |
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.SF_SSH_KEY }}" > ~/.ssh/sf_key
+          chmod 600 ~/.ssh/sf_key
+          VER='${{ steps.meta.outputs.ver }}'
+          STAGE=$(mktemp -d)
+          mkdir -p "$STAGE/$VER"
+          cp '${{ steps.meta.outputs.iso }}' out/SHA256SUMS "$STAGE/$VER/"
+          rsync -av -e "ssh -i ~/.ssh/sf_key -o StrictHostKeyChecking=accept-new" \
+            "$STAGE/" "$SF_USER@frs.sourceforge.net:/home/frs/project/$SF_PROJECT/"
+
+      - name: GitHub release (notes + checksums; ISO lives on SourceForge)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VER='${{ steps.meta.outputs.ver }}'
+          ISO_NAME=$(basename '${{ steps.meta.outputs.iso }}')
+          DOTS=$(git -C upstream/illogical-impulse rev-parse --short HEAD)
+          cat > notes.md <<EOF
+          ## Illogical Impulse ISO $VER
+
+          **Download:** [$ISO_NAME](https://sourceforge.net/projects/$SF_PROJECT/files/$VER/$ISO_NAME/download) (SourceForge mirror network)
+
+          Verify: \`sha256sum -c SHA256SUMS\` — checksums attached below and beside the ISO.
+
+          Ships [end-4/dots-hyprland](https://github.com/end-4/dots-hyprland) @ \`$DOTS\`.
+          Boot-tested headlessly in QEMU before publishing.
+          EOF
+          gh release create "$VER" out/SHA256SUMS --title "Illogical Impulse ISO $VER" --notes-file notes.md

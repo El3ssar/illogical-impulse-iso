@@ -23,7 +23,7 @@ the machine itself.
 
 **Phase status:** 1 (pipeline) ✅ · 2 (installer, revised model) ✅ ·
 3 (iictl + welcome card; cheatsheet dropped — upstream ships one) ✅ ·
-4 (builder container, `just docked`) ✅ · 5 (release CI) ⏳
+4 (builder container, `just docked`) ✅ · 5 (release CI) ✅
 
 Phase 3 collision contract: the welcome card is a STANDALONE quickshell
 config (`/usr/share/illogical-impulse/welcome`, zero imports from
@@ -200,9 +200,14 @@ update vm clean nuke assets`.
 `require_new_commits` in distro.toml) and exits 0/1 — CI-consumable. After
 a bump: `just prepare && just validate`, build, VM-test, commit the pin.
 
-Phase 5 sketch: cron calls `--check` → PR with the pin bump → merge
-triggers container build → validate + QEMU boot smoke → ISO to SourceForge,
-checksums + signature + notes to a GitHub release.
+Implemented in `.github/workflows/release.yml`: daily cron runs the
+`--check` gate → bumps the pin (committed by github-actions[bot]) → `just
+docked` (AUR cache via actions/cache on `.ii-cache` through II_CACHE_DIR) →
+`just smoke` (headless QEMU boot; QMP screendumps must reach ≥16 distinct
+colors — text-fallback regressions fail) → rsync ISO + SHA256SUMS to
+SourceForge (frs.sourceforge.net, SF_SSH_KEY secret, project
+illogical-impulse-iso) → GitHub release with notes + checksums.
+workflow_dispatch forces a release from the current pin.
 
 ## 8. Easy extensions (designed-for, not yet built)
 

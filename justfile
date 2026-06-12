@@ -35,6 +35,10 @@ update *args:
 vm *args:
     ./scripts/vm.sh {{args}}
 
+# headless boot test of the newest ISO (used by the release CI)
+smoke *args:
+    ./scripts/smoke.sh {{args}}
+
 # remove build/
 clean:
     ./scripts/clean.sh
@@ -52,12 +56,13 @@ image:
     docker build -t ii-builder:latest -f containers/builder.Dockerfile containers
 
 # reproducible build inside the container (any host with docker) → out/*.iso
-# AUR package cache persists in the `ii-extra-cache` docker volume.
+# AUR cache: `ii-extra-cache` docker volume, or a host dir via II_CACHE_DIR
+# (the release CI binds a cached directory there).
 docked profile="": image
     docker run --rm --privileged \
       -e HOST_UID="$(id -u)" \
       -v "{{justfile_directory()}}:/work" \
-      -v ii-extra-cache:/var/cache/ii-extra-repo \
+      -v "${II_CACHE_DIR:-ii-extra-cache}:/var/cache/ii-extra-repo" \
       -w /work ii-builder:latest \
       bash -c 'usermod -u "$HOST_UID" builder 2>/dev/null; \
                chown builder /var/cache/ii-extra-repo && \

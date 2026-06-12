@@ -77,8 +77,9 @@ are in [docs/BLUEPRINT.md](docs/BLUEPRINT.md).
 
 Working: ISO build (native or `just docked` for a reproducible containerized
 build on any docker host), live session, full install, NVIDIA auto-detect,
-`iictl`, welcome card, validate CI. Coming: automated releases with hosted
-ISO downloads. See the [blueprint](docs/BLUEPRINT.md) for the roadmap.
+`iictl`, welcome card, validate CI, automated releases (daily upstream
+check → build → QEMU smoke test → [SourceForge downloads](https://sourceforge.net/projects/illogical-impulse-iso/files/)
++ GitHub release notes). See the [blueprint](docs/BLUEPRINT.md) for details.
 
 ## License & credit
 
