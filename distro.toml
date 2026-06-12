@@ -36,3 +36,8 @@ path = "/var/cache/ii-extra-repo"
 [build]
 # Canonical containerized build image (phase 4 — not wired yet).
 container_image = "ii-builder:latest"
+
+[release]
+# SourceForge file hosting (the ISO exceeds GitHub's 2 GiB asset cap).
+sf_user = "el3ssar"
+sf_project = "illogical-impulse-iso"
