@@ -118,18 +118,24 @@ _build() {
   # nvidia-580xx-utils share a base; staging both makes the sibling hit
   # the version-match skip instead of recompiling the whole thing).
   local b base name staged=0 have_pkg=0
+  local -a staged_paths=()
   for b in "${built[@]}"; do
     base="${b##*/}"
     [[ "$base" == *-debug-* ]] && continue
     name="${base%-*-*-*}"   # strip pkgver-pkgrel-arch.pkg.tar.*
     sudo rm -f "$REPO_PATH/$name-"*.pkg.tar.*
     sudo mv "$b" "$REPO_PATH/"
+    staged_paths+=("$REPO_PATH/$base")
     info "staged $base"
     staged=$((staged + 1))
     [[ "$name" == "$pkg" ]] && have_pkg=1
   done
   (( staged > 0 ))   || die "no artifacts in build output for $label"
   (( have_pkg > 0 )) || die "build of $label produced no $pkg package"
+  # Index immediately + resync: later PKGBUILDs in THIS run may depend on
+  # what was just built (the final full re-index still happens at the end).
+  sudo repo-add -q "$REPO_DB" "${staged_paths[@]}" >/dev/null
+  sudo "$PACMAN_II" -Sy >/dev/null 2>&1 || true
 }
 
 mapfile -t REQUIRED < <(grep -Ev '^\s*$' "$BUILD/.pkg-resolve/aur-prebuild.list")
@@ -157,6 +163,25 @@ sudo install -d -m 0755 -o root -g root "$REPO_PATH"
 # Scratch on DISK, not /tmp: /tmp is tmpfs with per-user quotas (systemd
 # 256+) and the nvidia/quickshell builds need multi-GB of build space.
 WORK=$(mktemp -d /var/tmp/ii-prebuild.XXXXXX); trap 'rm -rf "$WORK"' EXIT
+
+# makepkg -s resolves missing deps with plain pacman + the SYSTEM
+# pacman.conf, which doesn't know [ii-extra] — so intra-run dependencies
+# (quickshell-git needs our qt6-avif-image-plugin) fail on any fresh
+# machine/container. makepkg honors $PACMAN: hand it a wrapper that adds
+# the cache repo, and keep the repo db indexed as packages land.
+PB_CONF="$WORK/pacman-ii.conf"
+if grep -q '^\[ii-extra\]' /etc/pacman.conf; then
+  cp /etc/pacman.conf "$PB_CONF"
+else
+  sed "/^\[core\]/i [ii-extra]\nSigLevel = Optional TrustAll\nServer = file://$REPO_PATH" \
+    /etc/pacman.conf > "$PB_CONF"
+fi
+PACMAN_II="$WORK/pacman-ii"
+printf '#!/bin/bash\nexec /usr/bin/pacman --config %q "$@"\n' "$PB_CONF" > "$PACMAN_II"
+chmod +x "$PACMAN_II"
+export PACMAN="$PACMAN_II"
+[[ -f "$REPO_DB" ]] || sudo repo-add -q "$REPO_DB"
+sudo "$PACMAN_II" -Sy >/dev/null || warn "pacman -Sy failed (offline?) — dep resolution may use stale dbs"
 
 step "prebuild — ${#ORDER[@]} AUR + ${#LOCAL_PKG_DIRS[@]} local PKGBUILDs"
 
