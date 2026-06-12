@@ -65,6 +65,7 @@ just vm           # boot it in QEMU  (--disk to test a full install, needs quemu
 | `just update` | bump the dots pin (`--check` = policy dry-run) |
 | `just vm [--disk\|--installed]` | QEMU: live ISO / install test / installed system |
 | `just assets` | regenerate branding from the SVG sources |
+| `just docked [profile]` | the same full pipeline, inside the pinned builder container |
 
 **Make it yours:** package manifests in [`packages/`](packages), distro-wide
 dotfile overrides in [`overlay/skel-distro/`](overlay), your personal layer in
@@ -74,9 +75,10 @@ are in [docs/BLUEPRINT.md](docs/BLUEPRINT.md).
 
 ## Status
 
-Working: ISO build, live session, full install, NVIDIA auto-detect, `iictl`,
-welcome card, validate CI. Coming: containerized builds, automated releases.
-See the [blueprint](docs/BLUEPRINT.md) for the roadmap.
+Working: ISO build (native or `just docked` for a reproducible containerized
+build on any docker host), live session, full install, NVIDIA auto-detect,
+`iictl`, welcome card, validate CI. Coming: automated releases with hosted
+ISO downloads. See the [blueprint](docs/BLUEPRINT.md) for the roadmap.
 
 ## License & credit
 

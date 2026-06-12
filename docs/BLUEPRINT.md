@@ -23,7 +23,7 @@ the machine itself.
 
 **Phase status:** 1 (pipeline) ✅ · 2 (installer, revised model) ✅ ·
 3 (iictl + welcome card; cheatsheet dropped — upstream ships one) ✅ ·
-4 (builder container, `just docked`) ⏳ · 5 (release CI) ⏳
+4 (builder container, `just docked`) ✅ · 5 (release CI) ⏳
 
 Phase 3 collision contract: the welcome card is a STANDALONE quickshell
 config (`/usr/share/illogical-impulse/welcome`, zero imports from
@@ -164,6 +164,15 @@ final gate + live-helper purge) → umount`.
 `instances:` mapping in settings.conf or Calamares silently loads the no-op
 `shellprocess.conf`. validate checks this; don't remove the check.
 
+### docked builds (phase 4)
+
+`containers/builder.Dockerfile` is the canonical environment; `just docked`
+runs prepare → validate → prebuild (as the `builder` user, uid-remapped to
+the host user so build/ stays host-owned — iron rule 2 holds inside docker
+too) → mkiso (root), with the AUR cache persisted in the `ii-extra-cache`
+docker volume. `--privileged` is required (mkarchiso needs loop devices).
+The phase-5 release CI uses this same image.
+
 ## 5. The justfile
 
 Recipes are deliberately one-liners delegating to scripts — CI calls the
@@ -200,8 +209,6 @@ checksums + signature + notes to a GitHub release.
 - **Distro-level fetch.list** — the profile fetch mechanism
   (30-skel.sh) generalizes trivially: read an `overlay/skel-distro.fetch`
   list with the same `<dest> <url> <rev>` format before the profile layer.
-- **`just docked <recipe>`** — phase 4: `containers/builder.Dockerfile`
-  (pinned archiso) + a recipe running any other recipe inside it.
 - **More editions** — a second profile is just a directory; nothing else
   to wire.
 

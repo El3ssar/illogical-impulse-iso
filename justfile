@@ -46,3 +46,20 @@ nuke:
 # regenerate Calamares branding PNGs from overlay/assets (commit the result)
 assets:
     ./tools/gen-assets.sh
+
+# build the pinned builder container image
+image:
+    docker build -t ii-builder:latest -f containers/builder.Dockerfile containers
+
+# reproducible build inside the container (any host with docker) → out/*.iso
+# AUR package cache persists in the `ii-extra-cache` docker volume.
+docked profile="": image
+    docker run --rm --privileged \
+      -e HOST_UID="$(id -u)" \
+      -v "{{justfile_directory()}}:/work" \
+      -v ii-extra-cache:/var/cache/ii-extra-repo \
+      -w /work ii-builder:latest \
+      bash -c 'usermod -u "$HOST_UID" builder 2>/dev/null; \
+               chown builder /var/cache/ii-extra-repo && \
+               su builder -c "just prepare {{profile}} && just validate && just prebuild" && \
+               ./scripts/mkiso.sh'
