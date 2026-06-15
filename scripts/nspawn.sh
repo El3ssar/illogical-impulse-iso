@@ -72,7 +72,11 @@ if [[ ! -d "$BASE" || "$(cat "$STAMP" 2>/dev/null)" != "$BASE_TAG" ]]; then
   step "pacstrap base rootfs → ${BASE#"$ROOT"/}  (one-time; cached, needs network)"
   _wipe "$BASE"
   install -d "$BASE"
-  pacstrap -c -K "$BASE" "${BASE_PKGS[@]}" || die "pacstrap failed (no network / cold cache?)"
+  # LC_ALL=C: the fresh chroot has no generated locales yet, so package hooks'
+  # perl spews "Setting locale failed" if the host's UTF-8 LANG leaks in. C is
+  # always present — silences the noise without changing what gets installed.
+  LC_ALL=C LANG=C pacstrap -c -K "$BASE" "${BASE_PKGS[@]}" \
+    || die "pacstrap failed (no network / cold cache?)"
   printf '%s\n' "$BASE_TAG" > "$STAMP"
   ok "base rootfs built"
 else
@@ -103,11 +107,16 @@ _stage etc/skel
 ok "runtime layer staged"
 
 # ── 3. boot ephemerally — every write below the base is discarded on exit ────
+# NS[0] is the binary itself, so the launch is `exec "${NS[@]}"` — NOT
+# `exec systemd-nspawn "${NS[@]}"`, which would pass a stray "systemd-nspawn" as
+# the first positional. systemd-nspawn stops option parsing at the first
+# non-option, so that stray arg makes it ignore -D and fall back to $PWD as the
+# container dir ("doesn't look like it has an OS tree. Refusing.").
 NS=( systemd-nspawn -q --volatile=overlay -D "$BASE" --hostname="$DISTRO_ID" )
 if (( $# )); then
   step "one-shot in throwaway $DISTRO_ID: $*   (changes discarded on exit)"
-  exec systemd-nspawn "${NS[@]}" /bin/bash -c "$*"
+  exec "${NS[@]}" /bin/bash -c "$*"
 else
   step "root shell in throwaway $DISTRO_ID   (exit / Ctrl-D discards everything)"
-  exec systemd-nspawn "${NS[@]}"
+  exec "${NS[@]}"
 fi
