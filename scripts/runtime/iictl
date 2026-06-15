@@ -1,25 +1,43 @@
 #!/usr/bin/env bash
 # iictl — the Illogical Impulse distro CLI. Ships on installed systems
 # (exempt from ii-verify's purge). Strictly additive over upstream: update
-# drives end-4's own ./setup the supported way, nothing here patches the
-# rice.
+# drives end-4's own ./setup the supported way, nothing here patches the rice.
 #
-#   iictl update            update the dots (clones upstream, runs ./setup --noask)
-#   iictl update --system   full system upgrade first (paru: repos + AUR), then dots
-#   iictl doctor            health checks (venv, greetd, boot, pacman)
-#   iictl venv              rebuild the Quickshell python venv
-#   iictl welcome [--auto]  the distro welcome card (--auto: first-boot logic)
-#   iictl version           distro build + dots commit
+# Verbs come in two kinds: the built-ins below, and drop-in plugins discovered
+# at /usr/local/lib/ii/iictl.d/<cmd> — one file per feature, zero merge
+# conflicts in this core. `iictl help` harvests both from their #help: headers.
+# The plugin contract lives in iictl-common.sh.
 
 set -u
 
-C_G=$'\e[32m' C_R=$'\e[31m' C_Y=$'\e[33m' C_B=$'\e[1m' C_0=$'\e[0m'
-ok()   { echo "  ${C_G}ok${C_0}   $*"; }
-bad()  { echo "  ${C_R}FAIL${C_0} $*"; }
-warn() { echo "  ${C_Y}warn${C_0} $*"; }
-die()  { echo "${C_R}error:${C_0} $*" >&2; exit 1; }
+# Shared header: colors, ok/bad/warn/die, RELEASE_FILE, _not_root, ledger_*.
+# Sourced from the survive-path so iictl and every plugin share one copy. The
+# inline fallback keeps the core working in a dev checkout, or if the additive
+# plugin layer is deleted — removing it must never brick iictl version/doctor.
+II_LIB="${II_LIB:-/usr/local/lib/ii}"
+if [[ -r "$II_LIB/iictl-common.sh" ]]; then
+  # shellcheck source=/dev/null
+  source "$II_LIB/iictl-common.sh"
+else
+  C_G=$'\e[32m' C_R=$'\e[31m' C_Y=$'\e[33m' C_B=$'\e[1m' C_0=$'\e[0m'
+  ok()   { echo "  ${C_G}ok${C_0}   $*"; }
+  bad()  { echo "  ${C_R}FAIL${C_0} $*"; }
+  warn() { echo "  ${C_Y}warn${C_0} $*"; }
+  die()  { echo "${C_R}error:${C_0} $*" >&2; exit 1; }
+  RELEASE_FILE=/etc/illogical-impulse/release
+  _not_root() { [[ $EUID -ne 0 ]] || die "run as your user, not root (sudo is used where needed)"; }
+fi
 
-RELEASE_FILE=/etc/illogical-impulse/release
+# Built-in command help — harvested by cmd_help (verb<TAB>one-line). Plugins add
+# their own #help: lines; keep this the only block of them in this file.
+#help: update	update the dots (./setup); --system upgrades repos+AUR first
+#help: doctor	health checks (venv, greetd, boot, pacman)
+#help: venv	rebuild the Quickshell python venv
+#help: welcome	show the distro welcome card (--auto: first-boot logic)
+#help: version	distro build + dots commit
+#help: help	show this help
+
+IICTL_D="$II_LIB/iictl.d"
 DOTS_REPO=https://github.com/end-4/dots-hyprland
 DOTS_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/iictl/dots-hyprland"
 VENV="${XDG_STATE_HOME:-$HOME/.local/state}/quickshell/.venv"
@@ -28,7 +46,31 @@ UP_MARKER="${XDG_STATE_HOME:-$HOME/.local/state}/quickshell/user/first_run.txt"
 OUR_MARKER="${XDG_STATE_HOME:-$HOME/.local/state}/illogical-impulse/welcome_shown"
 WELCOME_QML=/usr/share/illogical-impulse/welcome
 
-_not_root() { [[ $EUID -ne 0 ]] || die "run as your user, not root (sudo is used where needed)"; }
+# Print "verb<sep>desc" lines (sep = tab or spaces) as an aligned two-column list.
+_help_render() {
+  local verb desc
+  while IFS=$' \t' read -r verb desc; do
+    [[ -n "$verb" ]] || continue
+    printf '  %s%-10s%s %s\n' "$C_B" "$verb" "$C_0" "$desc"
+  done
+}
+
+cmd_help() {
+  echo "${C_B}iictl${C_0} — Illogical Impulse distro CLI"
+  echo
+  echo "built-in commands:"
+  grep -E '^#help:[[:space:]]' "$0" 2>/dev/null | sed -E 's/^#help:[[:space:]]*//' | _help_render
+  # Plugins: harvest the first #help: line of each executable drop-in. No
+  # hard-coded list — drop a file in, it appears here; delete it, it's gone.
+  local p hl shown=0
+  for p in "$IICTL_D"/*; do
+    [[ -f "$p" && -x "$p" ]] || continue
+    hl=$(grep -m1 -E '^#help:[[:space:]]' "$p" 2>/dev/null) || continue
+    [[ -n "$hl" ]] || continue
+    if (( shown == 0 )); then echo; echo "plugins:"; shown=1; fi
+    printf '%s\n' "$hl" | sed -E 's/^#help:[[:space:]]*//' | _help_render
+  done
+}
 
 cmd_version() {
   if [[ -f "$RELEASE_FILE" ]]; then
@@ -146,8 +188,16 @@ case "${1:-help}" in
   venv)     shift; cmd_venv    "$@" ;;
   doctor)   shift; cmd_doctor  "$@" ;;
   welcome)  shift; cmd_welcome "$@" ;;
-  help|--help|-h)
-    sed -n '3,13p' "$0" | sed 's/^# \{0,1\}//'
+  help|--help|-h) cmd_help ;;
+  *)
+    # Plugin resolver: any unknown verb maps to an executable drop-in. The
+    # plugin sources iictl-common.sh itself (so it gets colors/helpers/ledger).
+    plugin="$IICTL_D/$1"
+    if [[ -x "$plugin" ]]; then
+      shift
+      exec "$plugin" "$@"
+    else
+      die "unknown command: $1 (try: iictl help)"
+    fi
     ;;
-  *) die "unknown command: $1 (try: iictl help)" ;;
 esac
