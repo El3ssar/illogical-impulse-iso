@@ -327,6 +327,15 @@ ED="$BUILD/efiboot/loader/entries"
 [[ -d "$ED" ]] && _v_ok "$(find "$ED" -maxdepth 1 -type f | wc -l) entries" \
                || _v_fail "efiboot/loader/entries/ missing"
 
+step "dev-tooling hygiene"
+# `just nspawn` (#31) caches a root-owned, multi-hundred-MB base rootfs under
+# .nspawn-cache/ — committing it is the bug-class this guards. Static, repo-level.
+if grep -qxF '.nspawn-cache/' "$ROOT/.gitignore" 2>/dev/null; then
+  _v_ok ".nspawn-cache/ is git-ignored (just nspawn base stays out of git)"
+else
+  _v_fail ".nspawn-cache/ not in .gitignore — the just nspawn base rootfs could be committed"
+fi
+
 step "runtime + chroot scripts syntax"
 for sc in "$AIROOTFS/usr/local/bin/"ii-session \
           "$AIROOTFS/usr/local/bin/"ii-launch-installer \
