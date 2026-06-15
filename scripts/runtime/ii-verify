@@ -6,6 +6,11 @@
 #
 # On all-pass, this also wipes ISO-only helpers from /usr/local/bin so the
 # installed system carries no ISO-builder scripts beyond what's strictly needed.
+# The lib purge is by NAMED FILE, never `rm -rf /usr/local/lib/ii`: that dir is
+# a survive-path for the iictl framework — iictl.d/ (drop-in subcommands) and
+# ledger.sh (the reversibility manifest) must persist onto the installed system
+# (PROPOSAL §4 Pillar 0). Only ISO-only helpers (session-offline.sh, the wheels
+# dir) are removed; the dir itself is rmdir'd only when it is left empty.
 
 set -u
 LOG=/var/log/ii-verify.log
@@ -167,7 +172,12 @@ if (( ${#FAIL[@]} == 0 )); then
            ii-build-wheelhouse ii-ensure-venv ii-session ii-launch-installer ii-live-welcome; do
     rm -f "/usr/local/bin/$b"
   done
-  rm -rf /usr/local/lib/ii /usr/share/ii-python-wheels
+  # Purge ISO-only lib helpers by NAME — keep iictl.d/ and ledger.sh, which the
+  # installed-system iictl framework depends on (PROPOSAL §4 Pillar 0). Never
+  # blanket-rm the dir: rmdir below removes it only if nothing survives there.
+  rm -f /usr/local/lib/ii/session-offline.sh
+  rm -rf /usr/share/ii-python-wheels
+  rmdir --ignore-fail-on-non-empty /usr/local/lib/ii 2>/dev/null || true
   T "done — installed system is clean (greetd → /usr/bin/start-hyprland directly)"
   exit 0
 else

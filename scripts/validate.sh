@@ -172,9 +172,21 @@ step "distro perks (iictl + welcome card)"
 grep -q 'iictl welcome --auto' "$AIROOTFS/etc/skel/.config/hypr/custom/execs.lua" 2>/dev/null \
   && _v_ok "installed-user skel launches the welcome card" \
   || _v_fail "skel custom/execs.lua missing the welcome launcher"
-grep -q 'iictl' "$AIROOTFS/usr/local/bin/ii-verify" \
+# Strip comment lines first: ii-verify legitimately *documents* the iictl
+# survive-path (iictl.d/ + ledger), so only a reference in real code (e.g.
+# iictl added to the purge loop, or an rm of /usr/local/bin/iictl) is a bug.
+grep -vE '^[[:space:]]*#' "$AIROOTFS/usr/local/bin/ii-verify" | grep -q 'iictl' \
   && _v_fail "ii-verify purges iictl — it must survive installs" \
   || _v_ok "iictl survives the post-install purge"
+# Any *recursive* rm targeting the lib dir (or a survive-subpath like iictl.d/)
+# is the bug — match -r/-R in either flag order and a trailing slash/subpath,
+# not just the one historical line. The named-file `rm -f .../session-offline.sh`
+# (no -r) and the `rmdir` cleanup are deliberately allowed. Comments stripped so
+# ii-verify can still *document* the rule without tripping it.
+grep -vE '^[[:space:]]*#' "$AIROOTFS/usr/local/bin/ii-verify" \
+  | grep -Eq 'rm[[:space:]]+-[a-zA-Z]*[rR][a-zA-Z]*[[:space:]]+/usr/local/lib/ii' \
+  && _v_fail "ii-verify recursively removes /usr/local/lib/ii — iictl.d/ + ledger must survive" \
+  || _v_ok "ii-verify preserves /usr/local/lib/ii (iictl.d/ + ledger survive)"
 grep -Eq '^\s*git\s*$' "$PKGLIST" \
   && _v_ok "git baked (paru + iictl update need it)" \
   || _v_fail "git missing from packages.x86_64"
