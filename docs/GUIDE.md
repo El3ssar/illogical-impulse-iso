@@ -235,12 +235,19 @@ just vm                 # boot the ISO in QEMU
 just vm --disk          # + attach a 40G test disk → run a full install
 just vm --installed     # boot the installed test system (no ISO)
 just vm --fresh-disk    # wipe the test disk for a clean install run
+just preview [app]      # live-preview a standalone Quickshell app (no build)
 just update             # bump the dots submodule (--check = policy dry-run)
 ```
 
 Iteration costs: package-list or skel changes need a full `just build`
 (~20–40 min, AUR cache warm). Pure Calamares/branding config changes too —
-everything rides inside the squashfs.
+everything rides inside the squashfs. **But you rarely need a full build to
+test a change:** `just preview <app>` opens a standalone Quickshell app
+(welcome card, Control Center, app-dashboard, widgets) live from the source
+tree and hot-reloads on save — no build, no install. CLI/script behaviour
+(iictl, ledger, packs) is tested in a throwaway container (`just nspawn`,
+planned). Reserve the full `just build` + `just vm` boot for changes that
+actually touch the session, install flow, bootloader, or package set.
 
 ## 9. On the installed system: iictl
 

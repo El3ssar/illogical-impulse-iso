@@ -39,6 +39,10 @@ vm *args:
 smoke *args:
     ./scripts/smoke.sh {{args}}
 
+# live-preview a standalone Quickshell app (no build); `just preview` lists them
+preview app="":
+    ./scripts/preview.sh {{app}}
+
 # remove build/
 clean:
     ./scripts/clean.sh
