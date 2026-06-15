@@ -84,6 +84,78 @@ upstream/illogical-impulse   the dots — read-only submodule
    fetches `$Server/$filename`. Filter `.sig` files out of `repo-add`.
 7. Runtime/installed artifacts use the `ii-`/`ii_` prefix.
 
+### Seam classes (what may be written, and how it reverts)
+
+Every distro addition targets one upstream-guaranteed seam; the reversibility
+of the whole distro rests on respecting their classes. Full table in
+[PROPOSAL.md](PROPOSAL.md) §3 — the classes, condensed:
+
+- **`install_dir__ignore_existing`** — the empty `~/.config/hypr/custom/*.lua`
+  slots (upstream ships 1-byte stubs and never overwrites). Writes here MUST be
+  **sentinel-fenced** (`-- >>> illogical-impulse <name>` / `-- <<< …`) so a
+  revert can strip exactly our block.
+- **unowned** — `~/.bashrc`, `~/.config/nvim`, `~/.config/{git,btop,bat,…}`,
+  `~/Projects` (upstream ships nothing → no collision). Themed tool configs,
+  dev defaults, scaffolds.
+- **excluded from upstream sync** — `~/.config/fish/conf.d/ii-*.fish`
+  (`30-skel.sh` `--exclude=conf.d`); fish auto-loads it, ours are the only files.
+- **`install_dir__sync` (`rsync --delete`)** ⚠️ — `~/.config/quickshell/ii`,
+  `~/.config/matugen`, `~/.config/fish/config.fish`, `~/.config/zshrc.d`,
+  `~/.config/hypr/hyprland`, `starship.toml`, `hyprlock.conf`. Anything we add
+  here is **wiped on `iictl update`** → **READ-ONLY**: observe/source, never write.
+- **upstream-owned runtime STATE** ⚠️ — `~/.config/illogical-impulse/config.json`
+  (the rice's settings file, rewritten at runtime by `switchwall.sh` /
+  `applycolor.sh` / the config UI) and the derived theming outputs
+  `~/.local/state/quickshell/user/generated/{colors.json,sequences.txt,material_colors.scss}`
+  are **owned/written by the rice at runtime**. Note the *directory*
+  `~/.config/illogical-impulse/` is itself an unowned seam (safe for OTHER
+  files — see the unowned row above); `config.json` *specifically* is runtime
+  STATE. This is *distinct* from the `rsync --delete` *config* dirs above: those
+  are source config we must not add to; these are runtime STATE we must not seed.
+  **Never pre-seed them in skel** (a static `kitty-theme.conf` fallback is the
+  one sanctioned exception, and even it carries no placeholders — see
+  §"Historic bugs" in CLAUDE.md).
+  Theming features observe via `FileView` read-only and only call upstream
+  public entry points (`switchwall.sh`, `qs ipc`), recording the prior value in
+  the ledger so a revert restores it.
+- **reserved, NOT baked** — `packages/optional/*.list`: curated packs consumed
+  post-install by `iictl pack` from the on-ISO flat-repo stash (never baked into
+  the squashfs).
+- **survives install** — `/usr/local/bin/iictl` (named-exempt from the
+  `ii-verify` purge): the post-install config surface for every feature.
+
+### The bake / stash / fetch budget governor (HARD gate)
+
+The ISO is already ~5.8 GB — over GitHub's **2 GiB** release-asset cap (it ships
+via SourceForge), so every "just bake it" decision compounds the distribution
+problem. Three tiers govern where a payload lands:
+
+- **BAKED** — in the squashfs, always installed. *Only small + universal*
+  things (`packages/goodies.list`, `packages/base.list`): the dev baseline
+  (gh / git-delta / direnv / just / mise), distrobox, emoji font, the
+  cups/bluez/sane stack, themed shell+tool configs (config text is KB), the
+  Control Center + welcome QML, `iictl.d` + ledger. Net add: a few hundred MB.
+- **STASHED** — downloaded into an on-ISO flat repo and installed **offline**
+  post-install via `iictl pack`. Heavy/opinionated dev stacks (language
+  runtimes, gaming, virt, security, AUR shells/tools, nvim plugin trees). Built
+  by mirroring the **NVIDIA-stash mechanism** (`pacman -Sw` closure + flat
+  `repo-add`, `SigLevel=Optional TrustAll`); only the few-KB manifest rides in
+  the squashfs. `[ii-extra]` is build-host-only and does **not** survive
+  install, so the on-ISO stash is the only offline-capable post-install path.
+- **FETCHED-ONLINE** — pulled at iictl-time over the network. Bulky long tail
+  (wallpaper packs, LSP servers, VS Code extensions, AI models, DaVinci/waydroid).
+
+Rule of thumb: anything **> ~150 MB installed footprint** that isn't universal
+goes STASHED or FETCHED, never BAKED. `validate.sh` enforces a **soft** version
+of this in the `step "bake/stash/fetch budget governor"` section: it **WARNs
+(non-fatal)** when a heavy/non-universal package appears in `goodies.list`,
+keyed off an allowlist of the sanctioned flagships plus a heavy-name heuristic.
+The WARN never fails the build (legitimate flagship bakes still pass) — it
+surfaces *new* heavy additions so the author confirms the tier. The discipline
+is what lets the distro be genuinely *batteries-included* while staying
+distributable: universal batteries baked, every heavy choice one reversible
+command away.
+
 ## 4. Pipeline contracts
 
 `just build [profile]` = `prepare [profile]` → `prebuild` → `mkiso`.

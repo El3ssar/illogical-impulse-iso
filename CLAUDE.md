@@ -119,10 +119,12 @@ build/ out/                    # generated
 | Want to… | File |
 |---|---|
 | Rename/rebrand the distro, change version scheme, repo name | `distro.toml` |
-| Always-installed package | `packages/goodies.list` (or `base.list` if infra) |
+| Always-installed package (small + universal only) | `packages/goodies.list` (or `base.list` if infra) — heavy/non-universal bakes get a budget WARN |
+| Offer a heavy/opinionated package (offline, post-install) | `packages/optional/<pack>.list` (consumed by `iictl pack` from the on-ISO stash) |
 | NVIDIA driver variants | `packages/nvidia.list` (auto-detected at install) |
 | Personal package/dotfile | `profiles/<you>/{packages.list,skel/}` |
 | Override an installed-user dotfile (distro-wide) | `overlay/skel-distro/<path>` |
+| Vendor a pinned third-party tree distro-wide | `overlay/skel-distro.fetch` (`<dest> <git-url> <rev>`, distro-owned paths only) |
 | Live-session-only file | `overlay/skel-live/<path>` |
 | System file (greetd, systemd drop-in, passwd, motd…) | `overlay/airootfs/<path>` |
 | Live boot menu | `overlay/efiboot/loader/` |
@@ -130,6 +132,7 @@ build/ out/                    # generated
 | Live session entry | `scripts/runtime/ii-session` |
 | ISO-build chroot logic | `scripts/chroot.sh` |
 | Post-install / bootloader / verify logic | `scripts/runtime/ii-*` |
+| Add an iictl subcommand (drop-in) | `scripts/runtime/iictl.d/<cmd>` → staged to `/usr/local/lib/ii/iictl.d/` |
 | Pipeline step | `scripts/prepare.d/NN-*.sh` |
 | Default wallpaper / wordmark | `overlay/assets/` (then `just assets`) |
 
