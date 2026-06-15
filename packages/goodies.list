@@ -49,6 +49,29 @@ docker-compose
 podman
 claude-code
 
+# Dev baseline (small, universal — see PROPOSAL §7)
+# NOT here: jq, yq, ttf-jetbrains-mono-nerd — they already arrive as upstream
+# PKGBUILD depends (jq + go-yq from illogical-impulse-basic, the Nerd Font from
+# illogical-impulse-fonts-themes), so baking them is a redundant double-bake.
+github-cli
+git-delta
+direnv
+just
+mise
+distrobox
+
+# Fonts — broaden emoji glyph coverage beyond upstream's ttf-twemoji
+noto-fonts-emoji
+
+# Printing / scanning / bluetooth (bluetooth.service is already enabled by
+# ii-post-install; bluez-utils just adds the codecs + CLI). cups is socket-
+# activated, so ii-post-install links cups.socket into sockets.target.wants.
+cups
+cups-pdf
+bluez-utils
+sane
+simple-scan
+
 # System
 snapper
 snap-pac

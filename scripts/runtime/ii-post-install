@@ -116,6 +116,12 @@ if [[ -e /usr/lib/systemd/system/docker.socket ]]; then
   [[ -n "$NEW_USER" ]] && getent group docker >/dev/null \
     && try "docker group" usermod -aG docker "$NEW_USER"
 fi
+
+# ── cups (baked): socket activation for printing ──────────────────────────
+if [[ -e /usr/lib/systemd/system/cups.socket ]]; then
+  install -d /etc/systemd/system/sockets.target.wants
+  ln -sf /usr/lib/systemd/system/cups.socket /etc/systemd/system/sockets.target.wants/cups.socket
+fi
 if [[ -n "$NEW_USER" ]]; then
   H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
   if [[ -n "$H" && -d "$H" ]]; then

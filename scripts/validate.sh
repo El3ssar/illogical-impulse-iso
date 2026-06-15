@@ -177,15 +177,22 @@ fi
 step "batteries + nvidia auto-detect"
 # No selection screen: defaults are baked. Spot-check that the flagship
 # goodies actually made it into packages.x86_64.
-for p in brave-bin vlc linux-lts onlyoffice-bin neovim docker snapper flatpak; do
+for p in brave-bin vlc linux-lts onlyoffice-bin neovim docker snapper flatpak \
+         github-cli git-delta direnv just mise distrobox noto-fonts-emoji \
+         cups cups-pdf bluez-utils sane simple-scan; do
   grep -Eq "^\s*${p}\s*$" "$PKGLIST" && _v_ok "baked: $p" || _v_fail "goodie missing from packages.x86_64: $p"
 done
+# jq / go-yq / ttf-jetbrains-mono-nerd are upstream PKGBUILD depends (scraped
+# into packages.x86_64 by resolve-deps.py), NOT goodies.list lines. Asserting
+# them here would test the wrong layer, so they are deliberately omitted.
 grep -Eq '^\s*mpv\s*$' "$PKGLIST" && _v_fail "mpv crept in (vlc is the shipped player)" || _v_ok "no mpv"
 [[ -s "$AIROOTFS/root/nvidia-official.txt" ]] \
   && _v_ok "nvidia stash manifest staged ($(grep -c . "$AIROOTFS/root/nvidia-official.txt") official + $(grep -c . "$AIROOTFS/root/nvidia-aur.txt" 2>/dev/null || echo 0) AUR)" \
   || _v_warn "no nvidia manifest — NVIDIA machines fall back to nouveau"
 grep -q 'NVSTASH' "$AIROOTFS/usr/local/bin/ii-post-install" \
   && _v_ok "ii-post-install has nvidia auto-detect" || _v_fail "ii-post-install missing nvidia block"
+grep -q 'cups.socket' "$AIROOTFS/usr/local/bin/ii-post-install" \
+  && _v_ok "ii-post-install enables cups.socket" || _v_fail "ii-post-install missing cups.socket enable"
 
 step "distro perks (iictl + welcome card)"
 grep -q 'iictl welcome --auto' "$AIROOTFS/etc/skel/.config/hypr/custom/execs.lua" 2>/dev/null \
