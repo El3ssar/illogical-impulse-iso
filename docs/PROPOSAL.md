@@ -54,7 +54,7 @@ Every proposal targets one of these upstream-guaranteed seams. The reversibility
 | `~/.config/nvim`, `~/.bashrc`, `~/.config/git`, `~/.config/{btop,bat,fastfetch,zellij,…}`, `~/.config/illogical-impulse/`, `~/.config/illogical-impulse-theming/`, `~/Projects` | **unowned** (upstream ships nothing) | no collision possible | baked dev defaults, themed tool configs, nvim, scaffolds |
 | `~/.config/fish/conf.d/ii-*.fish` | **excluded from upstream sync** (`30-skel.sh` `--exclude=conf.d`) | fish auto-loads it; ours are the only files there | fish tool/theming enrichment |
 | `~/.config/quickshell/ii/**`, `~/.config/matugen/**`, `~/.config/fish/config.fish`, `~/.config/zshrc.d/**`, `~/.config/hypr/hyprland/**`, `~/.config/fontconfig/**`, `~/.config/starship.toml`, `hyprlock.conf` | **`install_dir__sync` (`rsync --delete`)** ⚠️ | **anything we add here is wiped on `iictl update`** | **READ-ONLY** — observe via `FileView`, source read-only, never write |
-| `config.json`, `~/.local/state/quickshell/user/generated/{colors.json,sequences.txt,material_colors.scss}` | **upstream-owned runtime STATE** ⚠️ | generated/owned by the rice | **READ-ONLY** — `FileView`-watch for theming; never seed defaults; record prior value in ledger for revert |
+| `config.json`, `~/.local/state/quickshell/user/generated/colors.json`, `…/generated/terminal/sequences.txt`, `…/generated/material_colors.scss` | **upstream-owned runtime STATE** ⚠️ | generated/owned by the rice | **READ-ONLY** — `FileView`-watch for theming; never seed defaults; record prior value in ledger for revert |
 | `packages/optional/*.list` | **reserved, NOT baked** (`40-packages.sh`) | designed-for | offered packs |
 | `iictl` (`/usr/local/bin/iictl`) | **survives install** (named-exempt from purge) | the post-install config surface | every user-selectable feature |
 
@@ -208,7 +208,7 @@ A single `ledger.sh`-adjacent helper providing **idempotent**, **reversible**, *
 
 | Proposal | What | Delivery | Additive mechanism | Packages | Effort | Priority |
 |---|---|---|---|---|---|---|
-| Thin dev baseline | small, official-only, universal CLIs | baked | `# dev baseline` block in `goodies.list` | gh, git-delta, direnv, just, jq, yq, **mise** | S | must |
+| Thin dev baseline | small, official-only, universal CLIs | baked | `# dev baseline` block in `goodies.list` | gh, git-delta, direnv, just, **mise** *(not `jq`/`yq` — upstream PKGBUILD `illogical-impulse-basic` already pulls `jq` + `go-yq`)* | S | must |
 | Language packs via mise | `lang-*.list` mix plain pkgs (pacman) + `mise:` directive lines (`mise use -g`); runtimes opt-in | optional-pack | framework pack engine handles both line syntaxes; mise writes user-owned `~/.config/mise` | go, nodejs, pnpm, bun, deno, ruby, zig, jdk-openjdk… | M | must |
 | Containers pack | docker/podman/compose stay baked; `containers.list` adds lazydocker/ctop/dive/k9s/kubectl/helm/kind; `--rootless` flag | optional-pack | pack engine; `--rootless` writes user systemd units | + kind (AUR), devcontainer | M | should |
 | Baked delta config + dev-cli pack | reversible git `[include]`; `dev-cli.list` = difftastic/gitui/hyperfine/tokei/sd/dust/procs/bottom/xh/httpie/mkcert/pre-commit | mixed | `overlay/skel-distro/.config/git/ii-delta.gitconfig` (unowned) + `[include]`; pack for the rest | git-delta, bat | S | should |
@@ -228,23 +228,22 @@ A single `ledger.sh`-adjacent helper providing **idempotent**, **reversible**, *
 
 **Narrative.** The welcome card proves the one safe pattern. We generalize it into a *single* widget framework: a shared QML lib (`Theme.qml` `FileView`-watching `generated/colors.json`; `Panel.qml` a `WlrLayershell` base) under `/usr/share/illogical-impulse/widgets/_lib/`, each widget a standalone `qs -p` config, toggled by `iictl widget`. Because Quickshell is reactive GPU QML, these are categorically fancier than Omarchy's Waybar+rofi+swaync.
 
-> **Audit-driven scope cut (major):** the proposals collectively introduced ~12 standalone Quickshell apps. **Consolidate.** v1 ships: the **widget framework** (`_lib` + `iictl widget`), **pomodoro** (tiny, idle until started), and the **command-palette `actions/` scripts** (the most surgical seam — upstream's `LauncherSearch.qml` auto-loads `~/.config/illogical-impulse/actions/*.sh` via `FolderListModel`). Everything else (**devdash, sysmon, scratchpad, clipboard, colorpicker, ticker**) is **offered** behind `iictl widget enable`, deferred past v1, and folded into the *same* framework registry — not N independent configs.
+> **Audit-driven scope cut (major) — upstream already ships most "widgets"; we rebuild NONE of them:** the rice already provides **pomodoro + stopwatch** (`services/TimerService.qml` + `modules/ii/sidebarRight/pomodoro/`), a **scratchpad/notes overlay** (`modules/ii/overlay/notes/NotesContent.qml`), a **todo list** (`sidebarRight/todo/`), a **clipboard manager** (`services/Cliphist.qml` + the launcher's Clipboard prefix), a **color picker** (`hyprpicker -a` in `bar/UtilButtons.qml` + a `colorPicker` quick-toggle), **media controls** (`modules/ii/mediaControls/`), a **resources display** (`bar/ResourcesPopup.qml` + `services/ResourceUsage.qml`), and a full **command palette** (`overview/SearchBar.qml` prefixes: Action/App/Clipboard/Emojis/Math/ShellCommand/WebSearch). What's genuinely *missing* is a reusable framework substrate and a **developer** surface. So v1 ships only: the **widget framework** (`_lib` + `iictl widget`), a baked **dev-dashboard** (git/containers/CI cards — the one widget class upstream lacks), and curated **`actions/*.sh`** that upstream's `LauncherSearch.qml` already auto-loads from `~/.config/illogical-impulse/actions/` via `FolderListModel` (the most surgical seam — it *adds* distro/dev verbs to the existing palette, it does not rebuild it). The only offered extras are a **GPU-stats augmentation** of the existing resources view and **opt-in mpvpaper video wallpaper** — all on the same registry.
 
 | Proposal | What | Delivery | Additive mechanism | Packages | Effort | Priority |
 |---|---|---|---|---|---|---|
 | Widget framework | `_lib/{Theme,Panel}.qml`; `iictl widget enable\|disable\|toggle\|list\|autostart`; markers under `~/.local/state/illogical-impulse/widgets/` | baked | `_lib` under widgets dir; `iictl.d/widget`; one **fenced** autostart block in `execs.lua` | quickshell | M | must |
 | Command-palette actions | curated `actions/*.sh` (`/devdash-toggle`, `/update-system`, `/doctor`, `/screenshot-region`…) auto-loaded by upstream launcher | mixed | `overlay/skel-distro/.config/illogical-impulse/actions/` (blessed empty extension dir); never edit `LauncherSearch.qml` | — | S | must |
-| Pomodoro | animated ring, DND via `hyprctl`/`notify-send` (never touch upstream Notifications) | baked | widget dir; state in `~/.local/state/illogical-impulse/` | libnotify | M | should |
-| Dev Dashboard | git/containers/CI/resources cards via Quickshell `Process` | offered | widget dir; `devdash.json` config | github-cli, jq, git, docker | L | should |
-| System-monitor HUD | CPU/GPU/temps; GPU vendor detected at runtime (nvidia-smi/amdgpu sysfs/intel_gpu_top) | offered | widget dir; intel-gpu-tools only when needed | lm_sensors | L | should |
-| Scratchpad / Clipboard UI / Color picker | sticky notes; cliphist front-end; eyedropper + palette grid | offered | widget dirs; cliphist/hyprpicker backends shared | cliphist, hyprpicker, wl-clipboard | M each | could |
-| Ticker / video wallpaper | MPRIS visualizer strip (own namespace + exclusionZone); mpvpaper opt-in | optional-pack | `optional/*.list`; video integrates upstream's existing `__restore_video_wallpaper.sh` seam | mpvpaper, wireguard-tools | M–L | could |
+| Dev-dashboard (v1 reference widget) | git/containers/CI cards via Quickshell `Process` — the one widget class upstream lacks | **baked** | widget dir; `devdash.json` config | github-cli, git, docker | L | should |
+| GPU-stats augmentation | adds GPU/temps to the **existing** resources view (upstream `ResourcesPopup`/`ResourceUsage` already cover CPU/RAM/swap — do not duplicate those) | offered | widget dir; GPU vendor detected at runtime (nvidia-smi/amdgpu sysfs/intel_gpu_top) | lm_sensors | M | could |
+| Video wallpaper | opt-in mpvpaper, feeding upstream's existing `__restore_video_wallpaper.sh` seam | optional-pack | `optional/*.list` | mpvpaper | M | could |
+| ~~Pomodoro / notes / clipboard UI / color picker / now-playing ticker~~ | **DROPPED — all shipped by upstream** (TimerService, overlay/notes, Cliphist, hyprpicker, mediaControls) | — | — | — | — | — |
 
-> **Audit fixes:** (a) **every** `execs.lua`/`keybinds.lua` write is sentinel-fenced (framework). (b) Widget QML lives under the **system `widgets/` dir**, NOT a `~/.config/quickshell/ii-*` sibling — that sits one typo from the `rsync --delete` tree. (c) `Theme.qml` falls back to a **static palette** if `colors.json` is missing/renamed; `validate.sh` asserts the path exists. (d) **Keybind strategy: a `Super+W` leader submap** (claims exactly one bind to stay deconflicted with upstream's evolving `keybinds.lua`) + the zero-collision `actions/` palette as fallback; reserve direct `Super+<key>` only for pomodoro/devdash after auditing upstream binds.
+> **Audit fixes:** (a) **every** `execs.lua`/`keybinds.lua` write is sentinel-fenced (framework). (b) Widget QML lives under the **system `widgets/` dir**, NOT a `~/.config/quickshell/ii-*` sibling — that sits one typo from the `rsync --delete` tree. (c) `Theme.qml` falls back to a **static palette** if `colors.json` is missing/renamed; `validate.sh` asserts the path exists. (d) **Keybind strategy: a `Super+W` leader submap** (claims exactly one bind to stay deconflicted with upstream's evolving `keybinds.lua`) + the zero-collision `actions/` palette as fallback; reserve direct `Super+<key>` only for the dev-dashboard after auditing upstream binds.
 
 **Reversibility guarantees.** Each widget: `iictl widget disable` (kills `qs`, removes the fenced block + marker) or delete the dir. The `actions/` seam reverts by deleting our scripts (upstream's empty dir returns). Nothing imports from `quickshell/ii`; nothing edits an upstream file.
 
-**Decisions:** **bake framework + pomodoro + actions**, offer the rest; theming via **`FileView`-watch `colors.json`** (never edit matugen `config.toml`, never hardcode); **`Super+W` leader**; sysmon bakes only **lm_sensors**, detects GPU at runtime.
+**Decisions:** **bake framework + dev-dashboard + actions** (pomodoro/notes/clipboard/colorpicker/now-playing are already upstream — not rebuilt), offer the GPU-stats augmentation + video wallpaper; theming via **`FileView`-watch `colors.json`** (never edit matugen `config.toml`, never hardcode); **`Super+W` leader**; GPU-stats bakes only **lm_sensors**, detects GPU at runtime.
 
 ---
 
@@ -284,12 +283,12 @@ A single `ledger.sh`-adjacent helper providing **idempotent**, **reversible**, *
 | Color-aware bash | `cat` sequences + eza/bat aliases (shell-domain owned) | baked | shell domain's `~/.bashrc` | — | S | must |
 | Polished zellij | `config.kdl` + dev `layouts/ii.kdl`, themed via the recolor pipeline | baked | `overlay/skel-distro/.config/zellij/` (unowned) | zellij | M | must |
 | Themed fastfetch/btop/bat/onefetch | branded + Material You | baked | unowned config dirs (shared with theming domain — **single owner: theming**) | onefetch (+ baked tools) | M | must |
-| Extra-terminal recolor | `ii-theme-extras.sh` renders ghostty/wezterm/alacritty/zellij/btop/bat themes from `material_colors.scss`; consumes theming's hook | baked | standalone script in `custom/scripts/`; one **fenced** `execs.lua` line; **hybrid** static + on-demand re-render | jq, matugen | L | must |
+| ~~Extra-terminal recolor~~ | **DROPPED — upstream already recolors every emulator**: `scripts/colors/applycolor.sh` `apply_anyterm()` broadcasts OSC color escapes to all open PTYs on each theme change, and the shells `cat` `generated/terminal/sequences.txt` at startup. Any emulator inherits Material You for free; a per-emulator renderer is redundant. (Only emulators upstream ships *static* config for differ; ghostty/wezterm still get live OSC.) | — | — | — | — | n/a |
 | `iictl tui` chooser | `term <kitty\|ghostty\|wezterm\|alacritty\|foot>` / `mux <zellij\|tmux\|none>` + Quickshell QML card | offered | `iictl.d/tui`; writes the fallback-list `terminal=` line in `custom/variables.lua` | ghostty, wezterm, alacritty, tmux | L | should |
 | tmux + tpm vendoring | distro `skel-distro.fetch` pins tpm; themed `.tmux.conf` | optional-pack | framework Pillar 2 | tmux | M | could |
 | dev-TUI pack | lazygit theme + zoxide/atuin/lazydocker | optional-pack | `optional/devtui.list`; inits in shell-domain files | zoxide, atuin, lazydocker | M | could |
 
-**Reversibility guarantees.** Delete `ii-theme-extras.sh` + the fenced `execs.lua` line → upstream's kitty+sequences theming untouched, extra terminals fall back to static themes (or vanilla). The default-terminal change is one override file; delete it → upstream `launch_first_available` chain returns. Uninstalling an emulator degrades via the fallback list.
+**Reversibility guarantees.** The recolor is upstream's, so there is nothing of ours to revert there. The zellij config is an unowned-path file (delete it → vanilla). The default-terminal change is one override file writing a fallback list (chosen term first); delete it → upstream `launch_first_available` chain returns. Uninstalling an emulator degrades via the fallback list.
 
 **Decisions:** default emulator = **kitty** as explicit distro default (only baked dep, richest upstream config) via the override; multiplexer = **config-only by default**, auto-start offered via `iictl tui mux zellij`; recolor = **hybrid** (static baked + on-demand re-render + opt-in watch); chooser = **QML card + CLI**, skip Calamares.
 
@@ -378,7 +377,7 @@ All ride the framework's `iictl pack` engine + shared mutator library. Small uni
 
 | Proposal | What | Delivery | Additive mechanism | Packages | Effort | Priority |
 |---|---|---|---|---|---|---|
-| Bake small universals | one nerd font + emoji, bluetooth codecs, printing/scanning | baked | `goodies.list` lines; `cups.socket` added to `ii-post-install`'s existing service loop | ttf-jetbrains-mono-nerd, noto-fonts-emoji, bluez-utils, cups, cups-pdf, sane, simple-scan | S | must |
+| Bake small universals | emoji font, bluetooth codecs, printing/scanning | baked | `goodies.list` lines; `cups.socket` added to `ii-post-install`'s existing service loop | noto-fonts-emoji, bluez-utils, cups, cups-pdf, sane, simple-scan *(NOT `ttf-jetbrains-mono-nerd` — upstream `illogical-impulse-fonts-themes` already pulls it)* | S | must |
 | Bake distrobox | (also in §7) | baked | `goodies.list` | distrobox | S | must |
 | Gaming pack | steam/lutris/heroic/gamemode/mangohud/gamescope/proton-ge; game-mode toggle (standalone Quickshell, **fenced** execs line added only when installed) | optional-pack | `gaming.list` + `gaming.d/post-add` | steam, lutris, gamemode, lib32-*, … | M | should |
 | Creative pack | kdenlive/audacity/blender/darktable/krita/handbrake + codecs; DaVinci behind `--with-davinci` | optional-pack | `creative.list` | … + davinci-resolve (AUR) | S | should |
@@ -409,7 +408,7 @@ Concrete, repo-level, ordered. **The framework and the Control Center anchor eve
 6. Add `overlay/skel-distro.fetch` + the ~15-line loop in `30-skel.sh` (before the profile layer).
 7. `validate.sh` + `tools/lint-additive.sh`: skel-shadow check (allowlist `custom/*.lua`), fence check, plugin lint, optional-list↔stash check, no-PII check, ii-verify survival check; **hard-fail if `skel-upstream` is missing/sparse**. Wire the skel-shadow check into `update.sh --check`.
 8. Fix the stale `40-packages.sh` Calamares comment.
-9. **Quick wins (small, universal, baked):** `# dev baseline` block in `goodies.list` (gh, git-delta, direnv, just, jq, yq, mise) + distrobox + one nerd font + emoji + cups/bluez stack (+ `cups.socket` in the post-install loop); themed bash (`~/.bashrc`); shell completions + grouped `iictl help`.
+9. **Quick wins (small, universal, baked):** `# dev baseline` block in `goodies.list` (gh, git-delta, direnv, just, mise — **not** jq/yq/jetbrains-nerd, already upstream PKGBUILD depends) + distrobox + emoji font + cups/bluez stack (+ `cups.socket` in the post-install loop); themed bash (`~/.bashrc`); shell completions + grouped `iictl help`.
 10. Document the bake/stash/fetch tiers + the upstream-owned-STATE seam class in BLUEPRINT; update CLAUDE.md §5 "Where to edit."
 
 ### Phase B — The centerpiece + shell/theme/editor cores
@@ -421,13 +420,13 @@ Concrete, repo-level, ordered. **The framework and the Control Center anchor eve
 
 ### Phase C — Dev breadth + widgets + parity glue
 16. Language/container/dev-cli/AI packs (`lang-*`, `containers`, `dev-cli`, `ai-dev`); `iictl pack` paru-presence check + offline-stash-first.
-17. Widget framework (`_lib` + `iictl.d/widget`) + pomodoro + `actions/*.sh` palette; `Super+W` leader.
+17. Widget framework (`_lib` + `iictl.d/widget`) + **dev-dashboard** + `actions/*.sh` palette; `Super+W` leader. (No pomodoro/notes/clipboard/colorpicker widgets — upstream ships those.)
 18. `iictl webapp` (Brave `--app`, accent rules); `iictl install` group picker + gaming pack.
 19. Onboarding folded into the welcome card; `iictl git-identity`/`keys`/`new` + baked dev defaults; `~/Projects` + templates.
-20. Terminal/TUI: zellij config, `ii-theme-extras.sh` (consumes theming hook), `iictl tui` chooser writing the fallback-list `terminal=`.
+20. Terminal/TUI: zellij config + dev layout, `iictl tui` chooser writing the fallback-list `terminal=`. (No per-emulator recolor — upstream's `applycolor.sh` already themes every emulator via OSC broadcast.)
 
 ### Phase D — Later / polish / showcase
-21. Remaining offered widgets (devdash, sysmon, scratchpad, clipboard, colorpicker, ticker) behind `iictl widget enable`.
+21. Remaining offered extras (GPU-stats augmentation, video wallpaper) behind `iictl widget enable`. (dev-dashboard is now baked in Phase C; scratchpad/clipboard/colorpicker/ticker are dropped as upstream-provided.)
 22. Optional packs: creative, laptop, security, virt, backup (+ snapshot boot entry), flatpak curation; GTK/icon/cursor coherence; Material You bridges (nvim/IDE/extra-terminals).
 23. Update channels + migrations (pin bump wired into `just update`); `iictl docs` + auto-generated man pages; QML theme/tui/devpacks pickers; Plymouth opt-in.
 24. **New domains the audits flagged as missing** (§16 additions): data-science pack, security-hardening posture, accessibility variants, audio/screencast tooling, `iictl config export/import`.
@@ -456,7 +455,7 @@ Deduped across all domains. **★ = pivotal** — these six become the user quiz
 | Material You for widgets/tools | `FileView`-watch `colors.json` / edit matugen `config.toml` / hardcode | **`FileView`-watch `colors.json`** (read-only, reactive, zero coupling). Never edit matugen config. |
 | Live recolor vs on-demand | live watcher / on-demand / hybrid | **Hybrid:** static baked + on-demand + **opt-in** debounced watcher reading finished `colors.json`. |
 | Widget keybind strategy | per-key / `Super+W` leader / palette-only | **`Super+W` leader submap + `actions/` palette fallback.** |
-| Widgets baked vs offered | framework+pomodoro+actions / + devdash+sysmon / framework only | **Framework + pomodoro + actions baked; rest offered.** |
+| Widgets baked vs offered | framework+dev-dashboard+actions / + GPU-stats / framework only | **Framework + dev-dashboard + actions baked; rest offered. Pomodoro/notes/clipboard/colorpicker/now-playing NOT built — upstream ships them.** |
 | Onboarding surface | fold into welcome card / separate auto-launch app | **Fold into welcome card** (one first-run surface, skippable). |
 | Plymouth | opt-in via iictl (both presets) / don't offer / experimental | **Opt-in with guaranteed disable + both-preset regen**, never baked. |
 | Gaming multilib | auto-enable+revert / install lib32 against enabled / no touch | **Install `lib32-*` against already-enabled multilib** (drop the toggle). |
@@ -490,7 +489,7 @@ Deduped across all domains. **★ = pivotal** — these six become the user quiz
 - The reversibility lint must hard-fail when `skel-upstream` is sparse (else it silently passes).
 
 **Upstream coupling (degrade gracefully)**
-- Generated-file paths (`colors.json`, `sequences.txt`, `material_colors.scss`) and IPC verb names are upstream-internal — every consumer needs a static fallback + a `doctor`/`just update --check` watch on the path.
+- Generated-file paths (`generated/colors.json`, `generated/terminal/sequences.txt`, `generated/material_colors.scss`) and IPC verb names are upstream-internal — every consumer needs a static fallback + a `doctor`/`just update --check` watch on the path.
 - A future upstream that starts shipping `.zshrc`/`.bashrc`/`config.json` defaults could collide — the skel-shadow lint at submodule-bump time is the guard.
 - The live recolor watcher risks the documented `applycolor.sh` race → opt-in, debounced, reads finished output.
 
@@ -508,7 +507,7 @@ Deduped across all domains. **★ = pivotal** — these six become the user quiz
 
 The image is already ~5.8 GB — over GitHub's 2 GiB release-asset cap (it ships via SourceForge). This single fact governs every "bake" decision and is why **Pillar 7 is a hard gate, not advice**:
 
-- **BAKE** only small + universal: the dev baseline (gh/git-delta/direnv/just/jq/yq/mise), distrobox, one nerd font + emoji, cups/bluez/sane stack, themed shell/tool configs (config text is KB), the Control Center + welcome QML, `iictl.d` + ledger. Total net add should be a few hundred MB at most.
+- **BAKE** only small + universal: the dev baseline (gh/git-delta/direnv/just/mise — *not* jq/yq/jetbrains-nerd, already upstream PKGBUILD depends), distrobox, emoji font, cups/bluez/sane stack, themed shell/tool configs (config text is KB), the Control Center + welcome QML, `iictl.d` + ledger. Total net add should be a few hundred MB at most.
 - **STASH** (offline, post-install) every heavy/opinionated stack: language runtimes, gaming, virt, security, databases, AUR shells/tools, nvim plugin trees + lockfiles. Only the few-KB manifest text rides in the squashfs; the closure is a flat repo consumed once, then optionally deleted to reclaim disk.
 - **FETCH-ONLINE** the bulky long tail: wallpaper packs, LSP servers, VS Code extensions, AI models, DaVinci/waydroid.
 - **De-dup** shared dependencies across per-pack stashes (or use one combined optional stash) to avoid runaway growth; `validate.sh` warns when a STASHED pack's closure exceeds budget or a heavy/non-universal package lands in `goodies.list`.
