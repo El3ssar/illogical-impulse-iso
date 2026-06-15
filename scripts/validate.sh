@@ -267,6 +267,46 @@ grep -qE '^\s*- (netinstall|packages)\s*(#.*)?$' "$SETTINGS" \
   && _v_fail "settings.conf still references the removed selection flow" \
   || _v_ok "settings.conf has no selection-screen leftovers"
 
+step "iictl.d/ plugin architecture"
+# Bug-class guarded here: a silently-broken drop-in (no shebang, not +x, syntax
+# error, or no #help: line) loads as a no-op or breaks `iictl help`. Every staged
+# plugin must be a runnable, discoverable executable. Mirrors the runtime-script
+# syntax step. Also asserts the resolver replaced the old blanket `*) die`.
+for _lib in iictl-common.sh ledger.sh; do
+  _L="$AIROOTFS/usr/local/lib/ii/$_lib"
+  if [[ ! -f "$_L" ]]; then
+    _v_fail "iictl lib missing (not staged): $_lib"
+  elif bash -n "$_L" 2>/dev/null; then
+    _v_ok "$_lib staged + bash -n clean"
+  else
+    _v_fail "$_lib syntax error"
+  fi
+done
+# The core must resolve unknown verbs via iictl.d/, not hard-die on all of them.
+grep -q 'IICTL_D/' "$AIROOTFS/usr/local/bin/iictl" \
+  && _v_ok "iictl resolves unknown verbs via iictl.d/ (no blanket die)" \
+  || _v_fail "iictl has no iictl.d/ resolver — drop-in subcommands won't load"
+_IID="$AIROOTFS/usr/local/lib/ii/iictl.d"
+if [[ -d "$_IID" ]]; then
+  _plug_n=0 _plug_bad=0
+  for _p in "$_IID"/*; do
+    [[ -f "$_p" ]] || continue
+    _bn=$(basename "$_p")
+    _plug_n=$((_plug_n+1))
+    [[ -x "$_p" ]] || { _v_fail "iictl.d/$_bn not executable (mkarchiso cp strips mode — chmod at stage)"; _plug_bad=$((_plug_bad+1)); }
+    [[ "$(head -c2 "$_p")" == "#!" ]] || { _v_fail "iictl.d/$_bn has no shebang"; _plug_bad=$((_plug_bad+1)); }
+    bash -n "$_p" 2>/dev/null || { _v_fail "iictl.d/$_bn syntax error"; _plug_bad=$((_plug_bad+1)); }
+    grep -qE '^#help:[[:space:]]' "$_p" || { _v_fail "iictl.d/$_bn missing #help: header (won't show in iictl help)"; _plug_bad=$((_plug_bad+1)); }
+  done
+  if (( _plug_n == 0 )); then
+    _v_warn "no iictl.d/ plugins staged (expected at least the example 'about')"
+  elif (( _plug_bad == 0 )); then
+    _v_ok "$_plug_n iictl.d/ plugin(s): exec + shebang + bash -n + #help:"
+  fi
+else
+  _v_fail "iictl.d/ plugin dir not staged under usr/local/lib/ii/"
+fi
+
 step "live mkinitcpio"
 MK="$AIROOTFS/etc/mkinitcpio.conf.d/archiso.conf"
 for h in base udev archiso block filesystems; do

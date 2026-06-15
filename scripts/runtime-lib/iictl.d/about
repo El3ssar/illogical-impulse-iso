@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+#help: about	print distro release details (example iictl.d/ plugin)
+# about — the reference iictl.d/ drop-in. It demonstrates the whole contract in
+# the smallest possible form: a standalone executable that sources the shared
+# header for colors/helpers/ledger, carries a #help: line, and is bash -n clean.
+# Copy this shape for real verbs. Deleting this file removes `iictl about`
+# cleanly — the plugin layer is purely additive.
+
+set -u
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+
+echo "${C_B}Illogical Impulse${C_0} — iictl plugin layer"
+if [[ -f "$RELEASE_FILE" ]]; then
+  sed 's/^/  /' "$RELEASE_FILE"
+else
+  warn "no $RELEASE_FILE — not an ISO install?"
+fi
+command -v qs >/dev/null 2>&1 && echo "  quickshell: $(qs --version 2>/dev/null | head -1)"

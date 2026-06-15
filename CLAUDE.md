@@ -70,8 +70,13 @@ scripts/
 │   ├── ii-finish-systemd-boot # Calamares: loader entries, LUKS, resume=
 │   ├── ii-post-install        # Calamares: greetd, groups, purges, venv
 │   ├── ii-verify              # Calamares: final gate + ISO-helper purge
-│   └── iictl                  # ★ distro CLI — SURVIVES install (update/doctor/venv/welcome)
-└── runtime-lib/session-offline.sh  # → /usr/local/lib/ii (ii_* helpers)
+│   └── iictl                  # ★ distro CLI — SURVIVES install; sources iictl-common.sh,
+│                              #   execs iictl.d/<cmd> drop-ins (update/doctor/venv/welcome inline)
+└── runtime-lib/               # → /usr/local/lib/ii (SURVIVES install, except session-offline.sh)
+    ├── session-offline.sh     # ISO-only ii_* session helpers (purged by ii-verify)
+    ├── iictl-common.sh        # shared iictl/plugin header (colors, ok/die, ledger, plugin contract)
+    ├── ledger.sh              # append-only TSV state-ledger stub (full impl: later issue)
+    └── iictl.d/<cmd>          # ★ iictl drop-in subcommands — one file per verb, zero core edits
 tools/                         # manual: gen-assets.sh, resolve-deps.py
 upstream/illogical-impulse     # dots submodule — DO NOT EDIT
 build/ out/                    # generated
@@ -132,7 +137,7 @@ build/ out/                    # generated
 | Live session entry | `scripts/runtime/ii-session` |
 | ISO-build chroot logic | `scripts/chroot.sh` |
 | Post-install / bootloader / verify logic | `scripts/runtime/ii-*` |
-| Add an iictl subcommand (drop-in) | `scripts/runtime/iictl.d/<cmd>` → staged to `/usr/local/lib/ii/iictl.d/` |
+| Add an iictl subcommand (drop-in) | `scripts/runtime-lib/iictl.d/<cmd>` (exec; `source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"` + a `#help:` line) → staged to `/usr/local/lib/ii/iictl.d/` |
 | Pipeline step | `scripts/prepare.d/NN-*.sh` |
 | Default wallpaper / wordmark | `overlay/assets/` (then `just assets`) |
 

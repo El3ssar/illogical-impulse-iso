@@ -1,0 +1,3 @@
+# Keeps the iictl.d/ drop-in subcommand dir in git. Real feature verbs (shell,
+# theme, nvim, pack, revert-all, …) land here as one executable file each —
+# see ../iictl-common.sh for the plugin contract. Not staged into the ISO.

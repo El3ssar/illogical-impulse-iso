@@ -58,7 +58,9 @@ scripts/
 ├── clean.sh         build/ (--hard: + out/ + workdir)
 ├── chroot.sh        runs INSIDE mkarchiso chroot (customize_airootfs)
 ├── runtime/         → airootfs /usr/local/bin (live session + Calamares hooks)
-└── runtime-lib/     → /usr/local/lib/ii (ii_* chroot-safe helpers)
+└── runtime-lib/     → /usr/local/lib/ii (chroot-safe ii_* helpers + the
+                       iictl framework: iictl-common.sh, ledger.sh, iictl.d/<cmd>
+                       drop-ins — these SURVIVE install; session-offline.sh is purged)
 tools/               manual utilities: gen-assets.sh, resolve-deps.py
 upstream/illogical-impulse   the dots — read-only submodule
 ```
