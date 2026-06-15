@@ -194,6 +194,53 @@ grep -q 'NVSTASH' "$AIROOTFS/usr/local/bin/ii-post-install" \
 grep -q 'cups.socket' "$AIROOTFS/usr/local/bin/ii-post-install" \
   && _v_ok "ii-post-install enables cups.socket" || _v_fail "ii-post-install missing cups.socket enable"
 
+step "bake/stash/fetch budget governor"
+# PROPOSAL §4 Pillar 7 / §18: the ISO is already ~5.8 GB — over GitHub's 2 GiB
+# release-asset cap (it ships via SourceForge), so every bake compounds the
+# distribution problem. Only small + universal things may be BAKED into
+# goodies.list; heavy/opinionated stacks belong in the STASHED tier (on-ISO
+# flat repo, installed offline post-install via `iictl pack`) or FETCHED-ONLINE.
+# This is a SOFT gate: non-fatal WARNs (never _v_fail) that nudge a NEW
+# heavy/non-universal goodies entry toward the right tier; the sanctioned
+# flagships are explicitly allowlisted so the stock list stays silent. Static,
+# no root, no network — reads the source manifest, not build/.
+GOODIES="$PACKAGES/goodies.list"
+# Sanctioned baked set (flagships + small universal) as of this writing. These
+# are deliberate bakes and must NOT warn. To bless a genuinely-small universal
+# addition, add it here; to add a heavy one, move it to packages/optional.
+_budget_allow=(
+  btop eza bat ripgrep ripgrep-all repgrep fd fzf skim zellij 7zip lazygit
+  brave-bin vlc kdeconnect strawberry linux-lts linux-lts-headers
+  onlyoffice-bin inkscape gimp obs-studio
+  base-devel git neovim code cursor-bin rustup uv docker docker-compose podman claude-code
+  github-cli git-delta direnv just mise distrobox noto-fonts-emoji
+  cups cups-pdf bluez-utils sane simple-scan snapper snap-pac flatpak
+)
+declare -A _budget_ok=()
+for _b in "${_budget_allow[@]}"; do _budget_ok["$_b"]=1; done
+# Heavy/non-universal name patterns (heuristic, non-exhaustive, dependency-free):
+# language toolchains, big GUI suites, GPU/ML stacks, VMs, full desktops,
+# texlive. The allowlist above is the authority for what may be baked; this only
+# flags NEW heavy additions. Extend either list as the batteries set evolves.
+_budget_heavy='^(steam|lutris|wine|wine-staging|winetricks|heroic-games-launcher.*|blender|kdenlive|shotcut|handbrake.*|darktable|krita|audacity|rawtherapee|scribus|davinci.*|olive.*|natron|freecad|openscad|qgis|godot|android-studio|intellij.*|pycharm.*|clion.*|webstorm.*|datagrip.*|rider.*|eclipse|netbeans|unityhub.*|libreoffice.*|wps-office.*|thunderbird|firefox|chromium|google-chrome.*|vivaldi.*|opera.*|microsoft-edge.*|nodejs|npm|deno|bun|ruby|go|golang|jdk.*|jre.*|.*-jdk.*|.*-jre.*|openjdk.*|java-.*|dotnet.*|mono|php|julia.*|texlive.*|.*-cuda.*|cuda.*|cudnn.*|rocm.*|hip-.*|tensorflow.*|pytorch.*|python-torch.*|python-tensorflow.*|opencv.*|qemu-full|qemu-desktop|virtualbox.*|gnome|gnome-shell|plasma-meta|plasma-desktop|kde-applications.*|cinnamon|mate|deepin.*|zoom|slack-desktop|discord|teams.*|spotify|element-desktop|signal-desktop|telegram-desktop|jellyfin.*|plex.*|kodi|digikam|calibre|zotero|anki|joplin.*|ollama.*)$'
+_budget_flagged=0
+if [[ -f "$GOODIES" ]]; then
+  while IFS= read -r _bg; do
+    _bg="${_bg%%#*}"; _bg="${_bg//[[:space:]]/}"
+    [[ -n "$_bg" ]] || continue
+    [[ -n "${_budget_ok[$_bg]:-}" ]] && continue
+    if [[ "$_bg" =~ $_budget_heavy ]]; then
+      _v_warn "goodies.list bakes '$_bg' — looks heavy/non-universal; prefer the STASHED tier (packages/optional + offline \`iictl pack\`) or FETCHED-ONLINE per PROPOSAL §4 Pillar 7 / §18 (ISO already ~5.8 GB > 2 GiB cap). If it is genuinely small+universal, add it to validate.sh's _budget_allow to bless it."
+      _budget_flagged=$((_budget_flagged+1))
+    fi
+  done < "$GOODIES"
+  if (( _budget_flagged == 0 )); then
+    _v_ok "goodies.list within budget (no un-allowlisted heavy/non-universal bakes)"
+  fi
+else
+  _v_warn "no packages/goodies.list — batteries manifest missing"
+fi
+
 step "distro perks (iictl + welcome card)"
 grep -q 'iictl welcome --auto' "$AIROOTFS/etc/skel/.config/hypr/custom/execs.lua" 2>/dev/null \
   && _v_ok "installed-user skel launches the welcome card" \
