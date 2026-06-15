@@ -194,12 +194,13 @@ grep -q 'NVSTASH' "$AIROOTFS/usr/local/bin/ii-post-install" \
 grep -q 'cups.socket' "$AIROOTFS/usr/local/bin/ii-post-install" \
   && _v_ok "ii-post-install enables cups.socket" || _v_fail "ii-post-install missing cups.socket enable"
 
-step "bake/stash/fetch budget governor"
+step "bake/fetch budget governor"
 # PROPOSAL §4 Pillar 7 / §18: the ISO is already ~5.8 GB — over GitHub's 2 GiB
 # release-asset cap (it ships via SourceForge), so every bake compounds the
 # distribution problem. Only small + universal things may be BAKED into
-# goodies.list; heavy/opinionated stacks belong in the STASHED tier (on-ISO
-# flat repo, installed offline post-install via `iictl pack`) or FETCHED-ONLINE.
+# goodies.list; heavy/opinionated stacks belong in the FETCHED-ONLINE tier
+# (installed on demand over the network via `iictl pack`/`iictl pkg` — never
+# baked, never stashed into the image).
 # This is a SOFT gate: non-fatal WARNs (never _v_fail) that nudge a NEW
 # heavy/non-universal goodies entry toward the right tier; the sanctioned
 # flagships are explicitly allowlisted so the stock list stays silent. Static,
@@ -230,7 +231,7 @@ if [[ -f "$GOODIES" ]]; then
     [[ -n "$_bg" ]] || continue
     [[ -n "${_budget_ok[$_bg]:-}" ]] && continue
     if [[ "$_bg" =~ $_budget_heavy ]]; then
-      _v_warn "goodies.list bakes '$_bg' — looks heavy/non-universal; prefer the STASHED tier (packages/optional + offline \`iictl pack\`) or FETCHED-ONLINE per PROPOSAL §4 Pillar 7 / §18 (ISO already ~5.8 GB > 2 GiB cap). If it is genuinely small+universal, add it to validate.sh's _budget_allow to bless it."
+      _v_warn "goodies.list bakes '$_bg' — looks heavy/non-universal; prefer the FETCHED-ONLINE tier (packages/optional + online \`iictl pack\`) per PROPOSAL §4 Pillar 7 / §18 (ISO already ~5.8 GB > 2 GiB cap). If it is genuinely small+universal, add it to validate.sh's _budget_allow to bless it."
       _budget_flagged=$((_budget_flagged+1))
     fi
   done < "$GOODIES"
