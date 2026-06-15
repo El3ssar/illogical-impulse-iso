@@ -3,6 +3,7 @@
 #
 #   /etc/skel-upstream  = upstream dots, synced verbatim          → liveuser
 #   /etc/skel           = skel-upstream + overlay/skel-distro
+#                         + overlay/skel-distro.fetch (pinned vendoring)
 #                         (+ profiles/$PROFILE/skel last)         → installed user
 #   /etc/skel-live      = overlay/skel-live                       → liveuser only
 #
@@ -12,6 +13,56 @@
 SKEL_UP="$BUILD/airootfs/etc/skel-upstream"
 SKEL="$BUILD/airootfs/etc/skel"
 SRC="$DOTS/dots"
+
+# _skel_fetch_guard <dest> <list> — reject upstream-owned (rsync --delete /
+# install_dir__sync) skel destinations. A pinned tree landing on one of these
+# would be wiped by upstream's own updater on `iictl update`, so a fetch line
+# targeting it is a hard build error (PROPOSAL.md §3 seam table, row 4). This is
+# a fast-fail prefix guard; the exhaustive build/airootfs collision diff lives
+# in tools/lint-additive.sh (issue #8).
+_skel_fetch_guard() {
+  local dest="$1" list="$2" deny
+  local denylist=(
+    .config/quickshell .config/matugen
+    .config/fish/config.fish .config/fish/functions
+    .config/zshrc.d .config/hypr/hyprland .config/fontconfig
+    .config/starship.toml .config/hypr/hyprlock.conf
+  )
+  dest="${dest#./}"; dest="${dest%/}"
+  for deny in "${denylist[@]}"; do
+    if [[ "$dest" == "$deny" || "$dest" == "$deny"/* ]]; then
+      die "skel fetch dest '$dest' is an upstream-owned (rsync --delete) path — wiped on 'iictl update'; use a distro-owned/unowned path ($list)"
+    fi
+  done
+}
+
+# _skel_fetch <list-file> <skel-root> — vendor pinned '<dest> <git-url> <rev>'
+# lines from <list-file> into <skel-root>/<dest>, cached under .fetch-cache/ by
+# url+rev so a re-run never re-clones. Shared by the distro-level
+# overlay/skel-distro.fetch and the per-profile profiles/<name>/fetch.list so
+# the two paths cannot drift. Comment (#) and blank lines are skipped.
+_skel_fetch() {
+  local list="$1" root="$2" dest url rev key _ftmp
+  local cache="$ROOT/.fetch-cache"
+  install -d "$cache"
+  while read -r dest url rev; do
+    [[ -z "$dest" || "$dest" == \#* ]] && continue
+    [[ -n "${rev:-}" ]] || die "fetch list line needs: <dest> <git-url> <rev> ($list)"
+    _skel_fetch_guard "$dest" "$list"
+    key="$cache/$(basename "${url%.git}")-${rev:0:12}"
+    if [[ ! -d "$key" ]]; then
+      info "fetch $url @ ${rev:0:12}"
+      _ftmp="$(mktemp -d)"
+      git clone --quiet "$url" "$_ftmp/r"                || die "clone failed: $url"
+      git -C "$_ftmp/r" checkout --quiet --detach "$rev" || die "rev $rev not found in $url"
+      rm -rf "$_ftmp/r/.git"
+      mv "$_ftmp/r" "$key"; rm -rf "$_ftmp"
+    fi
+    install -d "$root/$dest"
+    rsync -a "$key/" "$root/$dest/"
+    info "$dest ← $(basename "$url") @ ${rev:0:12}"
+  done < "$list"
+}
 
 step "sync upstream dots → /etc/skel-upstream"
 ( cd "$DOTS" && git submodule update --init --recursive --quiet ) \
@@ -94,30 +145,22 @@ rsync -a "$SKEL_UP/" "$SKEL/"
   && rsync -a "$OVERLAY/skel-distro/.local/state/" "$SKEL_UP/.local/state/"
 ok "/etc/skel built"
 
+# Distro-level pinned vendoring (PROPOSAL.md §4 Pillar 2 / BLUEPRINT.md §8):
+# clone pinned trees into /etc/skel AFTER the skel-distro overlay and BEFORE the
+# profile layer, preserving the cake order
+# skel-upstream → skel-distro → skel-distro.fetch → profile (a profile
+# fetch.list line to the same dest still wins). Ships comment-only → no-op.
+if [[ -f "$OVERLAY/skel-distro.fetch" ]]; then
+  step "skel-distro.fetch → /etc/skel (distro pinned vendoring)"
+  _skel_fetch "$OVERLAY/skel-distro.fetch" "$SKEL"
+  ok "skel-distro.fetch layered"
+fi
+
 if [[ -n "$PROFILE" ]]; then
   step "profile '$PROFILE' skel layer"
   [[ -d "$PROFILES/$PROFILE/skel" ]] && rsync -a "$PROFILES/$PROFILE/skel/" "$SKEL/"
   FETCH="$PROFILES/$PROFILE/fetch.list"
-  if [[ -f "$FETCH" ]]; then
-    FETCH_CACHE="$ROOT/.fetch-cache"
-    install -d "$FETCH_CACHE"
-    while read -r dest url rev; do
-      [[ -z "$dest" || "$dest" == \#* ]] && continue
-      [[ -n "${rev:-}" ]] || die "fetch.list line needs: <dest> <git-url> <rev>"
-      key="$FETCH_CACHE/$(basename "${url%.git}")-${rev:0:12}"
-      if [[ ! -d "$key" ]]; then
-        info "fetch $url @ ${rev:0:12}"
-        _ftmp="$(mktemp -d)"
-        git clone --quiet "$url" "$_ftmp/r"           || die "clone failed: $url"
-        git -C "$_ftmp/r" checkout --quiet --detach "$rev" || die "rev $rev not found in $url"
-        rm -rf "$_ftmp/r/.git"
-        mv "$_ftmp/r" "$key"; rm -rf "$_ftmp"
-      fi
-      install -d "$SKEL/$dest"
-      rsync -a "$key/" "$SKEL/$dest/"
-      info "$dest ← $(basename "$url") @ ${rev:0:12}"
-    done < "$FETCH"
-  fi
+  [[ -f "$FETCH" ]] && _skel_fetch "$FETCH" "$SKEL"
   ok "profile layered"
 fi
 

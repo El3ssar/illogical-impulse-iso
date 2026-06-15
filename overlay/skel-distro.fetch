@@ -1,0 +1,28 @@
+# skel-distro.fetch — repos cloned into /etc/skel at prepare time (pinned),
+# distro-wide (every build, with or without a profile). Same format as the
+# per-profile profiles/<name>/fetch.list: one entry per line.
+#
+#   <dest-relative-to-skel>   <git-url>   <rev>
+#
+# Each entry is git-cloned at the pinned <rev>, stripped of its .git, cached
+# under .fetch-cache/, and rsync'd into /etc/skel/<dest> AFTER the skel-distro
+# overlay and BEFORE any profile layer — so a profile fetch.list line to the
+# same dest still wins. Layer order:
+#   skel-upstream → skel-distro → skel-distro.fetch → profile
+# Bump the <rev> to update; delete a line (or this file) to stop vendoring it —
+# the tree disappears from the next build. Fully reversible: the vendored files
+# live at distro-owned/unowned skel paths the user can rm -rf, and there is no
+# ledger entry (these are static build-time skel files, not runtime mutations).
+#
+# DESTINATIONS MUST BE DISTRO-OWNED OR UNOWNED SKEL PATHS ONLY.
+# Never target an upstream-owned (rsync --delete / install_dir__sync) path —
+# upstream's own updater wipes those on `iictl update`. 30-skel.sh fast-fails on
+# the prefixes below; the exhaustive collision lint lives in
+# tools/lint-additive.sh (issue #8):
+#   .config/quickshell  .config/matugen  .config/fish/config.fish
+#   .config/fish/functions  .config/zshrc.d  .config/hypr/hyprland
+#   .config/fontconfig  .config/starship.toml  .config/hypr/hyprlock.conf
+# Safe (unowned) examples: .config/nvim  .antidote  .config/zsh  .tmux/plugins/tpm
+#
+# Ships comment-only: a no-op until a real consumer (shell layer, editor
+# chooser, …) adds a pinned entry. Mirrors profiles/username/fetch.list.
