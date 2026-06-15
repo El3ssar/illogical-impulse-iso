@@ -126,7 +126,7 @@ build/ out/                    # generated
 |---|---|
 | Rename/rebrand the distro, change version scheme, repo name | `distro.toml` |
 | Always-installed package (small + universal only) | `packages/goodies.list` (or `base.list` if infra) — heavy/non-universal bakes get a budget WARN |
-| Offer a heavy/opinionated package (offline, post-install) | `packages/optional/<pack>.list` (consumed by `iictl pack` from the on-ISO stash) |
+| Offer a heavy/opinionated package (online, on-demand) | `packages/optional/<pack>.list` (curated name-list; `iictl pack` installs it from the internet — official repos + AUR — never baked or stashed) |
 | NVIDIA driver variants | `packages/nvidia.list` (auto-detected at install) |
 | Personal package/dotfile | `profiles/<you>/{packages.list,skel/}` |
 | Override an installed-user dotfile (distro-wide) | `overlay/skel-distro/<path>` |

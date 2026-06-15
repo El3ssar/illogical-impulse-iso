@@ -16,7 +16,7 @@ Every addition obeys **The Iron Law**: it is *additive* and *reversible*, built 
 1. **`ii-verify` deletes `/usr/local/lib/ii` on clean install** (`scripts/runtime/ii-verify`, the purge after the FAIL check: `rm -rf /usr/local/lib/ii /usr/share/ii-python-wheels`). Any `iictl.d/` plugin dir or `ledger.sh` placed there is **wiped at install time**. This is a **blocker** that must be fixed before any plugin/ledger work begins. → Framework Pillar 3.
 2. **`~/.config/zshrc.d` is upstream `rsync --delete` territory** — files we drop there are wiped on `iictl update`. The themed-zsh story must live in a **home-root `.zshrc` that sources `zshrc.d` read-only**, never in it. → Shell domain (fixed).
 3. **Seven domains each independently re-invented `iictl pack`, `packages/optional`, `skel-distro.fetch`, and the ledger.** This collides. The **Additive & Reversible Framework is promoted to a prerequisite milestone** that ships *first*; every feature domain consumes its primitives. → Section 4.
-4. **The ISO is already ~5.8 GB**, over GitHub's 2 GiB asset cap (hence SourceForge). Domains casually bake overlapping tools. A single **bake/stash/fetch budget governor** is now a hard gate. → Section 4 Pillar 7 + Section 12.
+4. **The ISO is already ~5.8 GB**, over GitHub's 2 GiB asset cap (hence SourceForge). Domains casually bake overlapping tools. A single **bake-vs-fetch budget governor** is now a hard gate — bake only small+universal, fetch everything heavy online. → Section 4 Pillar 7 + Section 12.
 5. **`terminal`/`codeEditor` defaults live in upstream-owned `hypr/hyprland/variables.lua`**, *not* the empty `custom/variables.lua` slot. The override still works (custom wins, sourced by `keybinds.lua`), so the mechanism is sound — **the rationale wording was wrong**, and the fix is to write a *fallback list* (chosen term first), not a single hardcoded binary, so uninstalling it degrades gracefully via upstream's `launch_first_available.sh`.
 
 The deliverable is a layered roadmap: **Framework first (Phase A/B)**, then the Control Center and high-leverage features, then breadth, with everything heavy deferred to offered packs.
@@ -34,7 +34,7 @@ We match every Omarchy convenience and then leapfrog on the axes only a QML shel
 | **Config surface** | Walker `--dmenu` text list | A **graphical Quickshell Control Center** — Material You rail navigation, search, live previews, inline toggles |
 | **Theming** | 19 frozen color sets, all-or-nothing | **Material-You-from-anything**: drop any wallpaper/photo or seed a flavor (Catppuccin/Nord/Gruvbox…) → the *whole* rice recolors through upstream's own matugen pipeline, live |
 | **Reversibility** | one-way install scripts | a **state ledger + `iictl revert-all`** — every change is recorded and undoable to byte-for-byte vanilla |
-| **Editions** | separate gaming/creator images | **one lean image** + offered, composable, offline packs |
+| **Editions** | separate gaming/creator images | **one lean image** + offered, composable, reversible packs (installed online on demand) |
 | **Webapps** | plain Chromium `--app` windows | **accent-aware** webapps (per-app window class themed/auto-placed via `custom/rules.lua`) |
 | **Already at parity (do NOT re-build)** | cheatsheet (Super+K) | upstream **Super+/ cheatsheet** ships; OCR/capture, clipboard (Super+V), Material You all already upstream |
 
@@ -55,10 +55,10 @@ Every proposal targets one of these upstream-guaranteed seams. The reversibility
 | `~/.config/fish/conf.d/ii-*.fish` | **excluded from upstream sync** (`30-skel.sh` `--exclude=conf.d`) | fish auto-loads it; ours are the only files there | fish tool/theming enrichment |
 | `~/.config/quickshell/ii/**`, `~/.config/matugen/**`, `~/.config/fish/config.fish`, `~/.config/zshrc.d/**`, `~/.config/hypr/hyprland/**`, `~/.config/fontconfig/**`, `~/.config/starship.toml`, `hyprlock.conf` | **`install_dir__sync` (`rsync --delete`)** ⚠️ | **anything we add here is wiped on `iictl update`** | **READ-ONLY** — observe via `FileView`, source read-only, never write |
 | `config.json`, `~/.local/state/quickshell/user/generated/colors.json`, `…/generated/terminal/sequences.txt`, `…/generated/material_colors.scss` | **upstream-owned runtime STATE** ⚠️ | generated/owned by the rice | **READ-ONLY** — `FileView`-watch for theming; never seed defaults; record prior value in ledger for revert |
-| `packages/optional/*.list` | **reserved, NOT baked** (`40-packages.sh`) | designed-for | offered packs |
+| `packages/optional/*.list` | **reserved, NOT baked** (`40-packages.sh`) | designed-for | curated name-lists installed **online on demand** by `iictl pack` (only the list ships, never the packages) |
 | `iictl` (`/usr/local/bin/iictl`) | **survives install** (named-exempt from purge) | the post-install config surface | every user-selectable feature |
 
-> **Auditor correction folded in:** the `40-packages.sh` header comment still says optional lists "become Calamares software-selection groups (phase 2)." Calamares selection was **built, hit friction, and deliberately removed**. The comment must be updated to: *"consumed post-install by `iictl pack` from the on-ISO stash."*
+> **Auditor correction folded in:** the `40-packages.sh` header comment still says optional lists "become Calamares software-selection groups (phase 2)." Calamares selection was **built, hit friction, and deliberately removed**. The comment must be updated to: *"installed on demand from the internet by `iictl pack` (official repos + AUR)."*
 
 > **New seam class to document (auditor addition):** upstream-owned **runtime STATE** (`config.json`, `colors.json`, `sequences.txt`) is distinct from the sync-deleted *config* dirs. The distro **never pre-seeds** it; features only call upstream public entry points (`switchwall.sh`, `qs ipc`) and record prior values in the ledger. BLUEPRINT must document this class.
 
@@ -80,11 +80,11 @@ The framework is seven pillars.
 
 No plugin or ledger work may start before this lands.
 
-### Pillar 1 — `packages/optional/<pack>.list` + on-ISO flat-repo stashes (offline post-install)
+### Pillar 1 — `packages/optional/<pack>.list` (curated bundles installed online on demand)
 
-One pack = one curated bundle (`lang-rust.list`, `gaming.list`, `virt.list`…). A new `45-optional-packs.sh` classifies each pack against the sync db (reusing `40-packages.sh`'s official/AUR classifier), pushes AUR names into the existing `.pkg-resolve/aur-prebuild.list` so `prebuild.sh` builds them into `[ii-extra]` on the host, and emits a per-pack download manifest. `chroot.sh` then mirrors the **NVIDIA-stash mechanism** to build a flat repo per pack at `/usr/share/illogical-impulse/optional/<pack>/` (`pacman -Sw` closure + `repo-add`, `SigLevel=Optional TrustAll`).
+One pack = one curated bundle (`lang-rust.list`, `gaming.list`, `virt.list`…) — a plain list of package **names** (a few KB of text). The list rides in the squashfs as text only; **the packages themselves are never staged into the image.** `iictl pack install <name>` installs the members on demand over the network: official-repo members via `pacman -S`, AUR members via paru (presence-checked, bootstrap-or-error). Every install is ledger-recorded so `iictl pack remove` is an exact, offline-safe `pacman -Rns`. `#meta:conflicts` is enforced before any pacman runs.
 
-> **Why offline matters (audit-verified):** `[ii-extra]` is **build-host-only** — `overlay/airootfs/etc/pacman.conf` intentionally omits it, so it does **not** survive install. The on-ISO flat repo is the *only* offline-capable post-install path. A pack that naively calls `pacman -S` post-install will fail offline.
+> **Why online, not stashed (decision):** an earlier draft staged each pack's full dependency closure into an on-ISO flat repo for offline post-install. That bakes heavy software the user may never want into **every ISO and every installed system** — `gaming` + `virt` + `lang-*` alone would add multiple GB to an image already over GitHub's cap. Optional software is **fetched online when the user asks for it**; the ISO carries only the curated name-list. `[ii-extra]` is build-host-only and does not survive install, so the install path is the public mirrors + AUR, never `[ii-extra]`. (The **NVIDIA driver stash** stays an on-ISO repo — drivers are tiny, hardware-conditional, and must work at first boot before a network may exist; that is a bounded exception, **not** a pattern for software packs.)
 
 ### Pillar 2 — `overlay/skel-distro.fetch` (distro-level pinned vendoring)
 
@@ -104,7 +104,7 @@ The ledger **is** the machine-checkable manifest behind "delete our stuff and va
 
 ### Pillar 5 — `iictl revert-all` + per-feature `--revert`
 
-Replays the ledger in reverse: removes owned paths, `pacman -Rns` the recorded sets (offline-safe from stashes), strips distro-appended blocks from `custom/*.lua` by **sentinel fence**, restores any shadowed skel-upstream copy, then re-runs `iictl doctor` to confirm clean state. `--dry-run` prints the plan.
+Replays the ledger in reverse: removes owned paths, `pacman -Rns` the recorded sets (offline-safe — removal needs no network), strips distro-appended blocks from `custom/*.lua` by **sentinel fence**, restores any shadowed skel-upstream copy, then re-runs `iictl doctor` to confirm clean state. `--dry-run` prints the plan.
 
 - **Sentinel-fence convention (mandatory, framework-owned):** every block the distro writes into a sanctioned slot is wrapped in `-- >>> illogical-impulse <name>` / `-- <<< illogical-impulse <name>`. **The existing welcome-card `execs.lua` block must be retrofitted to this fence now.** All writers/removers go through one shared helper; `validate.sh` asserts every distro-written `custom/*.lua` block is fenced; `doctor` warns on user-mangled fences.
 - **Two-tier (decision):** `revert-all` undoes *iictl-time choices* (the common case); `revert-all --deep` also peels install-time distro setup (groups, sockets, fetched skel) for the purist "pure upstream" guarantee.
@@ -116,21 +116,20 @@ Mechanical enforcement of the Iron Law, run by `just validate`:
 1. No `overlay/skel-distro` or `skel-distro.fetch` path collides with an upstream-owned path — computed by diffing against `build/airootfs/etc/skel-upstream` (**allowlist** only the empty `custom/*.lua` slots).
 2. Every distro write into a `custom/*.lua` slot is sentinel-fenced.
 3. Every `iictl.d` plugin is executable, has a shebang, passes `bash -n`, and declares a one-line help header.
-4. Every `packages/optional/*.list` has a reachable stash builder.
+4. Every `packages/optional/*.list` is a valid manifest (parseable names + `#meta`) and none of its members are already baked into `packages.x86_64`.
 5. `ii-verify` does NOT purge `iictl.d` / `ledger.sh`.
 6. **No baked file contains a `[user]` block or identity string** (PII guard — §11).
 
 > **Audit fix:** the lint reads `build/airootfs/etc/skel-upstream`, which exists only after `30-skel.sh`. It must **hard-fail if that dir is missing or sparse** (mirror `30-skel.sh`'s own `>= 100 files` guard), or derive the upstream set from the dots submodule directly — otherwise the check silently passes when run early.
 
-### Pillar 7 — The bake / stash / fetch budget governor (HARD gate)
+### Pillar 7 — The bake / fetch budget governor (HARD gate)
 
-Three tiers, declared per-pack and enforced:
+Two tiers, enforced:
 
 - **BAKED** — in the squashfs, always installed. *Only small + universal things* (`goodies.list`/`base.list`).
-- **STASHED** — downloaded into an on-ISO flat repo, installed **offline** post-install via iictl. Heavy/opinionated dev stacks.
-- **FETCHED-ONLINE** — pulled at iictl-time over the network. Bulky optional assets (wallpaper packs, model files).
+- **FETCHED-ONLINE** — installed on demand over the network by iictl (official repos via `pacman`, AUR via paru). **Everything heavy/opinionated**: language runtimes, gaming, virt, security, AUR shells/tools, nvim distros + plugins, and the bulky long tail (wallpaper packs, model files, editor extensions). Only the curated few-KB name-list (`packages/optional/*.list`) rides in the squashfs — never the dependency closure.
 
-Rule: anything **> ~150 MB installed footprint** that isn't universal goes STASHED or FETCHED, never BAKED. A soft squashfs budget; `validate.sh` **warns when a heavy/non-universal package appears in `goodies.list`**. Per-pack metadata declares tier + stash-deletion policy (delete to reclaim disk, default; keep for re-install where repair value is high). See §12.
+Rule: anything **> ~150 MB installed footprint** that isn't universal is **FETCHED-ONLINE, never BAKED** — and never stashed into the image. A soft squashfs budget; `validate.sh` **warns when a heavy/non-universal package appears in `goodies.list`**. Per-pack metadata declares `#meta:conflicts` (and `#meta:type flatpak` for flatpak packs). The one sanctioned on-ISO repo is the **NVIDIA driver stash** (a bounded hardware exception — see Pillar 1). See §12.
 
 ### Framework — shared mutator library (auditor addition)
 
@@ -174,7 +173,7 @@ A single `ledger.sh`-adjacent helper providing **idempotent**, **reversible**, *
 
 **Reversibility guarantees.** `ii_chsh` records the prior shell; `iictl shell set fish` (or revert) restores upstream's default. Every dropped file is ii-namespaced in an unowned/excluded slot; the antidote load line no-ops when the manifest is absent. Upstream's `config.fish`/`zshrc.d` are only *sourced*, never patched.
 
-**Decisions:** default login shell stays **fish** (upstream's tested, themed default); zsh framework is **antidote** (fastest simple manager, static cache, plain-text editable, already prototyped); bake `zoxide+direnv+carapace+starship`, **offer atuin** (its sync/daemon is opinionated); opt-in shells install **hybrid** (stage zsh+antidote/nushell/carapace into the offline stash, fall back to paru online); plugin **TUI now, QML later**.
+**Decisions:** default login shell stays **fish** (upstream's tested, themed default); zsh framework is **antidote** (fastest simple manager, static cache, plain-text editable, already prototyped); bake `zoxide+direnv+carapace+starship`, **offer atuin** (its sync/daemon is opinionated); opt-in shells install **online** (official-repo shells via pacman, AUR ones like fizsh/nushell via paru); plugin **TUI now, QML later**.
 
 ---
 
@@ -189,16 +188,16 @@ A single `ledger.sh`-adjacent helper providing **idempotent**, **reversible**, *
 | `iictl nvim` chooser | `set <lazyvim\|astronvim\|nvchad\|kickstart\|plain\|restore\|status>`; timestamped backup of `~/.config/nvim` + `~/.local/share/nvim`, pinned clone, `.git` strip, headless bootstrap, `.ii-distro` stamp | offered | `iictl.d/nvim`; writes only user-owned `~/.config/nvim`, `~/.local/{share,state}/nvim` | git, neovim (baked) | M | must |
 | Theme-matched default (opt-in via chooser) | one-shot Material You recolor through a distro-owned matugen feeder | offered | see theming domain feeder | matugen (upstream dep) | M | should |
 | Material You bridge | matugen template emitting `~/.config/nvim/lua/ii-material.lua`; each distro's `ii-theme.lua` reads it | mixed | distro-owned matugen config via `--config` + `--import-json` (NEVER edit upstream `config.toml`) | matugen | L | should |
-| On-ISO nvim plugin stash | warm `lazy.nvim` + per-distro plugin trees + lockfiles into `/usr/share/illogical-impulse/nvim-stash/` for offline first boot | mixed | `35-editors.sh`; cmd_nvim prefers stash; AstroNvim/NvChad need the *framework repo* stashed too, not just the starter | git, neovim, tree-sitter-cli | L | should |
+| nvim plugins on first boot | `lazy.nvim` fetches the chosen distro's plugins **online** on first `nvim` launch (its native behaviour); per-distro `lazy-lock.json` pins versions for reproducibility | online | `iictl nvim` clones the pinned distro at set-time; plugins fetch on first run — nothing nvim rides in the ISO | git, neovim, tree-sitter-cli | M | should |
 | IDE packs | `iictl edit <web\|rust\|python\|go\|devops>` installs VS Code/Cursor extensions from `edit-packs/*.txt`; `iictl edit theme` merges (jq) Material You into `~/.config/Code/User`, `--restore` removes only added keys | offered | `iictl.d/edit`; writes only user IDE config | code, cursor-bin (baked), jq | M | could |
 | zed/helix/micro/emacs | `optional/editors.list`, installed on demand; auto-wired by upstream's editor keybind | optional-pack | not baked; `iictl edit install` → pacman | zed, helix, micro, emacs | S | could |
 | Welcome-card surface | "Choose your editor" button → `iictl nvim` | baked | edit only the distro-owned welcome `shell.qml` | quickshell | S | could |
 
 > **Audit fixes:** (a) the matugen bridge depends on matugen honoring a config include/`--config`; **confirm during impl**, and if not supported drive it via `iictl nvim theme --config <distro-config>` so upstream's `config.toml` stays byte-identical. (b) **Default to one-shot** recolor (`iictl nvim theme`), not a live watcher (no daemon, fully reversible). (c) **Do NOT offer LunarVim** (effectively unmaintained; the author moved to AstroNvim). (d) Material You for IDEs must **merge with jq**, never overwrite `settings.json`, and `--restore` removes only the keys it added.
 
-**Reversibility guarantees.** `iictl nvim restore` or `rm -rf ~/.config/nvim ~/.local/share/nvim` returns to bare neovim. The stash is in the distro namespace; deleting it forces online clones. The matugen bridge never touches upstream's `config.toml`. IDE theme `--restore` is jq-surgical.
+**Reversibility guarantees.** `iictl nvim restore` or `rm -rf ~/.config/nvim ~/.local/share/nvim` returns to bare neovim. The chosen distro is cloned at set-time and its plugins fetch online; everything lands in the user-owned nvim dirs. The matugen bridge never touches upstream's `config.toml`. IDE theme `--restore` is jq-surgical.
 
-**Decisions:** baked default = **plain nvim** (chooser offers all four); offline = **stash plugin trees + lockfiles only**, fetch LSP/extensions on demand (ISO-size); ship `iictl nvim` first, `iictl edit` as a follow-up (two clear verbs).
+**Decisions:** baked default = **plain nvim** (chooser offers all four); install = **clone the chosen distro online at set-time**, lazy.nvim fetches plugins on first run, LSP/extensions on demand (nothing nvim rides in the ISO); ship `iictl nvim` first, `iictl edit` as a follow-up (two clear verbs).
 
 ---
 
@@ -216,11 +215,11 @@ A single `ledger.sh`-adjacent helper providing **idempotent**, **reversible**, *
 | Databases / cloud / IaC | `databases.list`, `cloud.list`; services NOT auto-enabled (print enable hint) | optional-pack | pack engine; no systemd units recorded | postgresql, redis, dbeaver, terraform, opentofu, ansible… | M | could |
 | Bake distrobox | tiny, podman already baked, transformative | baked | one line in `goodies.list` | distrobox | S | must |
 
-> **Audit fixes:** (a) **paru presence is not guaranteed** — `iictl pack` must *check for paru and bootstrap-or-error*, not assume it; prefer the offline stash for likely picks so the common case needs neither paru nor network. (b) The AI-widget provider path is **upstream-owned and may change** — verify the documented provider settings (via the Super+I module) before wiring; keep the write to a user-owned file *outside* the synced `quickshell/ii` tree, and if unverifiable, **just install ollama and document manual setup** behind a runtime path check. (c) mise needs `mise activate` in shell rc — that lives in the **shell domain's** ii-owned files, never in upstream `config.fish`. (d) `iictl pack remove` must track exactly what mise installed (record the directive set) to remove cleanly.
+> **Audit fixes:** (a) **paru presence is not guaranteed** — `iictl pack` must *check for paru and bootstrap-or-error*, not assume it; official-repo members install with plain `pacman` (no paru needed), AUR members need paru + network. (b) The AI-widget provider path is **upstream-owned and may change** — verify the documented provider settings (via the Super+I module) before wiring; keep the write to a user-owned file *outside* the synced `quickshell/ii` tree, and if unverifiable, **just install ollama and document manual setup** behind a runtime path check. (c) mise needs `mise activate` in shell rc — that lives in the **shell domain's** ii-owned files, never in upstream `config.fish`. (d) `iictl pack remove` must track exactly what mise installed (record the directive set) to remove cleanly.
 
 **Reversibility guarantees.** Every pack is `pacman -Rns` of a ledger-recorded set. mise toolchains are user-owned and tracked. The AI provider write is a single user-owned file; remove it and the widget falls back to cloud defaults. No baked-image or upstream change beyond removable `goodies.list` lines.
 
-**Decisions:** version manager = **mise** (official extra, Omarchy's choice, zero build cost; reject asdf — AUR-only); AUR packs build **at install via paru** by default (offline stash for the popular few); offer via **iictl + Quickshell picker**, *not* Calamares (the "bake everything, ask nothing at install" model stands); keep **rootful docker** baked, rootless as a flag.
+**Decisions:** version manager = **mise** (official extra, Omarchy's choice, zero build cost; reject asdf — AUR-only); AUR packs build **at install via paru** (presence-checked); official-repo packs install directly via pacman; offer via **iictl + Quickshell picker**, *not* Calamares (the "bake everything, ask nothing at install" model stands); keep **rootful docker** baked, rootless as a flag.
 
 ---
 
@@ -341,7 +340,7 @@ This anchors the roadmap. **ONE flagship standalone Quickshell app** is the GUI 
 |---|---|---|---|---|---|---|
 | `iictl webapp` | `add <name> <url> [icon]` / `remove`; icon fetch best-effort + generic fallback; writes `~/.local/share/applications/ii-webapp-<slug>.desktop` | offered | `iictl.d/webapp`; optional accent rules in `custom/rules.lua` | brave-bin (baked) | M | must |
 | Shell completions + grouped help | fish/bash/zsh completions; `--version`; man pages auto-generated from `iictl.d` headers at build | baked | completion files in airootfs system dirs | bash-completion | S | must |
-| `iictl install` + gaming/creators/etc. | picker over `optional/*.list`; `pkg`/`aur` thin wrappers | optional-pack | framework engine + `45-optional.sh` staging | paru + group contents | M | should |
+| `iictl install` + gaming/creators/etc. | picker over `optional/*.list`; `pkg`/`aur` thin wrappers | optional-pack | framework engine (online install: pacman + paru) | paru + group contents | M | should |
 | Update channels + migrations | stable pin in `/etc/illogical-impulse/release`; `iictl migrate` runs `migrations/NNNN-*.sh` | baked | extend `cmd_update`; migrations dir | — | M | could |
 | Default-app chooser + offline docs | `iictl defaults` (xdg) ; `iictl docs` offline quickstart | baked | `iictl.d/defaults`/`docs`; docs in airootfs | xdg-utils | S | could |
 
@@ -371,7 +370,7 @@ This anchors the roadmap. **ONE flagship standalone Quickshell app** is the GUI 
 
 **Reversibility guarantees.** Every baked default is a standalone deletable file in an unowned path. `iictl git-identity`/`keys`/`new` write only per-user runtime state. Dotfile import backs up before overwriting. Dormant units do nothing until `systemctl --user enable`.
 
-**Decisions:** default shell = **fish** (+ themed bash + chooser); toolchain = **mise coexists** with rustup/uv; **bake no language runtimes** (mise installs during onboarding; offline stash if needed); API client = **none baked** (`optional/api.list`); nvim = **plain + chooser**; onboarding = **auto-shown once via the welcome card with a one-click skip**; `init.defaultBranch = main`.
+**Decisions:** default shell = **fish** (+ themed bash + chooser); toolchain = **mise coexists** with rustup/uv; **bake no language runtimes** (mise installs them online during onboarding); API client = **none baked** (`optional/api.list`); nvim = **plain + chooser**; onboarding = **auto-shown once via the welcome card with a one-click skip**; `init.defaultBranch = main`.
 
 ---
 
@@ -408,22 +407,22 @@ Concrete, repo-level, ordered. **The framework and the Control Center anchor eve
 2. Refactor `scripts/runtime/iictl`: replace `*) die` with the `iictl.d/` resolver + sourced common header; build help from plugin headers.
 3. Create `overlay/airootfs/usr/local/lib/ii/{ledger.sh (TSV), mutator.sh}` and `iictl.d/` (`pack`, `revert-all` initial). Wire `ledger_record` into `ii-post-install`.
 4. Adopt the **sentinel-fence** convention; **retrofit the existing welcome `execs.lua` block** to it.
-5. Create `packages/optional/` + `45-optional-packs.sh` staging into `/usr/share/illogical-impulse/optional/` (NOT into `packages.x86_64`); add the `chroot.sh` NVIDIA-style stash block.
+5. Create `packages/optional/` as curated **name-lists** (text only, NOT baked into `packages.x86_64` and NOT stashed into the image); `iictl pack` installs members online on demand.
 6. Add `overlay/skel-distro.fetch` + the ~15-line loop in `30-skel.sh` (before the profile layer).
-7. `validate.sh` + `tools/lint-additive.sh`: skel-shadow check (allowlist `custom/*.lua`), fence check, plugin lint, optional-list↔stash check, no-PII check, ii-verify survival check; **hard-fail if `skel-upstream` is missing/sparse**. Wire the skel-shadow check into `update.sh --check`.
+7. `validate.sh` + `tools/lint-additive.sh`: skel-shadow check (allowlist `custom/*.lua`), fence check, plugin lint, optional-list validity check (parses + not baked), no-PII check, ii-verify survival check; **hard-fail if `skel-upstream` is missing/sparse**. Wire the skel-shadow check into `update.sh --check`.
 8. Fix the stale `40-packages.sh` Calamares comment.
 9. **Quick wins (small, universal, baked):** `# dev baseline` block in `goodies.list` (gh, git-delta, direnv, just, mise — **not** jq/yq/jetbrains-nerd, already upstream PKGBUILD depends) + distrobox + emoji font + cups/bluez stack (+ `cups.socket` in the post-install loop); themed bash (`~/.bashrc`); shell completions + grouped `iictl help`.
-10. Document the bake/stash/fetch tiers + the upstream-owned-STATE seam class in BLUEPRINT; update CLAUDE.md §5 "Where to edit."
+10. Document the bake/fetch tiers + the upstream-owned-STATE seam class in BLUEPRINT; update CLAUDE.md §5 "Where to edit."
 
 ### Phase B — The centerpiece + shell/theme/editor cores
 11. **Control Center:** `control/shell.qml` + `Colors.qml` + `Ctl.qml` + panes; `iictl center`/`menu`; `.desktop`; fenced `SUPER+SHIFT+I` and `SUPER+ALT+SPACE` binds; welcome-card button.
 12. **Shell layer** (single owner): `iictl.d/shell`, home-root `.zshrc`/`.zshenv`, `~/.config/zsh/ii-plugins.txt`, fish `conf.d/ii-*.fish`, `optional/shells.list`, `ii_chsh`/`/etc/shells` handling.
 13. **Theme engine:** `iictl.d/theme` over `switchwall.sh`; flavor `.conf`s; static themed defaults (btop/fastfetch/bat/lazygit); the **opt-in** debounced recolor hook reading finished `colors.json`.
-14. **Editor chooser:** `iictl.d/nvim` (plain default + four distros, backup-on-conflict, `.ii-distro` stamp); `35-editors.sh` plugin-tree stash.
+14. **Editor chooser:** `iictl.d/nvim` (plain default + four distros, backup-on-conflict, `.ii-distro` stamp); distros cloned **online** at set-time, lazy.nvim fetches plugins on first run.
 15. **Smoke tests:** extend `vm.sh` (or new `scripts/smoke.sh`) — headless boot + `iictl pack install/remove` round-trip, `revert-all` idempotency, `qs -p` load check per standalone config, doctor golden path.
 
 ### Phase C — Dev breadth + widgets + parity glue
-16. Language/container/dev-cli/AI packs (`lang-*`, `containers`, `dev-cli`, `ai-dev`); `iictl pack` paru-presence check + offline-stash-first.
+16. Language/container/dev-cli/AI packs (`lang-*`, `containers`, `dev-cli`, `ai-dev`); `iictl pack` paru-presence check + online install (official via pacman, AUR via paru).
 17. Widget framework (`_lib` + `iictl.d/widget`) + **dev-dashboard** + `actions/*.sh` palette; `Super+W` leader. (No pomodoro/notes/clipboard/colorpicker widgets — upstream ships those.)
 18. `iictl webapp` (Brave `--app`, accent rules); `iictl install` group picker + gaming pack.
 19. Onboarding folded into the welcome card; `iictl git-identity`/`keys`/`new` + baked dev defaults; `~/Projects` + templates.
@@ -446,11 +445,10 @@ Deduped across all domains. **★ = pivotal** — these six become the user quiz
 | **★ Default login shell** | fish / zsh+antidote / ask once | **Keep fish** (upstream's themed, tested default); make zsh/bash/fizsh/nushell a one-command `iictl shell` opt-in. Surface the chooser in the welcome card. |
 | **★ Default nvim config** | plain (chooser only) / bake LazyVim | **Plain nvim, empty `~/.config/nvim`**; offer four distros via `iictl nvim` with backup-on-conflict. Keeps the Iron Law trivially true; resolves the cross-domain conflict. |
 | **★ Where user-selectable software lives** | iictl packs / revive Calamares selection / both | **iictl packs only.** Calamares selection was built, hit friction, and removed; iictl survives install and is reversible. |
-| **★ AUR pack install path** | paru at runtime / ship `[ii-extra]` into squashfs / official-only / hybrid | **Hybrid:** stage popular picks into the offline stash (works on a fresh box, no network); fall back to paru-at-runtime (with a presence check). Official-repo packs instant/offline. |
+| **★ AUR pack install path** | paru at runtime / ship `[ii-extra]` into squashfs / official-only / stash | **Online via pacman + paru:** official-repo packs install directly with `pacman`; AUR via paru (presence-checked, bootstrap-or-error). `[ii-extra]` is build-host-only — never shipped into the squashfs. Optional software is fetched when asked for, not pre-staged. |
 | **★ Default dots update channel** | stable/pinned / edge (HEAD) / prompt | **Stable/pinned default, `--channel edge` opt-in** — *only if* the pin bump is wired into `just update`; else keep HEAD-tracking and offer `--channel stable`. |
-| **★ ISO-size governance** | per-domain ad-hoc / one budget governor | **Adopt Pillar 7 as a hard gate:** bake only small+universal; STASH/FETCH everything heavy; `validate.sh` warns on heavy packages in `goodies.list`. |
+| **★ ISO-size governance** | per-domain ad-hoc / one budget governor | **Adopt Pillar 7 as a hard gate:** bake only small+universal; **FETCH everything heavy online** (never bake or stash it); `validate.sh` warns on heavy packages in `goodies.list`. |
 | Ledger format | JSONL (+jq) / TSV | **TSV** — dependency-free `revert-all`. |
-| Stash lifecycle after install | always delete / always keep / per-pack header | **Per-pack `#meta:delete-stash`** (default delete; keep where re-toggle/repair value is high). |
 | Version manager | mise / asdf / none | **Bake mise** (official extra), runtimes opt-in; keep rustup+uv. |
 | zsh plugin framework | antidote / zinit / z4h / oh-my-zsh | **antidote** (fastest simple, static cache, plain-text editable, already prototyped). |
 | Modern CLI: baked vs offered | bake all / bake small + offer atuin / offer all | **Bake zoxide+direnv+carapace+starship, offer atuin.** |
@@ -480,12 +478,12 @@ Deduped across all domains. **★ = pivotal** — these six become the user quiz
 
 **Verified blockers / high-risk wiring**
 - **`ii-verify` purge** deletes `/usr/local/lib/ii` — *the* highest-risk step; the plugin/ledger architecture silently fails until Pillar 0 lands and the survival lint guards it.
-- **`[ii-extra]` does not survive install** — any "install later" feature must use the on-ISO stash, not `[ii-extra]`; a naive `pacman -S` post-install fails offline.
+- **`[ii-extra]` does not survive install** — any "install later" feature fetches from the public mirrors + AUR over the network at iictl-time; `[ii-extra]` is build-host-only and is never shipped into the squashfs. (Optional software therefore needs a network at install-time — an accepted trade for not bloating the image.)
 - **paru may be absent** if its fail-soft build failed during ISO creation — `iictl pack` must check/bootstrap, and a `doctor`/`validate.sh` check should confirm paru landed in the squashfs.
 
 **Structural**
 - **Overlap collision** if domains ship their own pack/fetch/ledger — mitigated by shipping the framework first as the single owner (Section 4).
-- **ISO size** (~5.8 GB, over GitHub's cap) — every bake re-checked against Pillar 7; shared-dep duplication across stashes needs a de-dup strategy (or a single combined optional stash).
+- **ISO size** (~5.8 GB, over GitHub's cap) — every bake re-checked against Pillar 7; heavy/optional software is **FETCHED-ONLINE**, never staged into the image, so it adds nothing to the squashfs (no per-pack stashes, hence no de-dup problem).
 
 **Reversibility edge cases**
 - System-level edits (PAM, mkinitcpio, `/etc/shells`, sockets, groups) are where "delete = vanilla" is hardest — all routed through the shared mutator with ledger inverses; **drop the redundant gaming multilib toggle**.
@@ -512,10 +510,9 @@ Deduped across all domains. **★ = pivotal** — these six become the user quiz
 The image is already ~5.8 GB — over GitHub's 2 GiB release-asset cap (it ships via SourceForge). This single fact governs every "bake" decision and is why **Pillar 7 is a hard gate, not advice**:
 
 - **BAKE** only small + universal: the dev baseline (gh/git-delta/direnv/just/mise — *not* jq/yq/jetbrains-nerd, already upstream PKGBUILD depends), distrobox, emoji font, cups/bluez/sane stack, themed shell/tool configs (config text is KB), the Control Center + welcome QML, `iictl.d` + ledger. Total net add should be a few hundred MB at most.
-- **STASH** (offline, post-install) every heavy/opinionated stack: language runtimes, gaming, virt, security, databases, AUR shells/tools, nvim plugin trees + lockfiles. Only the few-KB manifest text rides in the squashfs; the closure is a flat repo consumed once, then optionally deleted to reclaim disk.
-- **FETCH-ONLINE** the bulky long tail: wallpaper packs, LSP servers, VS Code extensions, AI models, DaVinci/waydroid.
-- **De-dup** shared dependencies across per-pack stashes (or use one combined optional stash) to avoid runaway growth; `validate.sh` warns when a STASHED pack's closure exceeds budget or a heavy/non-universal package lands in `goodies.list`.
+- **FETCH-ONLINE** everything else — every heavy/opinionated stack *and* the bulky long tail: language runtimes, gaming, virt, security, databases, AUR shells/tools, nvim distros + plugins, wallpaper packs, LSP servers, editor extensions, AI models, DaVinci/waydroid. The user installs them on demand over the network (`iictl pack`/`iictl pkg`: official repos via `pacman`, AUR via paru). Only the curated few-KB name-list rides in the squashfs — **nothing's dependency closure is staged into the image.** `[ii-extra]` is build-host-only and is never shipped.
+- **The only enforcement point** that remains is the bake guard: `validate.sh` warns when a heavy/non-universal package lands in `goodies.list`. With nothing heavy baked or stashed, there are no per-pack closures to de-dup and no runaway-growth risk.
 
 The discipline is what lets the distro be genuinely *batteries-included* while staying distributable: universal batteries baked, every heavy choice one reversible command away.
 
-**Relevant code paths:** `/home/elessar/Projects/end4ISO/scripts/runtime/iictl` (the `*) die` branch to refactor; help heredoc), `/home/elessar/Projects/end4ISO/scripts/runtime/ii-verify` (the `rm -rf /usr/local/lib/ii` purge to narrow), `/home/elessar/Projects/end4ISO/scripts/prepare.d/30-skel.sh` (the skel layer cake + `--exclude=conf.d` + `/etc/skel = skel-upstream + skel-distro` insertion point), `/home/elessar/Projects/end4ISO/scripts/prepare.d/40-packages.sh` (the stale Calamares comment + the official/AUR classifier to reuse), `/home/elessar/Projects/end4ISO/scripts/chroot.sh` (the NVIDIA-stash block to mirror), `/home/elessar/Projects/end4ISO/scripts/validate.sh` (new lint section), `/home/elessar/Projects/end4ISO/overlay/airootfs/usr/share/illogical-impulse/welcome/` (the standalone-Quickshell model to clone), `/home/elessar/Projects/end4ISO/packages/{base,goodies,installer,nvidia}.list` (+ new `packages/optional/`).
+**Relevant code paths:** `/home/elessar/Projects/end4ISO/scripts/runtime/iictl` (the `*) die` branch to refactor; help heredoc), `/home/elessar/Projects/end4ISO/scripts/runtime/ii-verify` (the `rm -rf /usr/local/lib/ii` purge to narrow), `/home/elessar/Projects/end4ISO/scripts/prepare.d/30-skel.sh` (the skel layer cake + `--exclude=conf.d` + `/etc/skel = skel-upstream + skel-distro` insertion point), `/home/elessar/Projects/end4ISO/scripts/prepare.d/40-packages.sh` (the stale Calamares comment + the official/AUR classifier to reuse), `/home/elessar/Projects/end4ISO/scripts/chroot.sh` (the NVIDIA driver stash — the one sanctioned on-ISO repo; optional software is NOT stashed), `/home/elessar/Projects/end4ISO/scripts/validate.sh` (new lint section), `/home/elessar/Projects/end4ISO/overlay/airootfs/usr/share/illogical-impulse/welcome/` (the standalone-Quickshell model to clone), `/home/elessar/Projects/end4ISO/packages/{base,goodies,installer,nvidia}.list` (+ new `packages/optional/`).

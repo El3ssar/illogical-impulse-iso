@@ -8,8 +8,9 @@
 #
 # Names not in the official repos are accumulated into
 # .pkg-resolve/aur-prebuild.list for prebuild.sh. packages/optional/*.list
-# are NOT baked here — they are consumed post-install by `iictl pack` from the
-# on-ISO stash (see PROPOSAL §4 Pillar 1 / packages/optional). The Calamares
+# are NOT baked here — they are curated name-lists installed on demand from the
+# internet by `iictl pack` (official repos + AUR; see PROPOSAL §4 Pillar 1 /
+# packages/optional). Only the list ships, never the packages. The Calamares
 # software-selection screen was built, hit friction, and was removed.
 
 RESOLVE="$BUILD/.pkg-resolve"

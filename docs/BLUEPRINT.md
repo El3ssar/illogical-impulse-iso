@@ -140,43 +140,52 @@ of the whole distro rests on respecting their classes. Full table in
   Theming features observe via `FileView` read-only and only call upstream
   public entry points (`switchwall.sh`, `qs ipc`), recording the prior value in
   the ledger so a revert restores it.
-- **reserved, NOT baked** — `packages/optional/*.list`: curated packs consumed
-  post-install by `iictl pack` from the on-ISO flat-repo stash (never baked into
-  the squashfs).
+- **reserved, NOT baked** — `packages/optional/*.list`: curated **name-lists**
+  installed on demand from the internet by `iictl pack` (official repos + AUR).
+  Only the few-KB list rides in the squashfs — never the packages themselves.
 - **survives install** — `/usr/local/bin/iictl` (named-exempt from the
   `ii-verify` purge): the post-install config surface for every feature.
 
-### The bake / stash / fetch budget governor (HARD gate)
+### The bake / fetch budget governor (HARD gate)
 
 The ISO is already ~5.8 GB — over GitHub's **2 GiB** release-asset cap (it ships
 via SourceForge), so every "just bake it" decision compounds the distribution
-problem. Three tiers govern where a payload lands:
+problem. Two tiers govern where a payload lands:
 
 - **BAKED** — in the squashfs, always installed. *Only small + universal*
   things (`packages/goodies.list`, `packages/base.list`): the dev baseline
   (gh / git-delta / direnv / just / mise), distrobox, emoji font, the
   cups/bluez/sane stack, themed shell+tool configs (config text is KB), the
   Control Center + welcome QML, `iictl.d` + ledger. Net add: a few hundred MB.
-- **STASHED** — downloaded into an on-ISO flat repo and installed **offline**
-  post-install via `iictl pack`. Heavy/opinionated dev stacks (language
-  runtimes, gaming, virt, security, AUR shells/tools, nvim plugin trees). Built
-  by mirroring the **NVIDIA-stash mechanism** (`pacman -Sw` closure + flat
-  `repo-add`, `SigLevel=Optional TrustAll`); only the few-KB manifest rides in
-  the squashfs. `[ii-extra]` is build-host-only and does **not** survive
-  install, so the on-ISO stash is the only offline-capable post-install path.
-- **FETCHED-ONLINE** — pulled at iictl-time over the network. Bulky long tail
-  (wallpaper packs, LSP servers, VS Code extensions, AI models, DaVinci/waydroid).
+- **FETCHED-ONLINE** — installed on demand over the network by `iictl`
+  (`iictl pack`/`iictl pkg`: official repos via `pacman`, AUR via paru).
+  **Everything heavy/opinionated**: language runtimes, gaming, virt, security,
+  AUR shells/tools, nvim distros + plugins, and the bulky long tail (wallpaper
+  packs, LSP servers, editor extensions, AI models, DaVinci/waydroid). Only the
+  curated few-KB name-list (`packages/optional/*.list`) rides in the squashfs —
+  **never the dependency closure.** `[ii-extra]` is build-host-only and does
+  **not** survive install, so the install path is the public mirrors + AUR,
+  never an on-ISO repo. (Optional software thus needs a network at install-time
+  — an accepted trade for not bloating every image with software most users
+  won't want.)
+
+> **The one on-ISO repo exception** is the **NVIDIA driver stash**
+> (`chroot.sh` → `/usr/share/illogical-impulse/nvidia`): hardware drivers are
+> tiny, hardware-conditional, and must work at first boot before a network may
+> exist. It is a bounded exception, **not** a pattern to mirror for software
+> packs — an earlier draft did exactly that and would have hauled multiple GB
+> of optional closures into every image and every installed system.
 
 Rule of thumb: anything **> ~150 MB installed footprint** that isn't universal
-goes STASHED or FETCHED, never BAKED. `validate.sh` enforces a **soft** version
-of this in the `step "bake/stash/fetch budget governor"` section: it **WARNs
-(non-fatal)** when a heavy/non-universal package appears in `goodies.list`,
-keyed off an allowlist of the sanctioned flagships plus a heavy-name heuristic.
-The WARN never fails the build (legitimate flagship bakes still pass) — it
-surfaces *new* heavy additions so the author confirms the tier. The discipline
-is what lets the distro be genuinely *batteries-included* while staying
-distributable: universal batteries baked, every heavy choice one reversible
-command away.
+is **FETCHED-ONLINE, never BAKED** (and never stashed into the image).
+`validate.sh` enforces a **soft** version of this in the
+`step "bake/fetch budget governor"` section: it **WARNs (non-fatal)** when a
+heavy/non-universal package appears in `goodies.list`, keyed off an allowlist of
+the sanctioned flagships plus a heavy-name heuristic. The WARN never fails the
+build (legitimate flagship bakes still pass) — it surfaces *new* heavy additions
+so the author confirms the tier. The discipline is what lets the distro be
+genuinely *batteries-included* while staying distributable: universal batteries
+baked, every heavy choice one reversible command away.
 
 ## 4. Pipeline contracts
 
