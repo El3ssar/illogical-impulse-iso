@@ -101,6 +101,25 @@ else
   _v_warn "no static kitty-theme.conf — first kitty open may show 'missing include'"
 fi
 
+step "themed self-contained bash (~/.bashrc)"
+# ~/.bashrc is the UNOWNED home-root seam (upstream ships none). It must be a
+# COMPLETE self-contained config that cats the upstream-generated palette from
+# the EXACT generated/terminal/sequences.txt path — the literal grep below
+# guards the bug-class where the path drops the terminal/ subdir and silently
+# ships an uncolored shell (CLAUDE.md §"Historic bugs"; issue #11).
+BRC="$AIROOTFS/etc/skel/.bashrc"
+if [[ ! -s "$BRC" ]]; then
+  _v_fail "/etc/skel/.bashrc missing or empty"
+elif ! bash -n "$BRC" 2>/dev/null; then
+  _v_fail "/etc/skel/.bashrc has a syntax error"
+elif ! grep -qE '^[^#]*generated/terminal/sequences.txt' "$BRC"; then
+  _v_fail "/etc/skel/.bashrc missing the guarded generated/terminal/sequences.txt cat (wrong/old path?)"
+elif ! grep -q 'starship init bash' "$BRC"; then
+  _v_fail "/etc/skel/.bashrc does not init starship"
+else
+  _v_ok "themed self-contained /etc/skel/.bashrc (guarded sequences cat + starship)"
+fi
+
 step "distro identity"
 OSREL="$AIROOTFS/etc/os-release"
 grep -q "^ID=$DISTRO_ID\$"                  "$OSREL" && _v_ok "ID=$DISTRO_ID"   || _v_fail "ID wrong"
