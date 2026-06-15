@@ -3,6 +3,8 @@ build/
 out/
 *.log
 .fetch-cache/
+# just nspawn cached base rootfs (root-owned, multi-hundred-MB; `just nspawn --clean`)
+.nspawn-cache/
 
 # Editor / OS noise
 .DS_Store

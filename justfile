@@ -43,6 +43,11 @@ smoke *args:
 preview app="":
     ./scripts/preview.sh {{app}}
 
+# throwaway systemd-nspawn container to test CLI/iictl behaviour (no ISO bake)
+# `just nspawn` = root shell · `just nspawn '<cmd>'` = one-shot · `--clean` drops the cache
+nspawn *args:
+    ./scripts/nspawn.sh {{args}}
+
 # remove build/
 clean:
     ./scripts/clean.sh

@@ -77,6 +77,7 @@ just vm           # boot it in QEMU  (--disk to test a full install, needs quemu
 | `just update` | bump the dots pin (`--check` = policy dry-run) |
 | `just vm [--disk\|--installed]` | QEMU: live ISO / install test / installed system |
 | `just preview [app]` | live-preview a standalone Quickshell app (no build); no arg lists them |
+| `just nspawn ['<cmd>']` | throwaway container to test CLI/`iictl` behaviour (no ISO); `--clean` drops the cache |
 | `just assets` | regenerate branding from the SVG sources |
 | `just docked [profile]` | the same full pipeline, inside the pinned builder container |
 
