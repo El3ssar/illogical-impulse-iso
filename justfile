@@ -4,6 +4,7 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # list recipes
+[private]
 default:
     @just --list --unsorted
 
@@ -44,9 +45,11 @@ preview app="":
     ./scripts/preview.sh {{app}}
 
 # throwaway systemd-nspawn container to test CLI/iictl behaviour (no ISO bake)
+# quote(args) forwards the whole command as ONE shell-safe arg, so `;`/`&&`/`|`
+# in it run in the container, not the host recipe shell.
 # `just nspawn` = root shell · `just nspawn '<cmd>'` = one-shot · `--clean` drops the cache
 nspawn *args:
-    ./scripts/nspawn.sh {{args}}
+    ./scripts/nspawn.sh {{ quote(args) }}
 
 # remove build/
 clean:

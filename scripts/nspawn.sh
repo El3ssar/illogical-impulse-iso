@@ -42,6 +42,12 @@ EOF
   exit "${1:-0}"
 }
 
+# The justfile forwards the whole command as ONE arg via `{{ quote(args) }}`, so
+# everything after `just nspawn` arrives as a single string we run with `bash
+# -c` (shell operators like ; && | stay inside the container). With no command,
+# quote("") yields a single empty arg — drop it so $# reflects "no command".
+[[ $# -eq 1 && -z "${1:-}" ]] && shift
+
 case "${1:-}" in -h|--help|help) usage 0 ;; esac
 
 # pacstrap, systemd-nspawn and the root-owned cache all need root. Re-exec under
