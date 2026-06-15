@@ -75,7 +75,8 @@ scripts/
 └── runtime-lib/               # → /usr/local/lib/ii (SURVIVES install, except session-offline.sh)
     ├── session-offline.sh     # ISO-only ii_* session helpers (purged by ii-verify)
     ├── iictl-common.sh        # shared iictl/plugin header (colors, ok/die, ledger, plugin contract)
-    ├── ledger.sh              # append-only TSV state-ledger stub (full impl: later issue)
+    ├── ledger.sh              # append-only TSV state ledger (record/query/owned_paths; the reversibility manifest)
+    ├── mutator.sh             # idempotent reversible ledger-recording primitives (service/group/chsh/lua-block fence/conflicts)
     └── iictl.d/<cmd>          # ★ iictl drop-in subcommands — one file per verb, zero core edits
 tools/                         # manual: gen-assets.sh, resolve-deps.py
 upstream/illogical-impulse     # dots submodule — DO NOT EDIT

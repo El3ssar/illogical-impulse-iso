@@ -92,10 +92,30 @@ Every distro addition targets one upstream-guaranteed seam; the reversibility
 of the whole distro rests on respecting their classes. Full table in
 [PROPOSAL.md](PROPOSAL.md) §3 — the classes, condensed:
 
-- **`install_dir__ignore_existing`** — the empty `~/.config/hypr/custom/*.lua`
-  slots (upstream ships 1-byte stubs and never overwrites). Writes here MUST be
-  **sentinel-fenced** (`-- >>> illogical-impulse <name>` / `-- <<< …`) so a
-  revert can strip exactly our block.
+- **`install_dir__ignore_existing`** — the empty
+  `~/.config/hypr/custom/{env,execs,general,rules,variables}.lua` slots
+  (upstream ships 1-byte stubs and never overwrites). **Every** distro write
+  here MUST be **sentinel-fenced** with a named block:
+
+  ```lua
+  -- >>> illogical-impulse <name>
+  ...our lines...
+  -- <<< illogical-impulse <name>
+  ```
+
+  so a revert can strip *exactly* our block, leaving the upstream stub and any
+  user lines intact. **One shared helper pair owns all reads/writes** —
+  `ii_lua_block_write` / `ii_lua_block_remove` in
+  `scripts/runtime-lib/mutator.sh` (both share the `_ii_lua_strip` routine);
+  no other code hand-appends to these slots, and the helper refuses any
+  non-`custom/*.lua` path. `ii_lua_block_write` is idempotent (replaces a
+  same-named block instead of duplicating) and records a `lua-block` ledger row;
+  `ii_lua_block_remove` is the inverse used by `iictl revert-all`. **`validate.sh`
+  enforces** (`step "sentinel-fenced custom/*.lua blocks"`) that no distro
+  exec-hook (`hl.on` / `hl.exec_cmd`) appears outside a fence — an unfenced block
+  would survive a revert, so it is a build-failing bug. The baked welcome-card
+  block in `overlay/skel-distro/.config/hypr/custom/execs.lua` is the canonical
+  example.
 - **unowned** — `~/.bashrc`, `~/.config/nvim`, `~/.config/{git,btop,bat,…}`,
   `~/Projects` (upstream ships nothing → no collision). Themed tool configs,
   dev defaults, scaffolds.
