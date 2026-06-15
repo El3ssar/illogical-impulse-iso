@@ -260,6 +260,13 @@ grep -vE '^[[:space:]]*#' "$AIROOTFS/usr/local/bin/ii-verify" \
   | grep -Eq 'rm[[:space:]]+-[a-zA-Z]*[rR][a-zA-Z]*[[:space:]]+/usr/local/lib/ii' \
   && _v_fail "ii-verify recursively removes /usr/local/lib/ii — iictl.d/ + ledger must survive" \
   || _v_ok "ii-verify preserves /usr/local/lib/ii (iictl.d/ + ledger survive)"
+# ledger.sh + mutator.sh are the reversibility substrate — they must NOT appear
+# in ii-verify's per-NAME purge (`rm -f .../usr/local/lib/ii/<name>`) either,
+# else `iictl revert-all` has no ledger to replay and no mutators to undo with.
+grep -vE '^[[:space:]]*#' "$AIROOTFS/usr/local/bin/ii-verify" \
+  | grep -Eq 'rm[[:space:]]+-[a-zA-Z]*f[a-zA-Z]*[[:space:]][^#]*/usr/local/lib/ii/(ledger|mutator)\.sh' \
+  && _v_fail "ii-verify purges ledger.sh/mutator.sh by name — they must survive installs" \
+  || _v_ok "ii-verify keeps ledger.sh + mutator.sh (reversibility substrate survives)"
 grep -Eq '^\s*git\s*$' "$PKGLIST" \
   && _v_ok "git baked (paru + iictl update need it)" \
   || _v_fail "git missing from packages.x86_64"
@@ -267,12 +274,48 @@ grep -qE '^\s*- (netinstall|packages)\s*(#.*)?$' "$SETTINGS" \
   && _v_fail "settings.conf still references the removed selection flow" \
   || _v_ok "settings.conf has no selection-screen leftovers"
 
+step "sentinel-fenced custom/*.lua blocks"
+# Iron-Rule bug-class guard: every distro write into an upstream custom/*.lua
+# slot MUST be wrapped in a `-- >>> illogical-impulse <name>` / `-- <<< …` fence
+# so `iictl revert-all` can strip exactly our block (PROPOSAL §4 Pillar 5; the
+# shared ii_lua_block_write/ii_lua_block_remove helpers in mutator.sh own all
+# reads/writes). A bare distro exec-hook (hl.on / hl.exec_cmd) outside a fence is
+# the bug — it would survive a revert. Audits the staged skel (catches profile
+# additions too). Upstream's own stubs carry no such hooks, so any hit is ours.
+CUSTOM_DIR="$AIROOTFS/etc/skel/.config/hypr/custom"
+if [[ -d "$CUSTOM_DIR" ]]; then
+  _fence_n=0 _fence_bad=0
+  shopt -s nullglob
+  for _lua in "$CUSTOM_DIR"/*.lua; do
+    _fence_n=$((_fence_n+1))
+    if awk '
+      /^-- >>> illogical-impulse / { inblk=1; next }
+      /^-- <<< illogical-impulse / { inblk=0; next }
+      !inblk && /hl\.(on|exec_cmd)\(/ { bad=1 }
+      END { exit (bad ? 1 : 0) }
+    ' "$_lua"; then
+      :   # clean — every distro exec-hook is inside a fence
+    else
+      _v_fail "unfenced distro block in skel custom/$(basename "$_lua") — wrap in -- >>> illogical-impulse <name> / -- <<< …"
+      _fence_bad=$((_fence_bad+1))
+    fi
+  done
+  shopt -u nullglob
+  if (( _fence_n == 0 )); then
+    _v_warn "no custom/*.lua in skel (expected at least execs.lua with the welcome fence)"
+  elif (( _fence_bad == 0 )); then
+    _v_ok "$_fence_n custom/*.lua file(s): every distro exec-hook is sentinel-fenced"
+  fi
+else
+  _v_warn "skel custom/ dir missing — run just prepare"
+fi
+
 step "iictl.d/ plugin architecture"
 # Bug-class guarded here: a silently-broken drop-in (no shebang, not +x, syntax
 # error, or no #help: line) loads as a no-op or breaks `iictl help`. Every staged
 # plugin must be a runnable, discoverable executable. Mirrors the runtime-script
 # syntax step. Also asserts the resolver replaced the old blanket `*) die`.
-for _lib in iictl-common.sh ledger.sh; do
+for _lib in iictl-common.sh ledger.sh mutator.sh; do
   _L="$AIROOTFS/usr/local/lib/ii/$_lib"
   if [[ ! -f "$_L" ]]; then
     _v_fail "iictl lib missing (not staged): $_lib"

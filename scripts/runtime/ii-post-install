@@ -10,6 +10,10 @@ set -u
 LOG=/var/log/ii-post-install.log
 mkdir -p "$(dirname "$LOG")"
 [[ -f /usr/local/lib/ii/session-offline.sh ]] && source /usr/local/lib/ii/session-offline.sh
+# ledger.sh is a survive-path lib (ii-verify keeps it). Sourced guarded for
+# parity with session-offline; the actual install-time row is recorded as the
+# NEW USER further below so it lands in their state dir, not root's.
+[[ -f /usr/local/lib/ii/ledger.sh ]] && source /usr/local/lib/ii/ledger.sh
 type ii_tee_log &>/dev/null && ii_tee_log "$LOG" \
   || { exec 3>&1; exec > >(tee -a "$LOG" >&3); exec 2>&1; }
 
@@ -115,6 +119,20 @@ if [[ -e /usr/lib/systemd/system/docker.socket ]]; then
   ln -sf /usr/lib/systemd/system/docker.socket /etc/systemd/system/sockets.target.wants/docker.socket
   [[ -n "$NEW_USER" ]] && getent group docker >/dev/null \
     && try "docker group" usermod -aG docker "$NEW_USER"
+fi
+
+# ── ledger: record install-time distro setup in the NEW USER's state dir ──
+# The docker group add above is install-time distro setup, not part of vanilla
+# upstream — record it so `iictl revert-all --deep` (#4) can peel it. Recorded
+# AS the new user (env-passing mirrors the ii-ensure-venv block below) so the
+# ledger lands in their ~/.local/state, not root's. Fail-soft via try.
+if [[ -n "$NEW_USER" && -r /usr/local/lib/ii/ledger.sh ]] && getent group docker >/dev/null 2>&1; then
+  H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
+  if [[ -n "$H" && -d "$H" ]]; then
+    try "ledger: docker group" sudo -u "$NEW_USER" env \
+      HOME="$H" XDG_STATE_HOME="$H/.local/state" II_USER="$NEW_USER" \
+      bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record group docker "" "" "user=$II_USER"'
+  fi
 fi
 
 # ── cups (baked): socket activation for printing ──────────────────────────
