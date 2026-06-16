@@ -290,7 +290,19 @@ update vm clean nuke assets`.
   packages.x86_64 criticals → airootfs structure → identity → Calamares
   (branding, instance mapping, unpackfs sourcefs, bootloader) → batteries
   spot-check + nvidia manifests → mkinitcpio hooks → repo conf → script
-  syntax (`bash -n` everything).
+  syntax (`bash -n` everything) → **additive/reversibility lint** (Pillar 6).
+- **`tools/lint-additive.sh`** — the mechanical Iron-Law enforcer, sourced by
+  `validate.sh` as the `step "additive/reversibility lint"`. Owns the four
+  structural Pillar-6 checks: (0) `skel-upstream` precondition hard-fail (no
+  false pass on an empty basis), (1) skel-shadow collision — no
+  `overlay/skel-distro` file or `skel-distro.fetch` dest may land on an
+  upstream-owned path (exact shadow of a `skel-upstream` file, or inside an
+  `install_dir__sync` dir; the empty `custom/*.lua` slots + the OOB
+  `kitty-theme.conf` STATE seed are exempt), (4) `packages/optional/*.list`
+  validity + no double-bake into `packages.x86_64`, (6) PII guard
+  (`[user]` block, build-host git identity, baked email). The other three
+  Pillar-6 checks (fence, `iictl.d` hygiene, `ii-verify` survival) already live
+  inline in their own `validate.sh` steps — see the file header for the map.
 - `just vm [--disk|--installed|--fresh-disk]` — the manual gate today, the
   CI smoke test of phase 5.
 - `.github/workflows/validate.yml` — prepare+validate in an

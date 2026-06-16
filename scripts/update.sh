@@ -24,6 +24,13 @@ PIN_AGE_DAYS=$(( ( $(date +%s) - $(git log -1 --format=%ct HEAD) ) / 86400 ))
 MIN_DAYS="$(tget upstream.min_days_between_releases)"
 REQUIRE_NEW="$(tget upstream.require_new_commits)"
 
+# The skel-shadow collision lint (tools/lint-additive.sh, PROPOSAL §4 Pillar 6)
+# that catches a dots bump newly colliding with overlay/skel-distro runs in
+# `just validate`, NOT here: it diffs against build/airootfs/etc/skel-upstream,
+# which only exists after `just prepare`. The release flow already gates on a
+# post-bump `just prepare && just validate` (BLUEPRINT §7), so a bump that
+# introduces a collision fails there. Wiring it into this pre-prepare dry-run
+# would need a second upstream-set source — deferred (issue #8 step 10, optional).
 if [[ "$MODE" == "--check" ]]; then
   step "bump policy check"
   info "pinned:        $(git rev-parse --short HEAD) (${PIN_AGE_DAYS}d old)"
