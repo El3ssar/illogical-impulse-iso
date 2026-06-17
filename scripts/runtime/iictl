@@ -33,7 +33,7 @@ fi
 #help: update	update the dots (./setup); --system upgrades repos+AUR first
 #help: doctor	health checks (venv, greetd, boot, pacman)
 #help: venv	rebuild the Quickshell python venv
-#help: welcome	show the distro welcome card (--auto: first-boot logic)
+#help: welcome	show the distro welcome card (also: bare `iictl`; --auto: first-boot)
 #help: version	distro build + dots commit
 #help: help	show this help
 
@@ -42,9 +42,15 @@ DOTS_REPO=https://github.com/end-4/dots-hyprland
 DOTS_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/iictl/dots-hyprland"
 VENV="${XDG_STATE_HOME:-$HOME/.local/state}/quickshell/.venv"
 REQS=/usr/share/illogical-impulse/sdata/uv/requirements.txt
-UP_MARKER="${XDG_STATE_HOME:-$HOME/.local/state}/quickshell/user/first_run.txt"
 OUR_MARKER="${XDG_STATE_HOME:-$HOME/.local/state}/illogical-impulse/welcome_shown"
 WELCOME_QML=/usr/share/illogical-impulse/welcome
+# Upstream's first-boot wallpaper + Material-colour bootstrap, which we replicate
+# in `welcome --auto` (we suppress upstream's FirstRunExperience — see cmd_welcome).
+# Both paths are upstream-owned (read-only); we only read/run them. switchwall.sh
+# self-activates the venv via $ILLOGICAL_IMPULSE_VIRTUAL_ENV (exported by upstream's
+# hypr env.lua and inherited here), so it works standalone from this hook.
+DEFAULT_WALLPAPER="$HOME/.config/quickshell/ii/assets/images/default_wallpaper.png"
+SWITCHWALL="$HOME/.config/quickshell/ii/scripts/colors/switchwall.sh"
 
 # Print "verb<sep>desc" lines (sep = tab or spaces) as an aligned two-column list.
 _help_render() {
@@ -84,13 +90,20 @@ cmd_version() {
 
 cmd_update() {
   _not_root
+  # No controlling terminal (e.g. the welcome card's embedded console, which has
+  # no way to answer a [Y/n] prompt) → run fully non-interactively. From a real
+  # terminal we stay interactive so the user can review the upgrade. Upstream's
+  # `./setup install --force` is already non-interactive (ask=false → --noconfirm)
+  # regardless; this only governs OUR paru/pacman -Syu calls below.
+  local CONFIRM=()
+  [[ -t 0 ]] || CONFIRM=(--noconfirm)
   if [[ "${1:-}" == "--system" ]]; then
     echo "${C_B}>> full system upgrade (repos + AUR via paru)${C_0}"
     if command -v paru >/dev/null; then
-      paru -Syu || die "system upgrade failed"
+      paru -Syu "${CONFIRM[@]}" || die "system upgrade failed"
     else
       warn "paru not found — falling back to pacman (no AUR updates)"
-      sudo pacman -Syu || die "system upgrade failed"
+      sudo pacman -Syu "${CONFIRM[@]}" || die "system upgrade failed"
     fi
   fi
   echo "${C_B}>> updating Illogical Impulse dots (upstream ./setup)${C_0}"
@@ -102,8 +115,12 @@ cmd_update() {
     mkdir -p "$(dirname "$DOTS_CACHE")"
     git clone --depth=1 "$DOTS_REPO" "$DOTS_CACHE" || die "dots clone failed"
   fi
-  # Upstream's own updater: respects custom/, backs up changed files.
-  ( cd "$DOTS_CACHE" && ./setup install --noask ) || die "upstream setup failed — see output above"
+  # Upstream's own updater: respects custom/, backs up changed files. `--force`
+  # is end-4's non-interactive switch (sets ask=false — confirm nothing); the old
+  # `--noask` flag this once used was dropped upstream and now hard-errors out of
+  # getopt. `--skip-allgreeting` drops the irrelevant AGS-deprecation banner.
+  ( cd "$DOTS_CACHE" && ./setup install --force --skip-allgreeting ) \
+    || die "upstream setup failed — see output above"
   ok "dots updated to $(git -C "$DOTS_CACHE" rev-parse --short HEAD)"
 }
 
@@ -165,16 +182,29 @@ cmd_doctor() {
   if (( fails == 0 )); then echo "${C_G}all good${C_0}"; else echo "${C_R}$fails problem(s)${C_0}"; exit 1; fi
 }
 
+# First-boot wallpaper + Material-colour bootstrap. Upstream's
+# FirstRunExperience.qml normally runs switchwall.sh on the very first login; we
+# suppress that app (ii-post-install pre-seeds its first_run.txt marker) so OUR
+# card shows instead of upstream's — which means we must run the same bootstrap
+# ourselves, exactly once, or the rice boots with un-themed Material defaults.
+# Fail-soft: a missing script/wallpaper just means no colour pregen, never a
+# blocked card. Backgrounded so the card appears immediately; colours pop in.
+_first_run_bootstrap() {
+  [[ -x "$SWITCHWALL" && -f "$DEFAULT_WALLPAPER" ]] || return 0
+  ( "$SWITCHWALL" "$DEFAULT_WALLPAPER" >/dev/null 2>&1 || true ) &
+}
+
 cmd_welcome() {
   if [[ "${1:-}" == "--auto" ]]; then
-    # First-boot sequencing: upstream's welcome owns the FIRST login (it
-    # writes first_run.txt and shows its app). Our card takes the next
-    # login, exactly once. Never both in the same session.
-    [[ -f "$UP_MARKER" ]]   || exit 0
-    [[ -f "$OUR_MARKER" ]]  && exit 0
+    # Our card REPLACES upstream's first-run welcome: ii-post-install seeds
+    # first_run.txt so upstream's FirstRunExperience.qml never fires (no upstream
+    # welcome, and no upstream switchwall). We show our card exactly once
+    # (OUR_MARKER) and, on that first run, replicate the wallpaper/colour bootstrap.
+    [[ -f "$OUR_MARKER" ]] && exit 0
+    sleep 3                 # let Quickshell + the session settle
+    _first_run_bootstrap    # switchwall(default wallpaper) — replaces upstream's
     mkdir -p "$(dirname "$OUR_MARKER")"
     : > "$OUR_MARKER"
-    sleep 3   # let the shell settle
   fi
   command -v qs >/dev/null || die "quickshell (qs) not found"
   ISO_RELEASE_VERSION="$(awk -F= '/^ISO_VERSION/{print $2}' "$RELEASE_FILE" 2>/dev/null)" \
@@ -182,7 +212,7 @@ cmd_welcome() {
     exec qs -p "$WELCOME_QML"
 }
 
-case "${1:-help}" in
+case "${1:-welcome}" in
   version)  shift; cmd_version "$@" ;;
   update)   shift; cmd_update  "$@" ;;
   venv)     shift; cmd_venv    "$@" ;;

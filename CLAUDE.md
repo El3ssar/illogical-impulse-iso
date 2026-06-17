@@ -167,8 +167,15 @@ Don't "simplify" these away — each cost real debugging time:
 - **Live tmpfs gnupg mount surviving install** → broken keyring.
   `ii-post-install` removes the mount unit; the on-disk keyring survives.
 - **Color pregen in chroot races `applycolor.sh`** → we don't pregen; the
-  Quickshell FirstRunExperience does it on first boot. A static
-  `kitty-theme.conf` in `overlay/skel-distro` covers the gap.
+  first-boot wallpaper switch (`switchwall.sh`) generates colours in a real
+  Hyprland session. We **suppress upstream's FirstRunExperience** (its welcome
+  app) so OUR welcome card shows instead — `ii-post-install` pre-seeds its
+  `~/.local/state/quickshell/user/first_run.txt` marker (reversibly, ledger-
+  recorded). Suppressing it ALSO kills upstream's first-boot `switchwall`, so
+  `iictl welcome --auto` re-runs it itself once (it self-activates the venv via
+  `$ILLOGICAL_IMPULSE_VIRTUAL_ENV` from upstream's hypr `env.lua`). A static
+  `kitty-theme.conf` in `overlay/skel-distro` covers the gap before it runs.
+  Don't "fix" the seed away — without it the upstream welcome reappears.
 - **`welcomeStyleCalamares: false`** hides `productWelcome` — keep `true` in
   `branding.desc`.
 - **prebuild wiping cache before makepkg succeeds** → empty cache on
