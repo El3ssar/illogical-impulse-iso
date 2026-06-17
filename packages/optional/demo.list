@@ -1,0 +1,9 @@
+# demo — a tiny example pack that proves the `iictl pack` round-trip end to end
+# (PROPOSAL §4 Pillar 1). The real packs (gaming, lang-*, virt, security…) land
+# in #19/#25; this is the minimal example the maintainer installs and removes to
+# verify the engine. All members are small, official-repo CLIs and are NEVER
+# baked into the image — `iictl pack install demo` fetches them online on demand,
+# `iictl pack remove demo` does an exact `pacman -Rns` of the recorded set.
+#meta:type example
+sl
+cowsay

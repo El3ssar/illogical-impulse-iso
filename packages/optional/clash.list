@@ -1,0 +1,8 @@
+# clash — example pack that demonstrates the `#meta:conflicts` gate. It declares
+# a conflict with `cowsay` (a member of the `demo` pack), so installing `clash`
+# while `demo` is installed is refused BEFORE any pacman transaction runs —
+# proving conflict safety (no half-applied state). With `demo` absent it installs
+# normally. Its own member is a tiny official-repo CLI (never baked).
+#meta:type example
+#meta:conflicts cowsay
+figlet
