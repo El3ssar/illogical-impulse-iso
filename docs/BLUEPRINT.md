@@ -187,6 +187,40 @@ so the author confirms the tier. The discipline is what lets the distro be
 genuinely *batteries-included* while staying distributable: universal batteries
 baked, every heavy choice one reversible command away.
 
+### Reversibility engine — `iictl revert-all` (two-tier) + per-feature `--revert`
+
+`iictl revert-all` (`scripts/runtime-lib/iictl.d/revert-all`) is what makes the
+Iron Law demonstrable: it reads the TSV ledger newest-first and dispatches each
+recorded `kind` to its inverse **through the shared `mutator.sh`/`ledger.sh`
+helpers** — `lua-block` → `ii_lua_block_remove` (never a bespoke `sed`/`rm`),
+`service`/`service-disable` → `systemctl disable`/`enable`, `group` →
+`gpasswd -d`, `chsh` → restore prior shell, `pkg`/`pack` → offline `pacman -Rns`
+(no network, no `[ii-extra]`), `path` → remove owned paths, `skel-shadow` →
+restore the upstream copy. It is fail-soft (a failed inverse warns, is left in
+the ledger, and the replay continues), then re-runs `iictl doctor`. Successfully
+undone rows are pruned from the ledger; only skipped/failed rows remain.
+`validate.sh`'s `step "revert-all reversibility engine"` enforces the
+no-bespoke-stripping bug-class.
+
+- **Two-tier (`--deep`)** — the default scope undoes *iictl-time* user choices
+  (the common case). `--deep` additionally peels *install-time* distro setup
+  recorded by `ii-post-install` (e.g. the `docker` group). A row is install-time
+  iff its `restore_hint` carries the reserved **`src=install`** token (the
+  forward-compatible marker any install-flow recorder appends) **or** it matches
+  a known ii-post-install signature (today: `group docker`, the compat shim for
+  the row that predates the marker — extend the shim as `ii-post-install` grows
+  its reversible setup, or append `src=install` to new install-time rows).
+- **`--dry-run`** prints the ordered plan and makes zero changes (the codepath a
+  future Control Center "preview revert" reuses).
+- **Per-feature `--revert`** — a domain plugin reverts just its own ledger rows
+  by exec'ing `iictl revert-all <target>`, where `<target>` is matched exactly
+  **or as a prefix** (`iictl revert-all pack:foo` for one pack, `iictl revert-all
+  pack:` for all). This is the single shared mechanism; domains must NOT
+  re-implement ledger replay.
+- **User-edit guard** — before stripping a fenced `custom/*.lua` block, revert-all
+  diffs the current body against the pristine `/etc/skel` copy; a divergence is
+  **kept** and warned unless `--force` is given (PROPOSAL §17 edge case).
+
 ## 4. Pipeline contracts
 
 `just build [profile]` = `prepare [profile]` → `prebuild` → `mkiso`.
