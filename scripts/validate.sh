@@ -359,6 +359,34 @@ else
   _v_fail "iictl.d/ plugin dir not staged under usr/local/lib/ii/"
 fi
 
+step "revert-all reversibility engine"
+# revert-all (#4) replays the ledger in REVERSE to restore vanilla upstream. Its
+# bug-class guard (Iron Rule): it MUST strip fenced custom/*.lua blocks through
+# the shared mutator inverse (ii_lua_block_remove), never a bespoke rm -rf / sed
+# — a hand-rolled stripper would drift from the canonical fence routine, could
+# clobber user lines, and might survive a revert. Generic +x/shebang/bash -n/
+# #help are already asserted by the "iictl.d/ plugin architecture" step above;
+# this adds the engine-specific checks. Comments stripped first so the header's
+# *documentation* of the rule can neither satisfy nor trip the code checks.
+RA="$AIROOTFS/usr/local/lib/ii/iictl.d/revert-all"
+if [[ ! -f "$RA" ]]; then
+  _v_fail "iictl.d/revert-all not staged — the reversibility engine is missing"
+else
+  _ra_code="$(grep -vE '^[[:space:]]*#' "$RA")"
+  grep -q 'ii_lua_block_remove' <<<"$_ra_code" \
+    && _v_ok "revert-all strips fences via the shared ii_lua_block_remove helper" \
+    || _v_fail "revert-all never calls ii_lua_block_remove — it must use the shared mutator fence inverse, not bespoke stripping"
+  grep -qE 'source[^#]*/mutator\.sh' <<<"$_ra_code" \
+    && _v_ok "revert-all sources mutator.sh (shared inverses + II_FENCE_*)" \
+    || _v_fail "revert-all does not source mutator.sh — the shared inverses are unavailable"
+  if grep -qE '(sed|awk)[^|]*custom/[^[:space:]]*\.lua' <<<"$_ra_code" \
+     || grep -qE 'rm[[:space:]]+-[a-zA-Z]*[rR][a-zA-Z]*[[:space:]][^#]*custom/' <<<"$_ra_code"; then
+    _v_fail "revert-all open-codes fence stripping against custom/*.lua (sed/awk rewrite or rm -r) — use ii_lua_block_remove"
+  else
+    _v_ok "revert-all has no bespoke custom/*.lua stripping (no rm -r / sed against a slot)"
+  fi
+fi
+
 step "live mkinitcpio"
 MK="$AIROOTFS/etc/mkinitcpio.conf.d/archiso.conf"
 for h in base udev archiso block filesystems; do

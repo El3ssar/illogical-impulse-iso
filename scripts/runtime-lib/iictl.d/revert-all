@@ -1,0 +1,343 @@
+#!/usr/bin/env bash
+#help: revert-all	reverse-replay the ledger to restore vanilla upstream (--deep/--dry-run)
+# revert-all — the reversibility engine that makes the Iron Law demonstrable:
+# "delete our stuff, run one command, vanilla upstream returns." It replays the
+# append-only TSV state ledger (ledger.sh) in REVERSE, dispatching each recorded
+# action to its inverse through the shared mutator helpers (mutator.sh) — never a
+# bespoke `rm -rf`/`sed` against custom/*.lua. After the replay it re-runs
+# `iictl doctor` and prints a summary.
+#
+# Two-tier (PROPOSAL §4 Pillar 5 / §16 decision register):
+#   • default  → undoes iictl-time user choices (the common case).
+#   • --deep   → ALSO peels install-time distro setup recorded by ii-post-install
+#                (the docker group, etc.) for the purist "pure upstream" guarantee.
+#
+# Purely ADDITIVE: this is one new drop-in file and changes nothing on its own —
+# its only job is to UNDO ledger-recorded changes. Deleting it removes `iictl
+# revert-all` cleanly (the plugin layer is additive). It is also the single
+# owner of the per-feature `--revert` convention: a domain plugin implements
+# `<verb> --revert` by exec'ing `iictl revert-all <target-or-prefix>` (e.g.
+# `iictl revert-all pack:foo`, or `iictl revert-all pack:` for every pack), so no
+# domain re-implements ledger replay.
+#
+# Fail-soft: a single failed inverse warns, is left in the ledger, and the replay
+# continues — it never aborts mid-way leaving a half-reverted box. Successfully
+# undone rows are dropped from the ledger; rows that were skipped (out of scope)
+# or failed remain, so the ledger always reflects the true outstanding state.
+
+set -u
+
+# Shared header (colors, ok/bad/warn/die, _not_root, RELEASE_FILE, ledger_*) and
+# the mutator library (ii_lua_block_remove + the II_FENCE_* sentinel constants,
+# the ONLY sanctioned way to strip a fenced custom/*.lua block). Both source
+# ledger.sh themselves (II_LEDGER, the manifest we replay); double-source is safe.
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+source "${II_LIB:-/usr/local/lib/ii}/mutator.sh"
+
+# Pristine /etc/skel is the canonical reference for "did the user edit a fenced
+# block?" — overridable for the no-root unit test.
+II_SKEL_ROOT="${II_SKEL_ROOT:-/etc/skel}"
+
+_usage() {
+  cat <<EOF
+${C_B}iictl revert-all${C_0} — reverse-replay the reversibility ledger to vanilla upstream
+
+usage: iictl revert-all [--deep] [--dry-run] [--force] [<feature>]
+
+  --dry-run, -n   print the ordered plan and make ZERO changes
+  --deep          also peel install-time distro setup (groups/services baked by
+                  ii-post-install), not just iictl-time user choices
+  --force, -f     remove a fenced custom/*.lua block even if you edited its body
+  <feature>       only revert rows whose ledger target equals or is prefixed by
+                  this (e.g. 'pack:foo', or 'pack:' for all packs) — the shared
+                  per-feature \`--revert\` mechanism
+
+The ledger lives at \$XDG_STATE_HOME/illogical-impulse/ledger.tsv. Package
+removal is offline-safe (pacman -Rns); no network or [ii-extra] is needed.
+EOF
+}
+
+# ── TSV row parsing ──────────────────────────────────────────────────────────
+# _split_tsv <row> — split one 6-column ledger row into the F_* globals WITHOUT
+# losing empty fields. `read -r` with IFS=$'\t' folds runs of tab (tab is IFS
+# whitespace) and would drop empty columns, so split by hand. Rows are sanitized
+# at write time to exactly 5 tabs, so this is exact.
+_split_tsv() {
+  local line="$1"
+  F_ts="${line%%$'\t'*}";        line="${line#*$'\t'}"
+  F_kind="${line%%$'\t'*}";      line="${line#*$'\t'}"
+  F_target="${line%%$'\t'*}";    line="${line#*$'\t'}"
+  F_pkgs="${line%%$'\t'*}";      line="${line#*$'\t'}"
+  F_owned="${line%%$'\t'*}";     line="${line#*$'\t'}"
+  F_hint="$line"
+}
+
+# ── install-time classification (the two-tier gate) ──────────────────────────
+# _is_install_row — true if the current F_* row is install-time distro setup
+# (peeled only with --deep), false if it is an iictl-time user choice (the
+# default scope). Two signals, in priority order:
+#   1. Explicit marker — a `src=install` token anywhere in restore_hint. This is
+#      the forward-compatible convention: ii-post-install and any future
+#      install-flow recorder opt in by appending it (documented in BLUEPRINT §3).
+#   2. Known-signature compat shim — the already-shipped ii-post-install predates
+#      the marker and records exactly one reversible install-time row today: the
+#      `docker` group membership (`group docker … user=<u>`). Recognise it so the
+#      shipped system behaves per spec (docker group peeled by --deep, not the
+#      default) without retro-editing the #3-era recorder. Extend as
+#      ii-post-install grows its reversible install-time setup.
+_is_install_row() {
+  [[ "$F_hint" == *src=install* ]] && return 0
+  [[ "$F_kind" == group && "$F_target" == docker ]] && return 0
+  return 1
+}
+
+# ── fenced-block user-edit guard ─────────────────────────────────────────────
+# _extract_block_body <file> <name> — print the lines strictly inside the named
+# sentinel fence. Same exact-line fence match as mutator.sh's _ii_lua_strip.
+_extract_block_body() {
+  local file="$1" name="$2"
+  [[ -f "$file" ]] || return 0
+  awk -v fbeg="$II_FENCE_OPEN$name" -v fend="$II_FENCE_CLOSE$name" '
+    $0 == fbeg          { inblk = 1; next }
+    inblk && $0 == fend { inblk = 0; next }
+    inblk               { print }
+  ' "$file"
+}
+
+# _canonical_block_body <file> <name> — the pristine body of the same block from
+# the matching /etc/skel file (mapped by stripping $HOME). Empty if it cannot be
+# located (no $HOME mapping, or no skel copy) → caller then cannot prove an edit.
+_canonical_block_body() {
+  local file="$1" name="$2" rel canon
+  rel="${file#"${HOME%/}"/}"
+  [[ "$rel" != "$file" ]] || return 0          # not under $HOME → unmappable
+  canon="$II_SKEL_ROOT/$rel"
+  [[ -f "$canon" ]] || return 0
+  _extract_block_body "$canon" "$name"
+}
+
+# _block_user_edited <file> <name> — true ONLY on a positive mismatch against a
+# known-good canonical body. If no canonical reference exists we cannot prove an
+# edit, so we treat the block as ours-and-unmodified (removing it restores
+# vanilla — that is the whole point of the fence). PROPOSAL §17 edge case:
+# "revert must diff/warn before removing a fence whose body the user edited."
+_block_user_edited() {
+  local file="$1" name="$2" cur canon
+  canon="$(_canonical_block_body "$file" "$name")"
+  [[ -n "$canon" ]] || return 1
+  cur="$(_extract_block_body "$file" "$name")"
+  [[ "$cur" == "$canon" ]] && return 1 || return 0
+}
+
+# ── privilege helper ─────────────────────────────────────────────────────────
+# We run as the user (_not_root). The privileged inverses (pacman, gpasswd, chsh,
+# systemctl) go through sudo — the baked 10-wheel-nopasswd drop-in makes that
+# non-interactive on a real install. The fenced-block + path inverses are
+# user-owned and need no sudo.
+_sudo() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
+
+# ── plan rendering ───────────────────────────────────────────────────────────
+# _plan_line — one human-readable line describing the inverse of the current
+# F_* row. Printed for --dry-run AND as the live action log.
+_plan_line() {
+  case "$F_kind" in
+    lua-block)       printf 'strip fenced block "%s" from %s' "$F_hint" "$F_target" ;;
+    service)         printf 'disable service %s (was: %s)' "$F_target" "${F_hint:-disabled}" ;;
+    service-disable) printf 're-enable service %s' "$F_target" ;;
+    group)           printf 'remove %s from group %s' "${F_hint#user=}" "$F_target" ;;
+    chsh)            printf 'restore login shell of %s to %s' "$F_target" "$F_hint" ;;
+    pkg|pack)        printf 'pacman -Rns %s' "$F_pkgs" ;;
+    path|file)       printf 'remove path(s): %s' "$F_owned" ;;
+    skel-shadow)     printf 'restore upstream copy of %s' "$F_target" ;;
+    *)               printf 'UNKNOWN kind "%s" — leave in place' "$F_kind" ;;
+  esac
+}
+
+# ── the inverse dispatcher ───────────────────────────────────────────────────
+# _revert_row — apply the inverse of the current F_* row. Returns:
+#   0  undone (drop the row from the ledger)
+#   1  failed (keep the row; reported in the summary)
+#   2  skipped — user-edited fence without --force (keep the row)
+# Every inverse is RAW / non-recording (or ii_lua_block_remove, which records
+# nothing by contract) so the replay never appends fresh ledger rows.
+_revert_row() {
+  case "$F_kind" in
+    lua-block)
+      local file="$F_target" name="$F_hint"
+      [[ -z "$file" && -n "$F_owned" ]] && file="${F_owned%%,*}"   # fall back to owned_paths
+      [[ -n "$file" && -n "$name" ]] || { warn "lua-block row missing file/name — left in place"; return 1; }
+      [[ -f "$file" ]] || return 0                                  # already gone
+      if _block_user_edited "$file" "$name"; then
+        if (( FORCE )); then
+          warn "block '$name' in $file was edited — removing anyway (--force)"
+        else
+          warn "block '$name' in $file was edited by you — kept (use --force to remove)"
+          return 2
+        fi
+      fi
+      ii_lua_block_remove "$file" "$name" && return 0 || return 1
+      ;;
+    service)            # we enabled it → restore prior by disabling
+      _sudo systemctl disable "$F_target" >/dev/null 2>&1 && return 0 || return 1
+      ;;
+    service-disable)    # we disabled it → re-enable if prior was enabled
+      [[ "$F_hint" == enabled || -z "$F_hint" ]] || return 0
+      _sudo systemctl enable "$F_target" >/dev/null 2>&1 && return 0 || return 1
+      ;;
+    group)
+      local u="${F_hint#user=}"
+      [[ -n "$u" && "$u" != "$F_hint" ]] || { warn "group row missing user= hint — left in place"; return 1; }
+      _sudo gpasswd -d "$u" "$F_target" >/dev/null 2>&1 && return 0 || return 1
+      ;;
+    chsh)
+      [[ -n "$F_hint" ]] || { warn "chsh row missing prior shell — left in place"; return 1; }
+      _sudo chsh -s "$F_hint" "$F_target" >/dev/null 2>&1 && return 0 || return 1
+      ;;
+    pkg|pack)           # offline-safe: removal needs no network or [ii-extra]
+      [[ -n "$F_pkgs" ]] || return 0
+      # shellcheck disable=SC2086 # word-split the space-separated resolved set
+      _sudo pacman -Rns --noconfirm $F_pkgs >/dev/null 2>&1 && return 0 || return 1
+      ;;
+    path|file)
+      local p rc=0 paths
+      IFS=',' read -ra paths <<< "$F_owned"
+      for p in "${paths[@]}"; do
+        [[ -n "$p" ]] || continue
+        rm -f "$p" 2>/dev/null || rc=1
+      done
+      return $rc
+      ;;
+    skel-shadow)        # restore the upstream copy we shadowed (hint=backup path)
+      local target="$F_target" backup="$F_hint"
+      [[ -n "$target" ]] || return 1
+      if [[ -n "$backup" && -e "$backup" ]]; then
+        cp -a "$backup" "$target" 2>/dev/null && return 0 || return 1
+      fi
+      local rel canon
+      rel="${target#"${HOME%/}"/}"
+      canon="$II_SKEL_ROOT/$rel"
+      if [[ "$rel" != "$target" && -e "$canon" ]]; then
+        cp -a "$canon" "$target" 2>/dev/null && return 0 || return 1
+      fi
+      warn "skel-shadow $target: no backup or skel copy to restore — left in place"
+      return 1
+      ;;
+    *)
+      warn "unknown ledger kind '$F_kind' (target=$F_target) — left in place"
+      return 1
+      ;;
+  esac
+}
+
+# ── ledger rewrite ───────────────────────────────────────────────────────────
+# _rewrite_ledger — atomically rewrite II_LEDGER keeping every comment/header
+# line and every data row still flagged KEEP (out-of-scope or failed). Undone
+# rows are dropped. The ledger is normally append-only; revert-all is the single
+# sanctioned consumer that prunes it as the manifest is replayed.
+_rewrite_ledger() {
+  local tmp i
+  tmp="$(mktemp)" || { warn "could not rewrite ledger (mktemp failed) — stale rows remain"; return 1; }
+  for i in "${!RAW[@]}"; do
+    if [[ "${RAW[$i]}" == '#'* || -z "${RAW[$i]}" || "${KEEP[$i]}" == 1 ]]; then
+      printf '%s\n' "${RAW[$i]}"
+    fi
+  done > "$tmp"
+  cat "$tmp" > "$II_LEDGER" && rm -f "$tmp" || { warn "ledger rewrite failed — stale rows remain"; rm -f "$tmp"; return 1; }
+}
+
+# ── argument parsing ─────────────────────────────────────────────────────────
+DRYRUN=0 DEEP=0 FORCE=0 FILTER=""
+while (( $# )); do
+  case "$1" in
+    --dry-run|-n) DRYRUN=1 ;;
+    --deep)       DEEP=1 ;;
+    --force|-f)   FORCE=1 ;;
+    -h|--help)    _usage; exit 0 ;;
+    --)           shift; [[ -n "${1:-}" ]] && FILTER="$1"; break ;;
+    -*)           die "unknown option: $1 (try: iictl revert-all --help)" ;;
+    *)            [[ -z "$FILTER" ]] || die "only one <feature> filter allowed (got '$FILTER' and '$1')"; FILTER="$1" ;;
+  esac
+  shift
+done
+
+_not_root
+
+# ── load the ledger ──────────────────────────────────────────────────────────
+if [[ ! -f "$II_LEDGER" ]]; then
+  echo "${C_B}iictl revert-all${C_0}: nothing to revert (no ledger at $II_LEDGER)"
+  exit 0
+fi
+mapfile -t RAW < "$II_LEDGER"
+
+# Index the data rows (everything that is not a comment/blank), in file order —
+# this mirrors ledger_query's row set. Default every RAW line to KEEP=1; the
+# replay flips undone data rows to 0.
+declare -A KEEP=()
+DATA_IDX=()
+for i in "${!RAW[@]}"; do
+  KEEP["$i"]=1
+  [[ "${RAW[$i]}" == '#'* || -z "${RAW[$i]}" ]] && continue
+  DATA_IDX+=("$i")
+done
+
+# ── header / mode banner ─────────────────────────────────────────────────────
+echo "${C_B}iictl revert-all${C_0} — reverse-replay the reversibility ledger"
+mode="iictl-time choices"; (( DEEP )) && mode="iictl-time + install-time (--deep)"
+echo "  scope: $mode${FILTER:+   feature filter: $FILTER}"
+(( DRYRUN )) && echo "  ${C_Y}dry run${C_0} — no changes will be made"
+echo
+
+# ── reverse replay (newest action undone first) ──────────────────────────────
+UNDONE=0 FAILED=0 SKIPPED=0 OUTSCOPE=0 PLANNED=0
+for (( j=${#DATA_IDX[@]}-1; j>=0; j-- )); do
+  ri="${DATA_IDX[$j]}"
+  _split_tsv "${RAW[$ri]}"
+
+  # per-feature filter: leave non-matching rows untouched (and in the ledger).
+  if [[ -n "$FILTER" ]]; then
+    [[ "$F_target" == "$FILTER" || "$F_target" == "$FILTER"* ]] || continue
+  fi
+
+  # two-tier gate: install-time rows are out of scope unless --deep.
+  if _is_install_row && (( ! DEEP )); then
+    OUTSCOPE=$((OUTSCOPE+1))
+    continue
+  fi
+
+  PLANNED=$((PLANNED+1))
+  printf '  • %s\n' "$(_plan_line)"
+  (( DRYRUN )) && continue
+
+  _revert_row; rc=$?
+  case "$rc" in
+    0) UNDONE=$((UNDONE+1));  KEEP["$ri"]=0 ;;
+    2) SKIPPED=$((SKIPPED+1)) ;;
+    *) FAILED=$((FAILED+1)) ;;
+  esac
+done
+
+(( PLANNED == 0 )) && echo "  (nothing in scope to revert)"
+
+# ── dry-run stops here, having touched nothing ───────────────────────────────
+if (( DRYRUN )); then
+  echo
+  echo "${C_Y}dry run complete${C_0} — $PLANNED action(s) planned, ledger untouched"
+  exit 0
+fi
+
+# ── prune the ledger of everything we undid ──────────────────────────────────
+(( UNDONE > 0 )) && _rewrite_ledger
+
+# ── verify: re-run doctor (when iictl is on PATH — i.e. a real install) ──────
+echo
+if command -v iictl >/dev/null 2>&1; then
+  echo "${C_B}>> re-running iictl doctor${C_0}"
+  iictl doctor || warn "doctor reported problems (see above)"
+else
+  warn "iictl not on PATH — skipping post-revert doctor"
+fi
+
+# ── summary ──────────────────────────────────────────────────────────────────
+echo
+echo "${C_B}revert-all summary${C_0}: ${UNDONE} undone · ${SKIPPED} kept (user-edited) · ${FAILED} failed · ${OUTSCOPE} install-time skipped$( (( DEEP )) || printf ' (use --deep)')"
+(( FAILED == 0 ))
