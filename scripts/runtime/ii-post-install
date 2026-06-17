@@ -217,10 +217,10 @@ if [[ -n "$NEW_USER" ]]; then
 fi
 
 # ── Quickshell venv at the new user's real $HOME (offline wheelhouse) ────
-# The ONLY user-state work we do — venvs bake absolute paths into activate
-# scripts, so this can't live in /etc/skel. Color generation, kitty theming,
-# etc. are NOT pre-rendered: Quickshell FirstRunExperience.qml handles those
-# in a real Hyprland session on first login.
+# venvs bake absolute paths into their activate scripts, so this can't live in
+# /etc/skel. Color generation, kitty theming, etc. are NOT pre-rendered: on
+# first login `iictl welcome --auto` runs switchwall.sh in a real Hyprland
+# session (it replaces upstream's FirstRunExperience — suppressed just below).
 if [[ -n "$NEW_USER" ]]; then
   H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
   VENV="$H/.local/state/quickshell/.venv"
@@ -237,6 +237,32 @@ if [[ -n "$NEW_USER" ]]; then
       || T "  CRIT  Quickshell venv missing Pillow/materialyoucolor — first-boot color gen will fail"
   else
     T "  CRIT  no Quickshell venv at $VENV"
+  fi
+fi
+
+# ── deactivate upstream's first-run welcome; defer to ours ─────────────────
+# Upstream's FirstRunExperience.qml shows its own welcome app (and runs
+# switchwall.sh) on the first login where ~/.local/state/quickshell/user/
+# first_run.txt is absent. We pre-seed that marker so it stays quiet, and OUR
+# card shows instead (iictl welcome --auto, launched from skel custom/execs.lua),
+# which replicates the wallpaper/colour bootstrap itself. Additive + reversible:
+# the marker is recorded in the new user's ledger, so `iictl revert-all` removes
+# it and the vanilla upstream welcome returns on the next login.
+if [[ -n "$NEW_USER" ]]; then
+  H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
+  if [[ -n "$H" && -d "$H" ]]; then
+    FRUN="$H/.local/state/quickshell/user/first_run.txt"
+    if [[ ! -e "$FRUN" ]]; then
+      install -d -o "$NEW_USER" -g "$NEW_USER" "$(dirname "$FRUN")"
+      printf "This file is just here to confirm you've been greeted :>\n" > "$FRUN"
+      chown "$NEW_USER:$NEW_USER" "$FRUN"
+      T "  seeded first_run.txt → upstream welcome suppressed; ours shows on first login"
+      if [[ -r /usr/local/lib/ii/ledger.sh ]]; then
+        try "ledger: first-run welcome override" sudo -u "$NEW_USER" env \
+          HOME="$H" XDG_STATE_HOME="$H/.local/state" \
+          bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record file-seed first-run-welcome "" "$HOME/.local/state/quickshell/user/first_run.txt" "rm to restore upstream first-run welcome"'
+      fi
+    fi
   fi
 fi
 

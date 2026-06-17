@@ -283,6 +283,72 @@ grep -qE '^\s*- (netinstall|packages)\s*(#.*)?$' "$SETTINGS" \
   && _v_fail "settings.conf still references the removed selection flow" \
   || _v_ok "settings.conf has no selection-screen leftovers"
 
+step "iictl update flags + embedded welcome"
+# Bug-class guards for the 'iictl update --noask' fix + the embedded welcome:
+#   • iictl must NOT pass the dropped '--noask' to upstream ./setup (it now
+#     hard-errors out of getopt), and EVERY flag it does pass must be a real
+#     upstream long-option — so an upstream rename can't silently re-break
+#     `iictl update`. Cross-checked against the live submodule's getopt decl.
+#   • the welcome card runs actions IN-WINDOW (no external terminal spawn).
+#   • bare `iictl` opens the card; --auto still runs the switchwall first-boot
+#     bootstrap (we suppress upstream's FirstRunExperience that normally does).
+#   • ii-post-install seeds first_run.txt (reversibly) to suppress upstream's
+#     welcome so ours shows instead.
+IICTL_F="$AIROOTFS/usr/local/bin/iictl"
+WELCOME_QML_F="$AIROOTFS/usr/share/illogical-impulse/welcome/shell.qml"
+SETUP_OPTS_F="$DOTS/sdata/subcmd-install/options.sh"
+POST_F="$AIROOTFS/usr/local/bin/ii-post-install"
+if [[ -f "$IICTL_F" ]]; then
+  _iictl_nc=$(grep -vE '^[[:space:]]*#' "$IICTL_F")   # code only — comments mention --noask/--force
+  if grep -qE '\./setup .*--noask' <<<"$_iictl_nc"; then
+    _v_fail "iictl passes the removed '--noask' to ./setup — upstream getopt hard-errors on it"
+  else
+    _v_ok "iictl no longer passes --noask to ./setup"
+  fi
+  _setup_flags=$(grep -oE '\./setup install[^)]*' <<<"$_iictl_nc" | grep -oE -- '--[a-z][a-z-]+' | sort -u)
+  if [[ -f "$SETUP_OPTS_F" ]] \
+     && _longopts=$(grep -oE -- '-l [a-z,:-]+' "$SETUP_OPTS_F" | head -1 | sed -E 's/^-l //') \
+     && [[ -n "$_longopts" ]]; then
+    _bad_flag=0
+    for _f in $_setup_flags; do
+      case ",$_longopts," in
+        *",${_f#--},"*) : ;;
+        *) _v_fail "iictl passes '$_f' to ./setup install — not a known upstream long-option"; _bad_flag=1 ;;
+      esac
+    done
+    (( _bad_flag == 0 )) && [[ -n "$_setup_flags" ]] \
+      && _v_ok "iictl ./setup install flags ($(echo $_setup_flags)) are all valid upstream long-opts"
+  else
+    _v_warn "could not parse upstream getopt long-opts ($SETUP_OPTS_F) — flag cross-check skipped"
+  fi
+  grep -qF '${1:-welcome}' "$IICTL_F" \
+    && _v_ok "bare 'iictl' opens the welcome card" \
+    || _v_fail "iictl default verb is not 'welcome' — bare iictl should open the card"
+  grep -q 'switchwall' "$IICTL_F" \
+    && _v_ok "iictl welcome --auto replicates the switchwall first-boot bootstrap" \
+    || _v_fail "iictl dropped the switchwall bootstrap — first-boot colours won't generate (upstream's is suppressed)"
+else
+  _v_fail "iictl missing from airootfs"
+fi
+if [[ -f "$WELCOME_QML_F" ]]; then
+  if grep -qE '"(kitty|foot|alacritty|wezterm|konsole|xterm)"|execDetached' "$WELCOME_QML_F"; then
+    _v_fail "welcome shell.qml spawns an external terminal — update/doctor must run in the embedded console"
+  else
+    _v_ok "welcome shell.qml spawns no external terminal"
+  fi
+  grep -q 'Process' "$WELCOME_QML_F" && grep -q 'SplitParser' "$WELCOME_QML_F" \
+    && _v_ok "welcome shell.qml streams actions into an embedded console (Process + SplitParser)" \
+    || _v_fail "welcome shell.qml has no embedded Process/SplitParser console"
+fi
+if [[ -f "$POST_F" ]]; then
+  grep -q 'first_run.txt' "$POST_F" \
+    && _v_ok "ii-post-install seeds first_run.txt (upstream welcome suppressed; ours shows)" \
+    || _v_fail "ii-post-install does not seed first_run.txt — upstream welcome will still fire"
+  grep -q 'first-run-welcome' "$POST_F" \
+    && _v_ok "first_run.txt seed is ledger-recorded (revert-all restores the upstream welcome)" \
+    || _v_warn "first_run.txt seed not recorded in the ledger — revert-all couldn't undo it"
+fi
+
 step "sentinel-fenced custom/*.lua blocks"
 # Iron-Rule bug-class guard: every distro write into an upstream custom/*.lua
 # slot MUST be wrapped in a `-- >>> illogical-impulse <name>` / `-- <<< …` fence
