@@ -139,10 +139,21 @@ step "/etc/skel = skel-upstream + skel-distro"
 install -d "$SKEL"
 rsync -a "$SKEL_UP/" "$SKEL/"
 [[ -d "$OVERLAY/skel-distro" ]] && rsync -a "$OVERLAY/skel-distro/" "$SKEL/"
-# OOB state defaults (static kitty-theme.conf) must also reach liveuser,
-# who is seeded from skel-upstream + skel-live, never from /etc/skel.
+# OOB state defaults (static kitty-theme.conf) must also reach liveuser, who is
+# seeded from skel-upstream + skel-live, never from /etc/skel. So skel-distro/
+# .local/state lands in skel-upstream here too.
+# EXCEPTION — first_run.txt (the upstream-welcome suppression marker, issue #13)
+# is EXCLUDED from the liveuser copy ON PURPOSE: the welcome hook that replaces
+# upstream's first-run (custom/execs.lua → iictl welcome --auto) ships only in
+# skel-distro → /etc/skel (the installed user). The liveuser's custom/execs.lua
+# comes from skel-live (installer launcher only), so seeding the marker here would
+# suppress upstream's FirstRunExperience for liveuser with NOTHING to replace it —
+# no default wallpaper, no colour generation, no welcome on a Try-live boot (see
+# chroot.sh, which defers the live wallpaper/colour bootstrap to upstream's
+# first-run). The marker reaches the installed user via /etc/skel above.
 [[ -d "$OVERLAY/skel-distro/.local/state" ]] \
-  && rsync -a "$OVERLAY/skel-distro/.local/state/" "$SKEL_UP/.local/state/"
+  && rsync -a --exclude='/quickshell/user/first_run.txt' \
+       "$OVERLAY/skel-distro/.local/state/" "$SKEL_UP/.local/state/"
 ok "/etc/skel built"
 
 # Distro-level pinned vendoring (PROPOSAL.md §4 Pillar 2 / BLUEPRINT.md §8):

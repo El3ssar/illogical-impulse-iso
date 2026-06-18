@@ -292,8 +292,10 @@ step "iictl update flags + embedded welcome"
 #   • the welcome card runs actions IN-WINDOW (no external terminal spawn).
 #   • bare `iictl` opens the card; --auto still runs the switchwall first-boot
 #     bootstrap (we suppress upstream's FirstRunExperience that normally does).
-#   • ii-post-install seeds first_run.txt (reversibly) to suppress upstream's
-#     welcome so ours shows instead.
+#   • ii-post-install records the first_run.txt marker in the ledger with a
+#     revert-able kind ('file') so revert-all restores the upstream welcome.
+#     (The marker itself is pre-seeded for the installed user via skel-distro →
+#     /etc/skel — the content + skel-placement guards live in the next step.)
 IICTL_F="$AIROOTFS/usr/local/bin/iictl"
 WELCOME_QML_F="$AIROOTFS/usr/share/illogical-impulse/welcome/shell.qml"
 SETUP_OPTS_F="$DOTS/sdata/subcmd-install/options.sh"
@@ -342,12 +344,72 @@ if [[ -f "$WELCOME_QML_F" ]]; then
 fi
 if [[ -f "$POST_F" ]]; then
   grep -q 'first_run.txt' "$POST_F" \
-    && _v_ok "ii-post-install seeds first_run.txt (upstream welcome suppressed; ours shows)" \
-    || _v_fail "ii-post-install does not seed first_run.txt — upstream welcome will still fire"
-  grep -q 'first-run-welcome' "$POST_F" \
-    && _v_ok "first_run.txt seed is ledger-recorded (revert-all restores the upstream welcome)" \
-    || _v_warn "first_run.txt seed not recorded in the ledger — revert-all couldn't undo it"
+    && _v_ok "ii-post-install handles first_run.txt (fail-safe seed + ledger record)" \
+    || _v_fail "ii-post-install does not handle first_run.txt — upstream welcome will still fire"
+  # The seed must be ledger-recorded with a kind revert-all can actually replay.
+  # 'file-seed' is NOT a kind revert-all knows (it fell through to its "unknown
+  # kind" branch → the marker was never undone); the canonical revert-able kind
+  # is 'file' (revert-all's path inverse rm's the owned path).
+  if grep -qE 'ledger_record[[:space:]]+file[[:space:]]+first-run-welcome' "$POST_F"; then
+    _v_ok "first_run.txt marker ledger-recorded as kind 'file' (revert-all removes it → upstream welcome returns)"
+  elif grep -q 'first-run-welcome' "$POST_F"; then
+    _v_fail "first_run.txt marker recorded with a non-'file' kind — revert-all can't replay it (use kind 'file')"
+  else
+    _v_warn "first_run.txt marker not recorded in the ledger — revert-all couldn't undo it"
+  fi
 fi
+
+step "first-run welcome suppression (skel marker)"
+# Iron-Rule bug-class guard (issue #13): the distro pre-seeds upstream's own
+# first_run.txt suppression marker so OUR welcome owns the INSTALLED user's first
+# login (no upstream-welcome → distro-welcome double interruption). Three things
+# must hold or a first boot regresses:
+#   1. The seeded content stays byte-for-byte equal to upstream's firstRunFileContent
+#      — if upstream renames/retexts that string, fail HERE at build time, not at
+#      the user's first boot (FileView only checks existence, but we keep the exact
+#      sanctioned value so we never write foreign content into upstream STATE).
+#   2. The marker reaches /etc/skel (installed user, via useradd -m) — together
+#      with the skel-distro custom/execs.lua welcome hook, so our card + wallpaper
+#      bootstrap replace upstream's first-run.
+#   3. The marker must NOT reach /etc/skel-upstream (the liveuser). The liveuser
+#      is seeded from skel-upstream + skel-live and has NO distro welcome hook
+#      (its custom/execs.lua is the installer launcher), and chroot.sh defers the
+#      live wallpaper/colour bootstrap to upstream's FirstRunExperience. Seeding
+#      the marker there would suppress upstream's first-run with nothing to
+#      replace it — a Try-live boot with no wallpaper, no colours, no welcome.
+FRUN_QML="$DOTS/dots/.config/quickshell/ii/services/FirstRunExperience.qml"
+FRUN_SEED="$OVERLAY/skel-distro/.local/state/quickshell/user/first_run.txt"
+FRUN_REL=".local/state/quickshell/user/first_run.txt"
+if [[ ! -f "$FRUN_SEED" ]]; then
+  _v_fail "skel-distro first_run.txt seed missing ($FRUN_SEED) — upstream welcome will fire on first login"
+elif [[ ! -f "$FRUN_QML" ]]; then
+  _v_warn "upstream FirstRunExperience.qml not found — can't cross-check the seeded marker content"
+else
+  _up_marker=$(sed -nE 's/.*firstRunFileContent:[[:space:]]*"([^"]*)".*/\1/p' "$FRUN_QML")
+  _seed_marker=$(cat "$FRUN_SEED")     # command-sub strips the trailing newline
+  if [[ -z "$_up_marker" ]]; then
+    _v_warn "could not parse firstRunFileContent from FirstRunExperience.qml — marker cross-check skipped"
+  elif [[ "$_seed_marker" == "$_up_marker" ]]; then
+    _v_ok "skel-distro first_run.txt matches upstream's firstRunFileContent (upstream welcome suppressed)"
+  else
+    _v_fail "skel-distro first_run.txt drifted from upstream's firstRunFileContent — re-sync the marker (got '$_seed_marker', upstream '$_up_marker')"
+  fi
+fi
+# Installed user MUST get the marker; liveuser MUST NOT.
+[[ -f "$AIROOTFS/etc/skel/$FRUN_REL" ]] \
+  && _v_ok "first_run.txt staged into /etc/skel (→ installed user; our card owns first login)" \
+  || _v_fail "first_run.txt NOT in /etc/skel — installed user would still see upstream's welcome"
+if [[ -f "$AIROOTFS/etc/skel-upstream/$FRUN_REL" ]]; then
+  _v_fail "first_run.txt LEAKED into /etc/skel-upstream — would suppress the liveuser's upstream first-run (no wallpaper/colours/welcome on a Try-live boot); exclude it from the skel-upstream state copy"
+else
+  _v_ok "first_run.txt correctly absent from /etc/skel-upstream (liveuser keeps upstream's first-run wallpaper/colour bootstrap)"
+fi
+# The broad skel-distro/.local/state → skel-upstream copy must still reach the
+# liveuser (only first_run.txt is excluded) — kitty-theme.conf is the canary.
+_kitty_rel=".local/state/quickshell/user/generated/terminal/kitty-theme.conf"
+[[ -f "$AIROOTFS/etc/skel-upstream/$_kitty_rel" ]] \
+  && _v_ok "skel-distro OOB state still reaches the liveuser (kitty-theme.conf in /etc/skel-upstream) — exclude is surgical" \
+  || _v_warn "kitty-theme.conf missing from /etc/skel-upstream — the first_run.txt exclude may be over-broad"
 
 step "sentinel-fenced custom/*.lua blocks"
 # Iron-Rule bug-class guard: every distro write into an upstream custom/*.lua
