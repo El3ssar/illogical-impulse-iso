@@ -568,6 +568,126 @@ if [[ -d "$_PKDIR" ]]; then
   fi
 fi
 
+step "iictl-tui chooser contract (#47)"
+# Bug-class guards for the ratatui renderer (iictl-tui) + the iictl chooser
+# contract it renders. The engine stays bash; this is the interactive front-end.
+# (a) the local PKGBUILD + vendored crate are staged → prebuild builds them into
+#     [ii-extra]. (Missing here = the renderer silently never gets built.)
+_TUI_PB="$BUILD/aur-pkgbuilds/iictl-tui/PKGBUILD"
+_TUI_CRATE="$BUILD/aur-pkgbuilds/iictl-tui/crate"
+if [[ -f "$_TUI_PB" && -f "$_TUI_CRATE/Cargo.toml" && -f "$_TUI_CRATE/src/main.rs" ]]; then
+  _v_ok "iictl-tui PKGBUILD + vendored crate staged (prebuild → [ii-extra])"
+  grep -q "makedepends=('cargo')" "$_TUI_PB" \
+    && _v_ok "iictl-tui PKGBUILD declares makedepends=('cargo')" \
+    || _v_warn "iictl-tui PKGBUILD: expected makedepends=('cargo') for the Rust build"
+else
+  _v_fail "iictl-tui PKGBUILD/crate not staged under build/aur-pkgbuilds/iictl-tui/ — the renderer won't build"
+fi
+# (b) iictl-tui is in the baked package set → pacstrapped, so it SURVIVES install
+#     as a real /usr/bin package (no ii-verify exemption, unlike /usr/local/lib/ii).
+grep -Eq '^\s*iictl-tui\s*$' "$PKGLIST" \
+  && _v_ok "iictl-tui baked into packages.x86_64 (survives install as a package)" \
+  || _v_fail "iictl-tui missing from packages.x86_64 — add it to packages/base.list"
+# (c) the tweak wrapper is a PURE bridge: it execs iictl-tui and mutates nothing
+#     itself (every change must flow through a domain verb → the ledger). Generic
+#     +x/shebang/bash -n/#help are already asserted by "iictl.d/ plugin architecture".
+_TUI_LIB="$AIROOTFS/usr/local/lib/ii"
+_TWK="$_TUI_LIB/iictl.d/tweak"
+if [[ ! -f "$_TWK" ]]; then
+  _v_fail "iictl.d/tweak not staged — 'iictl tweak' won't resolve"
+else
+  _twk_code="$(grep -vE '^[[:space:]]*#' "$_TWK")"
+  grep -q 'iictl-tui' <<<"$_twk_code" \
+    && _v_ok "iictl tweak execs the iictl-tui renderer" \
+    || _v_fail "iictl.d/tweak never references iictl-tui — the renderer bridge is broken"
+  if grep -qE '\b(pacman|paru|ledger_record|ii_service_|ii_group_|ii_chsh|ii_lua_block_)' <<<"$_twk_code"; then
+    _v_fail "iictl.d/tweak mutates state directly — it must only exec iictl-tui (changes flow through domain verbs)"
+  else
+    _v_ok "iictl tweak mutates nothing itself (pure renderer bridge)"
+  fi
+fi
+# (d) the chooser contract is real + valid. Validate (d1) a canonical sample spec
+#     covering all THREE control types and (d2) the live reference emitter
+#     `iictl pack --spec` (driven against a throwaway fixture, no network/root)
+#     against the same schema. Proves the contract end-to-end on merged code.
+#     Uses python3 (already required by prepare's resolve-deps.py).
+if command -v python3 >/dev/null 2>&1; then
+  read -r -d '' _SPEC_PY <<'PY' || true
+import json, sys
+spec = json.load(sys.stdin)
+assert isinstance(spec.get("domain"), str) and spec["domain"], "missing domain"
+ctrls = spec.get("controls")
+assert isinstance(ctrls, list) and ctrls, "missing/empty controls"
+for c in ctrls:
+    t = c.get("type")
+    assert t in ("choice", "list", "toggle"), "bad control type: %r" % (t,)
+    assert isinstance(c.get("id"), str) and c["id"], "control missing id"
+    assert isinstance(c.get("label"), str), "control missing label"
+    if t == "choice":
+        assert isinstance(c.get("options"), list), "choice needs options[]"
+        assert isinstance(c.get("apply"), list), "choice needs apply argv"
+    elif t == "list":
+        assert isinstance(c.get("apply_add"), list), "list needs apply_add argv"
+        assert isinstance(c.get("apply_remove"), list), "list needs apply_remove argv"
+    else:
+        assert isinstance(c.get("apply_on"), list), "toggle needs apply_on argv"
+        assert isinstance(c.get("apply_off"), list), "toggle needs apply_off argv"
+PY
+  _SAMPLE_SPEC='{"domain":"sample","title":"Sample","controls":[
+    {"id":"a","type":"choice","label":"A","current":"x","options":[{"value":"x"},{"value":"y"}],"apply":["sample","set","%v"]},
+    {"id":"b","type":"list","label":"B","current":[],"options":[{"value":"p"}],"apply_add":["sample","add","%v"],"apply_remove":["sample","rm","%v"]},
+    {"id":"c","type":"toggle","label":"C","current":false,"apply_on":["sample","on"],"apply_off":["sample","off"]}]}'
+  if printf '%s' "$_SAMPLE_SPEC" | python3 -c "$_SPEC_PY" 2>/dev/null; then
+    _v_ok "chooser spec schema valid for all 3 control types (sample-spec)"
+  else
+    _v_fail "the sample chooser spec fails the contract schema — the schema/validator drifted"
+  fi
+  _PK_SPEC="$_TUI_LIB/iictl.d/pack"
+  if [[ -x "$_PK_SPEC" ]]; then
+    _spec_fix="$(mktemp -d)"
+    printf 'steam\n'    > "$_spec_fix/gaming.list"
+    printf 'qemu-full\n'> "$_spec_fix/virt.list"
+    if _spec_json="$(II_LIB="$_TUI_LIB" II_OPTDIR="$_spec_fix" XDG_STATE_HOME="$_spec_fix/state" \
+                     bash "$_PK_SPEC" --spec 2>/dev/null)" \
+       && printf '%s' "$_spec_json" | python3 -c "$_SPEC_PY" 2>/dev/null; then
+      _v_ok "iictl pack --spec emits a valid chooser spec (reference consumer, end-to-end)"
+    else
+      _v_fail "iictl pack --spec output fails the chooser-contract schema"
+    fi
+    rm -rf "$_spec_fix"
+  else
+    _v_fail "iictl.d/pack not staged/executable — the reference --spec emitter is missing"
+  fi
+else
+  _v_warn "skipped chooser-spec schema check (python3 unavailable)"
+fi
+# (e) single-picker guard (the anti-clutter ceiling): no domain plugin opens its
+#     OWN interactive picker — they all defer to the one iictl-tui renderer.
+#     tweak execs iictl-tui (the renderer, allowed); everyone else must not
+#     fzf/skim/gum/whiptail/dialog a second chooser into existence.
+if [[ -d "$_TUI_LIB/iictl.d" ]]; then
+  _pick_bad=0
+  for _p in "$_TUI_LIB/iictl.d"/*; do
+    [[ -f "$_p" ]] || continue
+    [[ "$(basename "$_p")" == "tweak" ]] && continue
+    if grep -vE '^[[:space:]]*#' "$_p" | grep -qE '\b(fzf|skim|gum|whiptail|dialog)\b'; then
+      _v_fail "iictl.d/$(basename "$_p") opens its own interactive picker — defer to 'iictl tweak' (iictl-tui)"
+      _pick_bad=$((_pick_bad+1))
+    fi
+  done
+  (( _pick_bad == 0 )) && _v_ok "no domain plugin opens a second interactive picker (all defer to iictl-tui)"
+  # (f) advertise↔answer coupling: every #spec: advertiser must answer --spec, or
+  #     the `iictl tweak` listing would offer a domain the renderer can't load.
+  _spec_bad=0
+  for _p in "$_TUI_LIB/iictl.d"/*; do
+    [[ -f "$_p" ]] || continue
+    grep -qE '^#spec:[[:space:]]' "$_p" || continue
+    grep -q -- '--spec' "$_p" \
+      || { _v_fail "iictl.d/$(basename "$_p") advertises #spec: but has no --spec handler — 'iictl tweak' would lie"; _spec_bad=$((_spec_bad+1)); }
+  done
+  (( _spec_bad == 0 )) && _v_ok "every #spec: advertiser answers --spec (tweak listing is truthful)"
+fi
+
 step "live mkinitcpio"
 MK="$AIROOTFS/etc/mkinitcpio.conf.d/archiso.conf"
 for h in base udev archiso block filesystems; do

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 #help: pack	install/remove/list curated optional packs online (official + AUR)
+#spec: pack	Optional packs
 # pack — the iictl pack engine (PROPOSAL §4 Pillar 1 / §7). The user-facing verb
 # that installs, removes, and lists the curated optional software packs. As an
 # iictl.d/ drop-in it adds members ONLINE on demand — official-repo members via
@@ -172,6 +173,36 @@ cmd_list() {
   done
 }
 
+# cmd_spec — emit the iictl chooser-contract option spec for the pack domain
+# (#47). ONE `list` control: current = the installed packs (kind=pack ledger
+# rows), options = every available pack (the staged name-lists), apply_add =
+# `pack install`, apply_remove = `pack remove`. The iictl-tui renderer reads
+# this, draws it, and applies picks by running those argv back through this very
+# plugin — so the pack round-trip drives the TUI with ZERO new mutation paths,
+# proving the contract end-to-end on already-merged code. Dependency-free JSON
+# (the existing _json_* helpers); no jq.
+cmd_spec() {
+  local lists=() l name
+  if [[ -d "$II_OPTDIR" ]]; then
+    shopt -s nullglob; lists=("$II_OPTDIR"/*.list); shopt -u nullglob
+  fi
+  local options='[' current='[' first_o=1 first_c=1
+  for l in "${lists[@]}"; do
+    name="$(basename "${l%.list}")"
+    (( first_o )) || options+=','
+    options+="{\"value\":\"$(_json_escape "$name")\",\"label\":\"$(_json_escape "$name")\"}"
+    first_o=0
+    if _pack_installed "$name"; then
+      (( first_c )) || current+=','
+      current+="\"$(_json_escape "$name")\""
+      first_c=0
+    fi
+  done
+  options+=']'; current+=']'
+  printf '{"domain":"pack","title":"Optional packs","controls":[{"id":"packs","type":"list","label":"Installed packs","current":%s,"options":%s,"apply_add":["pack","install","%%v"],"apply_remove":["pack","remove","%%v"]}]}\n' \
+    "$current" "$options"
+}
+
 cmd_install() {
   local name="${1:-}"
   [[ -n "$name" ]] || die "usage: iictl pack install <pack>"
@@ -276,6 +307,7 @@ Nothing pack-related is baked into the ISO — only the few-KB lists.
 
 usage:
   iictl pack list [--json]      list available packs (+ installed status / conflicts)
+  iictl pack --spec             emit the iictl-tui chooser spec (JSON; drives 'iictl tweak pack')
   iictl pack install <pack>     install a pack's members online (records for undo)
   iictl pack remove  <pack>     remove exactly what the pack added (offline-safe)
 
@@ -286,6 +318,7 @@ EOF
 
 case "${1:-help}" in
   list)            shift; cmd_list    "$@" ;;
+  --spec|spec)     shift; cmd_spec    "$@" ;;
   install|add)     shift; cmd_install "$@" ;;
   remove|rm)       shift; cmd_remove  "$@" ;;
   help|-h|--help)  cmd_usage ;;

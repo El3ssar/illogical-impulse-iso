@@ -51,7 +51,7 @@ overlay/
 ├── calamares/                 # settings.conf + modules/ + branding/
 ├── efiboot/                   # live systemd-boot menu
 ├── assets/                    # wordmark.svg, default-wallpaper.png
-└── aur-pkgbuilds/             # local PKGBUILD overrides (optional escape hatch)
+└── aur-pkgbuilds/             # local PKGBUILD overrides + the iictl-tui Rust crate
 scripts/
 ├── lib/{common.sh,toml-get}   # shared env + distro.toml reader
 ├── prepare.sh + prepare.d/    # 10-releng 20-airootfs 30-skel 40-packages
@@ -78,7 +78,8 @@ scripts/
     ├── iictl-common.sh        # shared iictl/plugin header (colors, ok/die, ledger, plugin contract)
     ├── ledger.sh              # append-only TSV state ledger (record/query/owned_paths; the reversibility manifest)
     ├── mutator.sh             # idempotent reversible ledger-recording primitives (service/group/chsh/lua-block fence/conflicts)
-    └── iictl.d/<cmd>          # ★ iictl drop-in subcommands (pack/revert-all/about…) — one file per verb, zero core edits
+    └── iictl.d/<cmd>          # ★ iictl drop-in subcommands (pack/revert-all/tweak/about…) — one file per verb, zero core edits
+                               #   tweak = thin bridge → the baked iictl-tui ratatui renderer (over each domain's --spec)
 tools/                         # manual: gen-assets.sh, resolve-deps.py
 upstream/illogical-impulse     # dots submodule — DO NOT EDIT
 build/ out/                    # generated
@@ -142,6 +143,8 @@ build/ out/                    # generated
 | ISO-build chroot logic | `scripts/chroot.sh` |
 | Post-install / bootloader / verify logic | `scripts/runtime/ii-*` |
 | Add an iictl subcommand (drop-in) | `scripts/runtime-lib/iictl.d/<cmd>` (exec; `source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"` + a `#help:` line) → staged to `/usr/local/lib/ii/iictl.d/` |
+| Give a domain an interactive configurator (TUI) | the domain's `iictl.d/<cmd>` emits `--spec` (the 3-control chooser contract: `choice`/`list`/`toggle`; see BLUEPRINT §"iictl chooser contract") + a `#spec:` header; the baked `iictl-tui` (ratatui) renders it via `iictl tweak <domain>`. The renderer mutates nothing — it shells back to the domain's `iictl` verbs, so the ledger still owns reversibility. |
+| Change/extend the `iictl-tui` renderer | `overlay/aur-pkgbuilds/iictl-tui/crate/` (Rust/ratatui; built by prebuild → `[ii-extra]`, baked via `packages/base.list`) |
 | Pipeline step | `scripts/prepare.d/NN-*.sh` |
 | Default wallpaper / wordmark | `overlay/assets/` (then `just assets`) |
 

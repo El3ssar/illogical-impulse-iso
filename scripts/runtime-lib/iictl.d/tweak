@@ -1,0 +1,61 @@
+#!/usr/bin/env bash
+#help: tweak	open the ratatui configurator for a domain (bare: list spec domains)
+# tweak — the thin bash bridge to the iictl-tui ratatui renderer (PROPOSAL §11 /
+# issue #47). It mutates NOTHING itself: `iictl tweak <domain>` execs the baked
+# `iictl-tui` binary, which reads `iictl <domain> --spec` (the declarative
+# chooser contract), draws it with Material-You colours, and applies the user's
+# picks by shelling back out to that domain's `iictl` verbs — so every change
+# still flows through the bash engine + the ledger. Bare `iictl tweak` lists the
+# domains that advertise a `#spec:` header.
+#
+# Additive: one drop-in beside the iictl core (zero merge surface). Reversible:
+# the renderer only invokes ledger-recording domain verbs, so `pacman -Rns
+# iictl-tui` + `iictl revert-all` restores vanilla. Touches no upstream path.
+
+set -u
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+
+IICTL_D="${II_LIB:-/usr/local/lib/ii}/iictl.d"
+# The renderer is a baked package on PATH (/usr/bin/iictl-tui). Overridable so a
+# dev checkout / test can point at a freshly built binary.
+TUI_BIN="${IICTL_TUI_BIN:-iictl-tui}"
+
+# Harvest `#spec: <domain><TAB><title>` headers from every drop-in — the same
+# discovery shape as iictl's `#help:` harvest. A domain "advertises a spec" by
+# BOTH carrying this line AND answering `<domain> --spec`; the two are coupled by
+# validate.sh so the listing never lies.
+_spec_lines() {
+  local p
+  for p in "$IICTL_D"/*; do
+    [[ -f "$p" && -x "$p" ]] || continue
+    grep -m1 -E '^#spec:[[:space:]]' "$p" 2>/dev/null
+  done | sed -E 's/^#spec:[[:space:]]*//'
+}
+
+_list() {
+  echo "${C_B}iictl tweak${C_0} — interactive Material-You configurators (ratatui)"
+  echo
+  local any=0 dom title
+  while IFS=$' \t' read -r dom title; do
+    [[ -n "$dom" ]] || continue
+    printf '  %s%-12s%s %s\n' "$C_B" "$dom" "$C_0" "$title"
+    any=1
+  done < <(_spec_lines)
+  if (( ! any )); then
+    echo "  (no domains advertise a --spec yet)"
+    return 0
+  fi
+  echo
+  echo "run: ${C_B}iictl tweak <domain>${C_0}"
+}
+
+case "${1:-}" in
+  ''|-h|--help|help|list)
+    _list
+    ;;
+  *)
+    command -v "$TUI_BIN" >/dev/null 2>&1 \
+      || die "$TUI_BIN not found — the renderer ships as a baked package; on a dev checkout run 'just build', then retry"
+    exec "$TUI_BIN" "$1"
+    ;;
+esac

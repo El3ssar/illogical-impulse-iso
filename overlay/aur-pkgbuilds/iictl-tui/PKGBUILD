@@ -1,0 +1,61 @@
+# Maintainer: Illogical Impulse ISO build pipeline
+#
+# Locally maintained PKGBUILD for iictl-tui — the fancy ratatui renderer for the
+# iictl chooser contract (issue #47, PROPOSAL §11). The crate source is vendored
+# beside this PKGBUILD under crate/ (it is OUR code, not an AUR/upstream tree),
+# so there is no source=() URL to download: prebuild.sh copies this whole
+# directory into a scratch build dir and runs `makepkg` there, which makes
+# $startdir the copy that carries crate/. prepare() lifts crate/ into the
+# standard $srcdir so build()/package() follow makepkg's normal layout.
+#
+# Build path: prebuild.sh sees `iictl-tui` in aur-prebuild.list (it is a
+# base.list member that pacman -Si can't resolve → classified AUR), finds this
+# local override via _local_dir, and `makepkg`s it into [ii-extra]. mkarchiso
+# then pacstraps it into the squashfs as a normal package — so it SURVIVES
+# install with no ii-verify exemption (it is a real package under /usr/bin, not
+# a file under the purged /usr/local/lib/ii survive-path).
+
+pkgname=iictl-tui
+pkgver=0.1.0
+pkgrel=1
+pkgdesc='Material-You ratatui renderer for the iictl chooser contract (iictl tweak)'
+arch=('x86_64')
+url='https://github.com/El3ssar/illogical-impulse-iso'
+license=('GPL-3.0-or-later')
+depends=('gcc-libs' 'glibc')
+makedepends=('cargo')
+# LTO is set in the crate's release profile; the release binary carries no
+# debuginfo, so skip makepkg's (empty) debug-package split too.
+options=('!lto' '!debug')
+
+# Shared cargo env. CARGO_HOME/target live under $srcdir (the build scratch);
+# --remap-path-prefix strips the absolute build paths Rust would otherwise embed
+# (registry deps under CARGO_HOME + our own crate paths) so the package carries
+# NO $srcdir/$startdir references and the binary builds reproducibly.
+_cargo_env() {
+  export CARGO_HOME="$srcdir/cargo-home"
+  export CARGO_TARGET_DIR="$srcdir/target"
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=$srcdir=/build --remap-path-prefix=$startdir=/build"
+}
+
+build() {
+  # Build OUR vendored crate. prebuild copies this dir to scratch, so
+  # $startdir/crate is the crate tree; fetch deps with the pinned Cargo.lock,
+  # then compile offline+locked (--frozen) for a reproducible binary.
+  cd "$startdir/crate"
+  _cargo_env
+  cargo fetch --locked
+  cargo build --frozen --release
+}
+
+check() {
+  # Reuse the release artifacts from build() (same profile/flags → no recompile)
+  # so the bake is gated on the spec-contract + colour-parse unit tests.
+  cd "$startdir/crate"
+  _cargo_env
+  cargo test --frozen --release
+}
+
+package() {
+  install -Dm755 "$srcdir/target/release/$pkgname" "$pkgdir/usr/bin/$pkgname"
+}

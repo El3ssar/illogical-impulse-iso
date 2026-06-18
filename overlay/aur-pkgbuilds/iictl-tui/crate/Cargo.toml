@@ -1,0 +1,24 @@
+[package]
+name = "iictl-tui"
+version = "0.1.0"
+edition = "2021"
+description = "Material-You ratatui renderer for the iictl chooser contract"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/El3ssar/illogical-impulse-iso"
+
+[[bin]]
+name = "iictl-tui"
+path = "src/main.rs"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+# stripping + the debug split are left to makepkg (so the -debug package is
+# well-formed); LTO + size-opt give a small binary in one pass.
+lto = true
+opt-level = "s"
+codegen-units = 1
