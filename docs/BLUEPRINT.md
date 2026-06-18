@@ -143,6 +143,21 @@ of the whole distro rests on respecting their classes. Full table in
 - **reserved, NOT baked** — `packages/optional/*.list`: curated **name-lists**
   installed on demand from the internet by `iictl pack` (official repos + AUR).
   Only the few-KB list rides in the squashfs — never the packages themselves.
+  The verb (`scripts/runtime-lib/iictl.d/pack`): `iictl pack list [--json]`
+  enumerates packs with installed/conflict status (no root, no network);
+  `iictl pack install <pack>` classifies each member at runtime (`pacman -Si`),
+  installs official members via `sudo pacman -S --needed` and AUR members via
+  **paru** (presence-checked, bootstrap-or-error — its ISO build is fail-soft),
+  enforces `#meta:conflicts` via `ii_conflicts_check` **before** any pacman runs,
+  and `ledger_record`s the *resolved* set (a `kind=pack`, `target=pack:<name>`
+  row); `iictl pack remove <pack>` runs the pack's optional `post-remove` hook
+  (the inverse of any side effects) and delegates the package removal to
+  `iictl revert-all pack:<pack>` (the single replay owner — offline-safe
+  `pacman -Rns`). `validate.sh` forbids one pack name being a prefix of another
+  so that delegated `pack:` prefix filter stays exact per-pack; a full
+  `iictl revert-all` remains the global catch-all (sweeps any side-effect rows
+  too). A pack may ship `<pack>.d/post-add|post-remove` bash fragments (sourced,
+  with the shared mutators in scope) for ledger-recorded side effects.
 - **survives install** — `/usr/local/bin/iictl` (named-exempt from the
   `ii-verify` purge): the post-install config surface for every feature.
 
@@ -247,6 +262,10 @@ Step map (current):
   against the sync db (`pacman -Si`); AUR names accumulate in
   `.pkg-resolve/aur-prebuild.list`. Writes `/root/nvidia-{official,aur}.txt`
   manifests for the stash. Optional `overlay/aur-pkgbuilds` staged.
+- **45-optional-packs** — stages `packages/optional/*.list` (+ `*.meta` and
+  `<pack>.d/post-add|post-remove` hook fragments) as **text** into
+  `/usr/share/illogical-impulse/optional/`. Only the few-KB lists ride in the
+  image; `iictl pack` installs the members online on demand (never baked).
 - **50-calamares** — installer config + branding, verbatim.
 - **60-boot** — efiboot menu; regenerates `profiledef.sh` (identity from
   distro.toml, everything else inherited from releng); declares

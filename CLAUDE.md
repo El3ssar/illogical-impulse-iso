@@ -40,7 +40,8 @@ packages/
 ├── base.list                  # distro baseline (live + installed)
 ├── installer.list             # purged from target by ii-post-install
 ├── goodies.list               # curated always-installed extras (small!)
-└── nvidia.list                 # hardware-detected at install — never baked
+├── nvidia.list                # hardware-detected at install — never baked
+└── optional/<pack>.list       # FETCHED-ONLINE packs — only the name-list ships; `iictl pack` installs on demand
 profiles/<name>/               # personal layers (skel/, packages.list, fetch.list)
 overlay/
 ├── pacman.conf                # HOST pacman.conf — includes [ii-extra]
@@ -54,7 +55,7 @@ overlay/
 scripts/
 ├── lib/{common.sh,toml-get}   # shared env + distro.toml reader
 ├── prepare.sh + prepare.d/    # 10-releng 20-airootfs 30-skel 40-packages
-│                              # 50-calamares 60-boot 70-assets
+│                              # 45-optional-packs 50-calamares 60-boot 70-assets
 ├── prebuild.sh                # AUR/local pkgs → /var/cache/ii-extra-repo
 ├── mkiso.sh                   # mkarchiso wrapper (self-sudo)
 ├── validate.sh                # static audit (~55 checks)
@@ -77,7 +78,7 @@ scripts/
     ├── iictl-common.sh        # shared iictl/plugin header (colors, ok/die, ledger, plugin contract)
     ├── ledger.sh              # append-only TSV state ledger (record/query/owned_paths; the reversibility manifest)
     ├── mutator.sh             # idempotent reversible ledger-recording primitives (service/group/chsh/lua-block fence/conflicts)
-    └── iictl.d/<cmd>          # ★ iictl drop-in subcommands — one file per verb, zero core edits
+    └── iictl.d/<cmd>          # ★ iictl drop-in subcommands (pack/revert-all/about…) — one file per verb, zero core edits
 tools/                         # manual: gen-assets.sh, resolve-deps.py
 upstream/illogical-impulse     # dots submodule — DO NOT EDIT
 build/ out/                    # generated
@@ -91,7 +92,8 @@ build/ out/                    # generated
    `/usr/share/archiso/configs/releng` → overlay/airootfs + runtime scripts →
    skel layer cake → packages.x86_64 (upstream PKGBUILD deps scraped by
    `tools/resolve-deps.py` + our manifests, AUR names accumulated for
-   prebuild) → Calamares staging → efiboot + profiledef.sh generated from
+   prebuild) → optional pack name-lists staged as text (never baked;
+   `45-optional-packs`) → Calamares staging → efiboot + profiledef.sh generated from
    distro.toml → generated os-release + `/etc/illogical-impulse/release`
    stamp + default wallpaper.
 2. **prebuild**: per-package cache decision (`*-git` always; local PKGBUILD
@@ -126,7 +128,8 @@ build/ out/                    # generated
 |---|---|
 | Rename/rebrand the distro, change version scheme, repo name | `distro.toml` |
 | Always-installed package (small + universal only) | `packages/goodies.list` (or `base.list` if infra) — heavy/non-universal bakes get a budget WARN |
-| Offer a heavy/opinionated package (online, on-demand) | `packages/optional/<pack>.list` (curated name-list; `iictl pack` installs it from the internet — official repos + AUR — never baked or stashed) |
+| Offer a heavy/opinionated package (online, on-demand) | `packages/optional/<pack>.list` (curated name-list; `iictl pack install/remove/list` installs it from the internet — official repos + AUR — never baked or stashed; staged by `45-optional-packs`) |
+| Give a pack an install/remove side effect (service, group, fenced lua) | `packages/optional/<pack>.d/post-add` + `post-remove` — bash fragments **sourced** by `iictl pack`; `post-add` applies effects via the shared mutators (ledger-recorded), the symmetric `post-remove` undoes them on `iictl pack remove` |
 | NVIDIA driver variants | `packages/nvidia.list` (auto-detected at install) |
 | Personal package/dotfile | `profiles/<you>/{packages.list,skel/}` |
 | Override an installed-user dotfile (distro-wide) | `overlay/skel-distro/<path>` |

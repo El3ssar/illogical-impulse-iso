@@ -1,0 +1,293 @@
+#!/usr/bin/env bash
+#help: pack	install/remove/list curated optional packs online (official + AUR)
+# pack — the iictl pack engine (PROPOSAL §4 Pillar 1 / §7). The user-facing verb
+# that installs, removes, and lists the curated optional software packs. As an
+# iictl.d/ drop-in it adds members ONLINE on demand — official-repo members via
+# `sudo pacman -S --needed`, AUR members via paru (presence-checked, bootstrap-
+# or-error). Every install is recorded in the append-only TSV ledger (ledger.sh)
+# as one kind=pack row carrying the *resolved* package set, so removal is an
+# exact, OFFLINE-safe `pacman -Rns` of exactly what was added.
+#
+# Nothing pack-related is staged into the ISO: only the curated few-KB name-lists
+# (`packages/optional/*.list`) ride in the squashfs as TEXT at $II_OPTDIR. There
+# is no flat repo, no `.db.tar.gz`, no `pacman -Sw` closure. `[ii-extra]` does
+# NOT survive install (PROPOSAL §3/§17), so the engine never assumes it — the
+# install source is the public mirrors + AUR.
+#
+# Purely ADDITIVE: this is one new drop-in beside the iictl core (zero merge
+# surface). Purely REVERSIBLE: `iictl pack remove <pack>` runs the pack's optional
+# post-remove hook (the inverse of any side effects it added) and then removes the
+# recorded package set through the shared revert engine. `iictl revert-all
+# pack:<pack>` removes a pack's PACKAGES (its kind=pack row); a full `iictl
+# revert-all` is the global catch-all that also sweeps any side-effect rows. No
+# domain re-implements ledger replay.
+
+set -u
+
+# Shared header (colors, ok/bad/warn/die, _not_root, RELEASE_FILE, ledger_*) and
+# the mutator library (ii_conflicts_check — the conflict gate — plus the
+# ledger-recording ii_service_enable/ii_group_add/ii_lua_block_write a pack's
+# post-add hook may call). Both source ledger.sh themselves; double-source is safe.
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+source "${II_LIB:-/usr/local/lib/ii}/mutator.sh"
+
+# Where the curated name-lists ride in the squashfs (overridable for the no-root
+# unit test). The catalog lives under /usr/share — a sibling of the iictl
+# survive-path, untouched by ii-verify's /usr/local/lib/ii purge.
+II_OPTDIR="${II_OPTDIR:-/usr/share/illogical-impulse/optional}"
+IICTL_D="${II_LIB:-/usr/local/lib/ii}/iictl.d"
+
+# Privileged ops (pacman) go through sudo when we are the user; the baked
+# 10-wheel-nopasswd drop-in makes that non-interactive on a real install. paru
+# and makepkg must NEVER run as root, so they are invoked directly (no sudo).
+_sudo() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
+
+# ── manifest parsing ─────────────────────────────────────────────────────────
+# _pack_members <listfile> — echo the package-name members, one per line
+# (blank lines, ordinary comments and #meta: lines stripped; trailing inline
+# comments removed). Mirrors 40-packages.sh's manifest reader.
+_pack_members() {
+  local f="$1" line name
+  [[ -f "$f" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "${line//[[:space:]]/}" ]] && continue   # blank
+    [[ "$line" == '#'* ]] && continue              # comment OR #meta:
+    name="${line%%#*}"; name="${name//[[:space:]]/}"
+    [[ -n "$name" ]] && printf '%s\n' "$name"
+  done < "$f"
+}
+
+# _pack_meta <listfile> <key> — echo the value of every `#meta:<key> [value]`
+# line (value tokens, one meta-line per output line).
+_pack_meta() {
+  local f="$1" key="$2" line rest
+  [[ -f "$f" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" == "#meta:$key" || "$line" == "#meta:$key "* ]] || continue
+    rest="${line#"#meta:$key"}"
+    printf '%s\n' "${rest# }"
+  done < "$f"
+}
+
+# _pack_conflicts <listfile> — echo each declared #meta:conflicts package name,
+# one per line (a single meta line may list several, space-separated).
+_pack_conflicts() { _pack_meta "$1" conflicts | tr ' ' '\n' | grep -v '^[[:space:]]*$' || true; }
+
+# _pack_installed <name> — true if a kind=pack ledger row exists for this pack.
+_pack_installed() { [[ -n "$(ledger_query pack "pack:$1")" ]]; }
+
+# ── JSON helpers (dependency-free — no jq; §11 Control Center will drive this) ─
+_json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+# read whitespace/newline-separated tokens from stdin → compact JSON array
+_json_array() {
+  local first=1 tok out='['
+  while read -r tok; do
+    [[ -n "$tok" ]] || continue
+    (( first )) || out+=','
+    out+="\"$(_json_escape "$tok")\""; first=0
+  done
+  out+=']'; printf '%s' "$out"
+}
+
+# ── paru bootstrap-or-error ──────────────────────────────────────────────────
+# paru's ISO build is fail-soft (scripts/chroot.sh), so it may be absent. Mirror
+# chroot.sh's clone-and-makepkg bootstrap rather than assuming it. Called ONLY
+# when a pack actually has AUR members.
+_ensure_paru() {
+  command -v paru >/dev/null 2>&1 && return 0
+  warn "paru not found — bootstrapping it from the AUR (needs base-devel + git + network)"
+  command -v git     >/dev/null 2>&1 || die "git missing — install with: sudo pacman -S --needed git base-devel"
+  command -v makepkg >/dev/null 2>&1 || die "base-devel missing — install with: sudo pacman -S --needed base-devel git"
+  local tmp; tmp="$(mktemp -d)" || die "mktemp failed"
+  if ( cd "$tmp" && git clone --depth=1 https://aur.archlinux.org/paru.git \
+         && cd paru && makepkg -si --noconfirm ); then
+    rm -rf "$tmp"
+  else
+    rm -rf "$tmp"
+    die "paru bootstrap failed — install paru manually (or run: iictl pack ... after fixing AUR build deps), then retry"
+  fi
+  command -v paru >/dev/null 2>&1 || die "paru still not on PATH after bootstrap"
+}
+
+# ── optional per-pack hooks (convention; no concrete hook ships in this issue) ─
+# A pack MAY ship <pack>.d/post-add (run after a successful install) and/or
+# <pack>.d/post-remove (run before removal). Hooks are bash FRAGMENTS that are
+# SOURCED — not executed — so they inherit the colors/ledger_*/mutator helpers
+# already in scope here (ii_service_enable, ii_group_add, ii_lua_block_write …,
+# each ledger-recording with its inverse) and so mkarchiso's +x mode-strip can
+# never disarm them. The fragment sees PACK_NAME and PACK_LIST.
+_run_hook() {
+  local PACK_NAME="$1" PACK_PHASE="$2"
+  local PACK_LIST="$II_OPTDIR/$PACK_NAME.list"
+  local hook="$II_OPTDIR/$PACK_NAME.d/$PACK_PHASE"
+  [[ -r "$hook" ]] || return 0
+  echo "${C_B}>> running '$PACK_NAME' $PACK_PHASE hook${C_0}"
+  # shellcheck source=/dev/null
+  source "$hook" || warn "'$PACK_NAME' $PACK_PHASE hook reported an error"
+}
+
+# ── subcommands ──────────────────────────────────────────────────────────────
+cmd_list() {
+  local json=0
+  [[ "${1:-}" == "--json" ]] && json=1
+  local lists=()
+  if [[ -d "$II_OPTDIR" ]]; then
+    shopt -s nullglob; lists=("$II_OPTDIR"/*.list); shopt -u nullglob
+  fi
+
+  if (( json )); then
+    local first=1 l name type
+    printf '['
+    for l in "${lists[@]}"; do
+      name="$(basename "${l%.list}")"
+      type="$(_pack_meta "$l" type | head -n1)"
+      (( first )) || printf ','
+      first=0
+      printf '{"name":"%s","installed":%s,"type":"%s","members":%s,"conflicts":%s}' \
+        "$(_json_escape "$name")" \
+        "$(_pack_installed "$name" && echo true || echo false)" \
+        "$(_json_escape "$type")" \
+        "$(_pack_members "$l" | _json_array)" \
+        "$(_pack_conflicts "$l" | _json_array)"
+    done
+    printf ']\n'
+    return 0
+  fi
+
+  if (( ${#lists[@]} == 0 )); then
+    echo "${C_B}iictl pack${C_0}: no packs available (none staged at $II_OPTDIR)"
+    return 0
+  fi
+  echo "${C_B}available packs${C_0} ($II_OPTDIR):"
+  local l name conflicts status
+  for l in "${lists[@]}"; do
+    name="$(basename "${l%.list}")"
+    conflicts="$(_pack_conflicts "$l" | tr '\n' ' ')"; conflicts="${conflicts%% }"
+    if _pack_installed "$name"; then status="${C_G}installed${C_0}"; else status="—"; fi
+    printf '  %s%-16s%s %b' "$C_B" "$name" "$C_0" "$status"
+    [[ -n "${conflicts// /}" ]] && printf '   (conflicts: %s)' "${conflicts% }"
+    printf '\n'
+  done
+}
+
+cmd_install() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: iictl pack install <pack>"
+  _not_root
+  local listfile="$II_OPTDIR/$name.list"
+  [[ -f "$listfile" ]] || die "unknown pack '$name' (see: iictl pack list)"
+
+  if _pack_installed "$name"; then
+    warn "pack '$name' is already installed (iictl pack remove $name to undo)"
+    return 0
+  fi
+
+  local members=() conflicts=() official=() aur=() m
+  mapfile -t members   < <(_pack_members   "$listfile")
+  mapfile -t conflicts < <(_pack_conflicts "$listfile")
+  (( ${#members[@]} > 0 )) || die "pack '$name' lists no members"
+
+  # CONFLICT GATE — runs BEFORE any pacman transaction, so a conflicting pack is
+  # refused with no half-applied state (the laptop power-tool mutual exclusion).
+  if (( ${#conflicts[@]} > 0 )); then
+    ii_conflicts_check "${conflicts[@]}" \
+      || die "pack '$name' conflicts with an already-installed package (see above) — refusing; nothing changed"
+  fi
+
+  # Classify each member at runtime against the sync db (mirrors 40-packages.sh).
+  for m in "${members[@]}"; do
+    if pacman -Si "$m" &>/dev/null; then official+=("$m"); else aur+=("$m"); fi
+  done
+  (( ${#aur[@]} > 0 )) && _ensure_paru
+
+  # No controlling terminal (e.g. the welcome card console) → fully non-interactive.
+  local CONFIRM=(); [[ -t 0 ]] || CONFIRM=(--noconfirm)
+
+  # Snapshot the installed set so we can record EXACTLY what the transaction adds
+  # (members + the deps they pull) — that resolved set is what `remove` -Rns's.
+  local before after resolved
+  before="$(pacman -Qq | sort)"
+
+  echo "${C_B}>> installing pack '$name'${C_0} (${#official[@]} official, ${#aur[@]} AUR)"
+  if (( ${#official[@]} > 0 )); then
+    _sudo pacman -S --needed "${CONFIRM[@]}" "${official[@]}" \
+      || die "official-repo install failed — nothing recorded (no half state)"
+  fi
+  if (( ${#aur[@]} > 0 )); then
+    paru -S --needed "${CONFIRM[@]}" "${aur[@]}" \
+      || die "AUR install via paru failed — nothing recorded (no half state)"
+  fi
+
+  after="$(pacman -Qq | sort)"
+  resolved="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | tr '\n' ' ')"
+  resolved="${resolved% }"
+
+  # Optional post-add hook (services/groups/fenced custom/*.lua via the shared
+  # mutators — each ledger-records its own inverse). Convention only here.
+  _run_hook "$name" post-add
+
+  # Record one kind=pack row: target=pack:<name>, packages=<resolved set>. An
+  # empty resolved set (every member already present) is recorded as-is, so
+  # `remove` correctly removes nothing we did not add. revert-all reads column 4.
+  ledger_record pack "pack:$name" "$resolved" "" "members=${members[*]}"
+
+  if [[ -n "${resolved// /}" ]]; then
+    ok "pack '$name' installed (added: $resolved) — reversible via: iictl pack remove $name"
+  else
+    ok "pack '$name' marked installed — all members were already present (nothing added)"
+  fi
+}
+
+cmd_remove() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: iictl pack remove <pack>"
+  _not_root
+  _pack_installed "$name" || die "pack '$name' is not installed (no ledger entry)"
+
+  # Run the explicit per-pack inverse hook FIRST (so a service/group/fence the
+  # post-add hook set is undone before the packages it may depend on go away).
+  _run_hook "$name" post-remove
+
+  # Delegate the package removal + ledger pruning to the SINGLE replay owner,
+  # `iictl revert-all pack:<name>` (BLUEPRINT §3 "domains must NOT re-implement
+  # ledger replay"). It does the offline-safe `pacman -Rns` of the recorded set
+  # — no network, no [ii-extra] — prunes the row atomically, and re-runs doctor.
+  echo "${C_B}>> removing pack '$name'${C_0} (via the shared revert engine)"
+  local ra="$IICTL_D/revert-all"
+  if command -v iictl >/dev/null 2>&1; then
+    exec iictl revert-all "pack:$name"
+  elif [[ -x "$ra" ]]; then
+    exec "$ra" "pack:$name"
+  else
+    die "revert-all engine not found ($ra) — cannot remove '$name' cleanly"
+  fi
+}
+
+cmd_usage() {
+  cat <<EOF
+${C_B}iictl pack${C_0} — install/remove/list curated optional software packs
+
+Packs are curated name-lists that ride in the image as TEXT; their members are
+installed ONLINE on demand (official repos via pacman, AUR via paru). Every
+install is ledger-recorded, so removal is an exact, offline-safe pacman -Rns.
+Nothing pack-related is baked into the ISO — only the few-KB lists.
+
+usage:
+  iictl pack list [--json]      list available packs (+ installed status / conflicts)
+  iictl pack install <pack>     install a pack's members online (records for undo)
+  iictl pack remove  <pack>     remove exactly what the pack added (offline-safe)
+
+A pack also reverts via the shared engine:
+  iictl revert-all pack:<pack>  (or 'iictl revert-all pack:' for every pack)
+EOF
+}
+
+case "${1:-help}" in
+  list)            shift; cmd_list    "$@" ;;
+  install|add)     shift; cmd_install "$@" ;;
+  remove|rm)       shift; cmd_remove  "$@" ;;
+  help|-h|--help)  cmd_usage ;;
+  *)               die "unknown subcommand: $1 (try: iictl pack help)" ;;
+esac

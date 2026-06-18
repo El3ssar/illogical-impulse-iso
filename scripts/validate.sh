@@ -453,6 +453,59 @@ else
   fi
 fi
 
+step "iictl pack engine"
+# Bug-class guards for the online pack installer (#6). Generic +x/shebang/bash -n/
+# #help are already asserted by "iictl.d/ plugin architecture"; these add the
+# engine-specific invariants. Comments are stripped first so the header's prose
+# can neither satisfy nor trip the code greps.
+PK="$AIROOTFS/usr/local/lib/ii/iictl.d/pack"
+if [[ ! -f "$PK" ]]; then
+  _v_fail "iictl.d/pack not staged — the pack engine is missing"
+else
+  _pk_code="$(grep -vE '^[[:space:]]*#' "$PK")"
+  # (a) every install is recorded → removal is an exact, reversible pacman -Rns.
+  grep -q 'ledger_record' <<<"$_pk_code" \
+    && _v_ok "pack engine records installs in the ledger (reversible removal)" \
+    || _v_fail "pack engine never calls ledger_record — installs would be irreversible"
+  # (b) paru is presence-checked / bootstrapped, never assumed (its ISO build is fail-soft).
+  grep -q 'command -v paru' <<<"$_pk_code" \
+    && _v_ok "pack engine presence-checks paru (bootstrap-or-error, never assumed)" \
+    || _v_fail "pack engine does not 'command -v paru' — it must not assume paru is present"
+  # (c) #meta:conflicts is enforced BEFORE any pacman transaction.
+  grep -q 'ii_conflicts_check' <<<"$_pk_code" \
+    && _v_ok "pack engine gates on ii_conflicts_check before pacman" \
+    || _v_fail "pack engine never calls ii_conflicts_check — conflicts unenforced"
+  # (d) must NOT assume [ii-extra] for post-install installs (it does not survive).
+  if grep -q 'ii-extra' <<<"$_pk_code"; then
+    _v_fail "pack engine references [ii-extra] — it does not survive install; install from public mirrors + AUR"
+  else
+    _v_ok "pack engine makes no [ii-extra] assumption (installs from public mirrors + AUR)"
+  fi
+fi
+# (e) no pack NAME is a string-prefix of another. `iictl pack remove X` delegates
+# `iictl revert-all pack:X`, whose filter matches a target EXACTLY OR AS A PREFIX
+# (the load-bearing `pack:` family selector that reverts every pack). If packs
+# 'lang' and 'lang-go' could coexist, `pack remove lang` would also revert
+# 'lang-go' and prune its row — silent over-removal. The catalog is closed
+# (repo-controlled), so forbid the collision at build time (Iron Rule bug-class).
+_PKDIR="$AIROOTFS/usr/share/illogical-impulse/optional"
+if [[ -d "$_PKDIR" ]]; then
+  _pk_names=()
+  shopt -s nullglob
+  for _pl in "$_PKDIR"/*.list; do _pk_names+=("$(basename "${_pl%.list}")"); done
+  shopt -u nullglob
+  _pk_collide=0
+  for _a in "${_pk_names[@]}"; do
+    for _b in "${_pk_names[@]}"; do
+      [[ "$_a" == "$_b" ]] && continue
+      [[ "$_b" != "$_a"* ]] || { _v_fail "optional pack name '$_a' is a prefix of '$_b' — 'iictl pack remove $_a' would also revert pack '$_b' (revert-all prefix filter); rename one"; _pk_collide=$((_pk_collide+1)); }
+    done
+  done
+  if (( ${#_pk_names[@]} > 0 && _pk_collide == 0 )); then
+    _v_ok "optional pack names are prefix-collision-free (${#_pk_names[@]} pack(s)) — per-pack revert stays exact"
+  fi
+fi
+
 step "live mkinitcpio"
 MK="$AIROOTFS/etc/mkinitcpio.conf.d/archiso.conf"
 for h in base udev archiso block filesystems; do
