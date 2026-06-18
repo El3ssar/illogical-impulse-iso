@@ -139,8 +139,10 @@ step "/etc/skel = skel-upstream + skel-distro"
 install -d "$SKEL"
 rsync -a "$SKEL_UP/" "$SKEL/"
 [[ -d "$OVERLAY/skel-distro" ]] && rsync -a "$OVERLAY/skel-distro/" "$SKEL/"
-# OOB state defaults (static kitty-theme.conf) must also reach liveuser,
-# who is seeded from skel-upstream + skel-live, never from /etc/skel.
+# OOB state defaults (static kitty-theme.conf; the first_run.txt suppression
+# marker — issue #13) must also reach liveuser, who is seeded from skel-upstream
+# + skel-live, never from /etc/skel. So skel-distro/.local/state lands in BOTH
+# /etc/skel (line above → installed user) and skel-upstream (here → liveuser).
 [[ -d "$OVERLAY/skel-distro/.local/state" ]] \
   && rsync -a "$OVERLAY/skel-distro/.local/state/" "$SKEL_UP/.local/state/"
 ok "/etc/skel built"

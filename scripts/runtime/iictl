@@ -190,7 +190,7 @@ cmd_doctor() {
 
 # First-boot wallpaper + Material-colour bootstrap. Upstream's
 # FirstRunExperience.qml normally runs switchwall.sh on the very first login; we
-# suppress that app (ii-post-install pre-seeds its first_run.txt marker) so OUR
+# suppress that app (the pre-seeded skel-distro first_run.txt marker) so OUR
 # card shows instead of upstream's — which means we must run the same bootstrap
 # ourselves, exactly once, or the rice boots with un-themed Material defaults.
 # Fail-soft: a missing script/wallpaper just means no colour pregen, never a
@@ -202,9 +202,9 @@ _first_run_bootstrap() {
 
 cmd_welcome() {
   if [[ "${1:-}" == "--auto" ]]; then
-    # Our card REPLACES upstream's first-run welcome: ii-post-install seeds
-    # first_run.txt so upstream's FirstRunExperience.qml never fires (no upstream
-    # welcome, and no upstream switchwall). We show our card exactly once
+    # Our card REPLACES upstream's first-run welcome: the pre-seeded skel-distro
+    # first_run.txt marker means upstream's FirstRunExperience.qml never fires (no
+    # upstream welcome, and no upstream switchwall). We show our card exactly once
     # (OUR_MARKER) and, on that first run, replicate the wallpaper/colour bootstrap.
     [[ -f "$OUR_MARKER" ]] && exit 0
     sleep 3                 # let Quickshell + the session settle

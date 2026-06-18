@@ -243,25 +243,32 @@ fi
 # ── deactivate upstream's first-run welcome; defer to ours ─────────────────
 # Upstream's FirstRunExperience.qml shows its own welcome app (and runs
 # switchwall.sh) on the first login where ~/.local/state/quickshell/user/
-# first_run.txt is absent. We pre-seed that marker so it stays quiet, and OUR
-# card shows instead (iictl welcome --auto, launched from skel custom/execs.lua),
-# which replicates the wallpaper/colour bootstrap itself. Additive + reversible:
-# the marker is recorded in the new user's ledger, so `iictl revert-all` removes
-# it and the vanilla upstream welcome returns on the next login.
+# first_run.txt is absent. The distro pre-seeds that marker DISTRO-WIDE via
+# overlay/skel-distro/.local/state (30-skel.sh copies it into both /etc/skel —
+# this installed user, via useradd -m — and /etc/skel-upstream — the liveuser),
+# so it normally already exists here. We keep a fail-safe seed for the rare case
+# it is missing, then record it in the NEW USER's ledger (kind 'file' so
+# revert-all's path inverse removes it) — so `iictl revert-all` deletes the
+# marker and the vanilla upstream welcome returns on the next login. OUR card
+# shows instead (iictl welcome --auto, launched from skel custom/execs.lua),
+# replicating the wallpaper/colour bootstrap itself. Additive + reversible.
 if [[ -n "$NEW_USER" ]]; then
   H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
   if [[ -n "$H" && -d "$H" ]]; then
     FRUN="$H/.local/state/quickshell/user/first_run.txt"
-    if [[ ! -e "$FRUN" ]]; then
+    if [[ ! -e "$FRUN" ]]; then          # fail-safe: skel-distro normally seeds it
       install -d -o "$NEW_USER" -g "$NEW_USER" "$(dirname "$FRUN")"
       printf "This file is just here to confirm you've been greeted :>\n" > "$FRUN"
       chown "$NEW_USER:$NEW_USER" "$FRUN"
-      T "  seeded first_run.txt → upstream welcome suppressed; ours shows on first login"
-      if [[ -r /usr/local/lib/ii/ledger.sh ]]; then
-        try "ledger: first-run welcome override" sudo -u "$NEW_USER" env \
-          HOME="$H" XDG_STATE_HOME="$H/.local/state" \
-          bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record file-seed first-run-welcome "" "$HOME/.local/state/quickshell/user/first_run.txt" "rm to restore upstream first-run welcome"'
-      fi
+    fi
+    T "  first_run.txt present → upstream welcome suppressed; ours shows on first login"
+    # Record regardless of who wrote it (skel or the fail-safe above) so the
+    # skel-provided copy is reversible too — the old `! -e` guard skipped this
+    # once skel started seeding the file.
+    if [[ -e "$FRUN" && -r /usr/local/lib/ii/ledger.sh ]]; then
+      try "ledger: first-run welcome override" sudo -u "$NEW_USER" env \
+        HOME="$H" XDG_STATE_HOME="$H/.local/state" \
+        bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record file first-run-welcome "" "$HOME/.local/state/quickshell/user/first_run.txt" "rm to restore upstream first-run welcome"'
     fi
   fi
 fi
