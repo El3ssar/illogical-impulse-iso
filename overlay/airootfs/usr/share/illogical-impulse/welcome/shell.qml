@@ -6,11 +6,11 @@
 //
 // Deliberately standalone: its own Quickshell config dir, plain QtQuick,
 // ZERO imports from upstream's shell tree — if end-4 redesigns the rice
-// tomorrow, this still runs. Shown once on first login IN PLACE OF upstream's
-// own welcome (suppressed distro-wide by the pre-seeded first_run.txt marker in
-// skel-distro — reaches both the installed user and the liveuser; sequencing in
-// `iictl welcome --auto`); reopen anytime with `iictl welcome` (or bare
-// `iictl`).
+// tomorrow, this still runs. Shown once on the INSTALLED user's first login IN
+// PLACE OF upstream's own welcome (suppressed by the pre-seeded first_run.txt
+// marker in skel-distro → /etc/skel; sequencing in `iictl welcome --auto`). The
+// liveuser keeps upstream's first-run (it has the installer launcher instead).
+// Reopen anytime with `iictl welcome` (or bare `iictl`).
 //
 // Actions run in an EMBEDDED console — a Quickshell.Io.Process streamed into
 // the window — so NO external terminal window pops up. A system update needs

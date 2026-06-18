@@ -243,15 +243,16 @@ fi
 # ── deactivate upstream's first-run welcome; defer to ours ─────────────────
 # Upstream's FirstRunExperience.qml shows its own welcome app (and runs
 # switchwall.sh) on the first login where ~/.local/state/quickshell/user/
-# first_run.txt is absent. The distro pre-seeds that marker DISTRO-WIDE via
-# overlay/skel-distro/.local/state (30-skel.sh copies it into both /etc/skel —
-# this installed user, via useradd -m — and /etc/skel-upstream — the liveuser),
-# so it normally already exists here. We keep a fail-safe seed for the rare case
-# it is missing, then record it in the NEW USER's ledger (kind 'file' so
-# revert-all's path inverse removes it) — so `iictl revert-all` deletes the
-# marker and the vanilla upstream welcome returns on the next login. OUR card
-# shows instead (iictl welcome --auto, launched from skel custom/execs.lua),
-# replicating the wallpaper/colour bootstrap itself. Additive + reversible.
+# first_run.txt is absent. The distro pre-seeds that marker for the INSTALLED
+# user via overlay/skel-distro/.local/state → /etc/skel (useradd -m copies it
+# here), so it normally already exists. (The liveuser is deliberately NOT seeded
+# — it keeps upstream's first-run for the wallpaper/colour bootstrap; see
+# 30-skel.sh.) We keep a fail-safe seed for the rare case it is missing, then
+# record it in the NEW USER's ledger (kind 'file' so revert-all's path inverse
+# removes it) — so `iictl revert-all` deletes the marker and the vanilla upstream
+# welcome returns on the next login. OUR card shows instead (iictl welcome
+# --auto, launched from skel custom/execs.lua), replicating the wallpaper/colour
+# bootstrap itself. Additive + reversible.
 if [[ -n "$NEW_USER" ]]; then
   H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
   if [[ -n "$H" && -d "$H" ]]; then

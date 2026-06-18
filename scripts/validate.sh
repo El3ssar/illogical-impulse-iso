@@ -294,8 +294,8 @@ step "iictl update flags + embedded welcome"
 #     bootstrap (we suppress upstream's FirstRunExperience that normally does).
 #   • ii-post-install records the first_run.txt marker in the ledger with a
 #     revert-able kind ('file') so revert-all restores the upstream welcome.
-#     (The marker itself is pre-seeded distro-wide via skel-distro — the
-#     content + both-skel-trees guards live in the next step.)
+#     (The marker itself is pre-seeded for the installed user via skel-distro →
+#     /etc/skel — the content + skel-placement guards live in the next step.)
 IICTL_F="$AIROOTFS/usr/local/bin/iictl"
 WELCOME_QML_F="$AIROOTFS/usr/share/illogical-impulse/welcome/shell.qml"
 SETUP_OPTS_F="$DOTS/sdata/subcmd-install/options.sh"
@@ -361,16 +361,22 @@ fi
 
 step "first-run welcome suppression (skel marker)"
 # Iron-Rule bug-class guard (issue #13): the distro pre-seeds upstream's own
-# first_run.txt suppression marker in skel-distro so OUR welcome owns the single
-# first-login surface (no upstream-welcome → distro-welcome double interruption).
-# Two things must hold or a user's first boot regresses:
+# first_run.txt suppression marker so OUR welcome owns the INSTALLED user's first
+# login (no upstream-welcome → distro-welcome double interruption). Three things
+# must hold or a first boot regresses:
 #   1. The seeded content stays byte-for-byte equal to upstream's firstRunFileContent
 #      — if upstream renames/retexts that string, fail HERE at build time, not at
 #      the user's first boot (FileView only checks existence, but we keep the exact
 #      sanctioned value so we never write foreign content into upstream STATE).
-#   2. The marker reaches BOTH skel trees: /etc/skel (installed user, via
-#      useradd -m) AND /etc/skel-upstream (liveuser, seeded by chroot.sh) — 30-skel.sh
-#      copies skel-distro/.local/state into both.
+#   2. The marker reaches /etc/skel (installed user, via useradd -m) — together
+#      with the skel-distro custom/execs.lua welcome hook, so our card + wallpaper
+#      bootstrap replace upstream's first-run.
+#   3. The marker must NOT reach /etc/skel-upstream (the liveuser). The liveuser
+#      is seeded from skel-upstream + skel-live and has NO distro welcome hook
+#      (its custom/execs.lua is the installer launcher), and chroot.sh defers the
+#      live wallpaper/colour bootstrap to upstream's FirstRunExperience. Seeding
+#      the marker there would suppress upstream's first-run with nothing to
+#      replace it — a Try-live boot with no wallpaper, no colours, no welcome.
 FRUN_QML="$DOTS/dots/.config/quickshell/ii/services/FirstRunExperience.qml"
 FRUN_SEED="$OVERLAY/skel-distro/.local/state/quickshell/user/first_run.txt"
 FRUN_REL=".local/state/quickshell/user/first_run.txt"
@@ -389,14 +395,21 @@ else
     _v_fail "skel-distro first_run.txt drifted from upstream's firstRunFileContent — re-sync the marker (got '$_seed_marker', upstream '$_up_marker')"
   fi
 fi
-for _sk in skel skel-upstream; do
-  _sk_who="installed user"; [[ "$_sk" == skel-upstream ]] && _sk_who="liveuser"
-  if [[ -f "$AIROOTFS/etc/$_sk/$FRUN_REL" ]]; then
-    _v_ok "first_run.txt staged into /etc/$_sk (→ $_sk_who)"
-  else
-    _v_fail "first_run.txt NOT in /etc/$_sk — $_sk_who would still see upstream's welcome"
-  fi
-done
+# Installed user MUST get the marker; liveuser MUST NOT.
+[[ -f "$AIROOTFS/etc/skel/$FRUN_REL" ]] \
+  && _v_ok "first_run.txt staged into /etc/skel (→ installed user; our card owns first login)" \
+  || _v_fail "first_run.txt NOT in /etc/skel — installed user would still see upstream's welcome"
+if [[ -f "$AIROOTFS/etc/skel-upstream/$FRUN_REL" ]]; then
+  _v_fail "first_run.txt LEAKED into /etc/skel-upstream — would suppress the liveuser's upstream first-run (no wallpaper/colours/welcome on a Try-live boot); exclude it from the skel-upstream state copy"
+else
+  _v_ok "first_run.txt correctly absent from /etc/skel-upstream (liveuser keeps upstream's first-run wallpaper/colour bootstrap)"
+fi
+# The broad skel-distro/.local/state → skel-upstream copy must still reach the
+# liveuser (only first_run.txt is excluded) — kitty-theme.conf is the canary.
+_kitty_rel=".local/state/quickshell/user/generated/terminal/kitty-theme.conf"
+[[ -f "$AIROOTFS/etc/skel-upstream/$_kitty_rel" ]] \
+  && _v_ok "skel-distro OOB state still reaches the liveuser (kitty-theme.conf in /etc/skel-upstream) — exclude is surgical" \
+  || _v_warn "kitty-theme.conf missing from /etc/skel-upstream — the first_run.txt exclude may be over-broad"
 
 step "sentinel-fenced custom/*.lua blocks"
 # Iron-Rule bug-class guard: every distro write into an upstream custom/*.lua

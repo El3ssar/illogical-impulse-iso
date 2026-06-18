@@ -173,14 +173,18 @@ Don't "simplify" these away — each cost real debugging time:
   first-boot wallpaper switch (`switchwall.sh`) generates colours in a real
   Hyprland session. We **suppress upstream's FirstRunExperience** (its welcome
   app) so OUR welcome card shows instead — the
-  `~/.local/state/quickshell/user/first_run.txt` marker is pre-seeded
-  **distro-wide** via `overlay/skel-distro/.local/state` (`30-skel.sh` copies it
-  into both `/etc/skel` → installed user AND `/etc/skel-upstream` → liveuser, so
-  upstream's welcome never fires on either). It must contain upstream's exact
+  `~/.local/state/quickshell/user/first_run.txt` marker is pre-seeded for the
+  **installed user** via `overlay/skel-distro/.local/state` (`30-skel.sh` copies
+  it into `/etc/skel`; useradd -m delivers it). It must contain upstream's exact
   `firstRunFileContent` string (validate.sh guards this; never write any other
   content into that STATE path). `ii-post-install` records it in the new user's
-  ledger (kind `file`) for `iictl revert-all`. Suppressing it ALSO kills
-  upstream's first-boot `switchwall`, so
+  ledger (kind `file`) for `iictl revert-all`. The **liveuser is deliberately NOT
+  seeded** (30-skel.sh excludes `first_run.txt` from the skel-upstream state
+  copy): it has no distro welcome hook (its `custom/execs.lua` is the installer
+  launcher) and `chroot.sh` defers the live wallpaper/colour bootstrap to
+  upstream's first-run — suppressing it there would give a Try-live boot no
+  wallpaper, no colours, and no welcome. Suppressing it (installed user) ALSO
+  kills upstream's first-boot `switchwall`, so
   `iictl welcome --auto` re-runs it itself once (it self-activates the venv via
   `$ILLOGICAL_IMPULSE_VIRTUAL_ENV` from upstream's hypr `env.lua`). A static
   `kitty-theme.conf` in `overlay/skel-distro` covers the gap before it runs.
