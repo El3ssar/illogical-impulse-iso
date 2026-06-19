@@ -236,6 +236,52 @@ no-bespoke-stripping bug-class.
   diffs the current body against the pristine `/etc/skel` copy; a divergence is
   **kept** and warned unless `--force` is given (PROPOSAL §17 edge case).
 
+### iictl chooser contract + `iictl-tui` renderer (#47)
+
+The "choose-then-tweak" UX is a framework primitive with **two deliberately
+decoupled halves** (PROPOSAL §11): the **contract** (a declarative option spec
+every domain emits) and the **renderer** (one fancy ratatui binary that draws
+it). The point of the split: the **engine stays bash** (pack, revert-all,
+ledger, mutators, every `set` verb, the whole install-chroot path) and the
+renderer is **swappable** — the *same* spec also drives the Quickshell Control
+Center (#14), so CLI/GUI parity is structural, not hand-maintained.
+
+- **The contract (`iictl <verb> --spec`, JSON).** A domain advertises its
+  configurable surface as a tiny spec with **EXACTLY three control types** (the
+  anti-clutter ceiling — domains *cannot* build a maze):
+  - `choice` — single pick from `options[]`; `apply` argv (`%v` = chosen value).
+  - `list` — multi add/remove over inline `options[]` **or** a dynamic
+    `candidates` argv resolved per `source` (`%s`, the source-driven shells case,
+    owned by #48); `apply_add`/`apply_remove` argv (`%v`).
+  - `toggle` — boolean; `apply_on`/`apply_off` argv.
+
+  Every `apply*`/`candidates` is an **`iictl` argv array** the renderer runs
+  verbatim with `%v`/`%s` substituted — so the renderer mutates nothing; each
+  change flows through the domain's bash verb → the ledger. A domain also carries
+  a `#spec: <verb><TAB><title>` header (the discovery shape mirrors `#help:`);
+  `validate.sh` couples advertise↔answer so the `iictl tweak` listing never lies.
+
+- **The renderer (`iictl-tui`).** A Rust/ratatui binary
+  (`overlay/aur-pkgbuilds/iictl-tui/crate/`): `iictl-tui <domain>` runs `iictl
+  <domain> --spec`, draws it (styled panels, mouse + keys, Material-You colours
+  read **read-only** from the rice's `colors.json` with a static fallback), and
+  applies picks by running the `apply*` argv via `std::process`. Progressive
+  disclosure + a one-level tweak ceiling + explicit done/cancel are enforced by
+  the renderer, not by each domain. `iictl tweak <domain>` (a thin bash drop-in)
+  execs it; bare `iictl tweak` lists `#spec:` domains.
+
+- **Build path (the one compiled component in an otherwise plain-shell layer).**
+  Shipped as a **local PKGBUILD** in `overlay/aur-pkgbuilds/iictl-tui/`
+  (`makedepends=('cargo')`, builds the vendored crate). prebuild compiles it into
+  `[ii-extra]`; it is in `packages/base.list`, so mkarchiso pacstraps it into the
+  squashfs. It therefore **survives install with NO `ii-verify` exemption** — it
+  is a real `/usr/bin` package, not a file under the purged `/usr/local/lib/ii`.
+  `pacman -Rns iictl-tui` + `iictl revert-all` ⇒ vanilla. `validate.sh`'s
+  `step "iictl-tui chooser contract (#47)"` lints the PKGBUILD/baked-package, the
+  tweak bridge (execs the renderer, mutates nothing), the spec schema (sample +
+  the live `iictl pack --spec` reference emitter), the single-picker guard (no
+  domain opens a second interactive picker), and the advertise↔answer coupling.
+
 ## 4. Pipeline contracts
 
 `just build [profile]` = `prepare [profile]` → `prebuild` → `mkiso`.
