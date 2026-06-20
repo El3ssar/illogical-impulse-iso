@@ -189,6 +189,23 @@ if [[ -f "$SETTINGS" ]]; then
   grep -qE '^\s*installEFIFallback:\s*true' "$bc" \
     && _v_ok "bootloader.conf: EFI fallback enabled" \
     || _v_warn "bootloader.conf: no EFI fallback (VirtualBox installs may not boot)"
+  # INST-01: the new user's login shell (users.conf userShell) must be a package
+  # that actually ships, or every login (bare TTY, su -, ssh, chsh tools) breaks.
+  # fizsh leaked in from a hypothetical GUIDE recipe and was in no package list.
+  # Static heuristic mirroring the shellprocess-script-exists guard: derive the
+  # owning package from the shell binary basename (with the known nu→nushell map)
+  # and assert it is in packages.x86_64.
+  usr="$AIROOTFS/etc/calamares/modules/users.conf"
+  ushell=$(awk '/^[[:space:]]*userShell:/{print $2; exit}' "$usr" 2>/dev/null | tr -d '"')
+  if [[ -z "$ushell" ]]; then
+    _v_fail "users.conf: no userShell set (INST-01)"
+  else
+    sbin="${ushell##*/}"
+    case "$sbin" in nu) spkg=nushell ;; *) spkg="$sbin" ;; esac
+    grep -Eq "^\s*${spkg}\s*$" "$PKGLIST" \
+      && _v_ok "users.conf: login shell '$ushell' ships (pkg $spkg in packages.x86_64) (INST-01)" \
+      || _v_fail "users.conf: login shell '$ushell' has no package ($spkg) in packages.x86_64 — installed user's login breaks (INST-01)"
+  fi
 fi
 
 step "batteries + nvidia auto-detect"
