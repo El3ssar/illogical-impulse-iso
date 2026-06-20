@@ -15,6 +15,13 @@ zram-generator
 libnotify
 chafa
 
+# fish — the installed user's login shell (Calamares users.conf userShell, INST-01)
+# and upstream's tested default. It already ships as a declared dependency of the
+# upstream illogical-impulse-fonts-themes PKGBUILD (scraped by resolve-deps.py); this
+# explicit line is a backstop so a future upstream dep-drop can't silently remove the
+# login shell and lock the new user out. Dedup in 40-packages.sh keeps it single.
+fish
+
 # iictl-tui — the ratatui chooser renderer (#47). A local PKGBUILD under
 # overlay/aur-pkgbuilds/ (built by prebuild → [ii-extra], pacstrapped into the
 # squashfs), so it SURVIVES install as a normal /usr/bin package (no ii-verify
