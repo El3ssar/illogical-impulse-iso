@@ -174,6 +174,15 @@ if [[ -f "$SETTINGS" ]]; then
   ! grep -qE '^\s*sourcefs:\s*"?squashfs"?' "$uc" \
     && _v_ok "unpackfs.conf: sourcefs is not 'squashfs'" \
     || _v_fail "unpackfs.conf: sourcefs: squashfs is wrong (install will crash)"
+  # SEC-01: the tty2 passwordless-root rescue autologin is live-ISO-only. Its
+  # drop-in (dir or file) MUST be in unpackfs.conf's exclude list, else every
+  # installed system ships passwordless root on Ctrl+Alt+F2.
+  grep -qE '^\s*-\s+etc/systemd/system/getty@tty2\.service\.d' "$uc" \
+    && _v_ok "unpackfs.conf: tty2 root autologin excluded from install (SEC-01)" \
+    || _v_fail "unpackfs.conf: tty2 passwordless-root autologin NOT excluded — leaks onto installed systems (SEC-01)"
+  grep -q 'getty@tty2.service.d/autologin.conf' "$AIROOTFS/usr/local/bin/ii-post-install" \
+    && _v_ok "ii-post-install strips tty2 root autologin (defense-in-depth, SEC-01)" \
+    || _v_fail "ii-post-install missing tty2 autologin removal (SEC-01)"
   bc="$AIROOTFS/etc/calamares/modules/bootloader.conf"
   grep -qE '^\s*efiBootLoader:\s*"?systemd-boot"?' "$bc" \
     && _v_ok "bootloader.conf: systemd-boot" || _v_fail "bootloader.conf not systemd-boot"
