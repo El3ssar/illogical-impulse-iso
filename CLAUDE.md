@@ -196,6 +196,12 @@ Don't "simplify" these away — each cost real debugging time:
   `branding.desc`.
 - **prebuild wiping cache before makepkg succeeds** → empty cache on
   failure. The wipe lives INSIDE `_build` after success.
+- **Detached `.sig` fed to `repo-add`** → on a signing-enabled host
+  (`BUILDENV+=sign` / a `GPGKEY`), `makepkg` drops a `*.pkg.tar.zst.sig` beside
+  each artifact; `repo-add` rejects it (`not a package file`) and, under
+  `set -e`, aborts the whole build. Every `*.pkg.tar.*` glob in `prebuild.sh`
+  that feeds `repo-add` or the nvidia stash filters `.sig` (mirrors
+  `chroot.sh`'s `_nv_pkgs`); `validate.sh` guards it (BUILD-01).
 
 ## 7. Debug paths
 

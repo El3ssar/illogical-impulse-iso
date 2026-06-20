@@ -27,7 +27,7 @@ _is_git() { [[ "$1" == *-git ]]; }
 GIT_FRESH_HOURS="${GIT_FRESH_HOURS:-6}"
 _fresh_git_cache() {
   local pkg="$1" f
-  f=$(ls -t "$REPO_PATH/$pkg-"*.pkg.tar.* 2>/dev/null | grep -v -- '-debug-' | head -1) || true
+  f=$(ls -t "$REPO_PATH/$pkg-"*.pkg.tar.* 2>/dev/null | grep -v -- '-debug-' | grep -v -- '\.sig$' | head -1) || true
   [[ -n "$f" ]] || return 1
   (( $(date +%s) - $(stat -c %Y "$f") < GIT_FRESH_HOURS * 3600 ))
 }
@@ -80,6 +80,7 @@ _cached_ver() {
   shopt -s nullglob
   for f in "$REPO_PATH/$pkg-"*.pkg.tar.*; do
     [[ "$f" == *-debug-* ]] && continue
+    [[ "$f" == *.sig ]] && continue   # read the version from packages, not signatures (BUILD-01)
     b="${f##*/}"; rest="${b#"$pkg"-}"; rest="${rest%-*.pkg.tar.*}"
     shopt -u nullglob
     echo "$rest"; return 0
@@ -122,6 +123,11 @@ _build() {
   for b in "${built[@]}"; do
     base="${b##*/}"
     [[ "$base" == *-debug-* ]] && continue
+    # Detached signatures aren't packages: a signing-enabled host (BUILDENV+=sign
+    # / a GPGKEY) drops $base.sig next to each artifact, and repo-add chokes on it
+    # ("not a package file") — under set -e that aborts the whole build. Mirror
+    # chroot.sh's _nv_pkgs filter and never stage/index a .sig. (BUILD-01)
+    [[ "$base" == *.sig ]] && continue
     name="${base%-*-*-*}"   # strip pkgver-pkgrel-arch.pkg.tar.*
     sudo rm -f "$REPO_PATH/$name-"*.pkg.tar.*
     sudo mv "$b" "$REPO_PATH/"
@@ -243,7 +249,12 @@ done
 
 step "re-index [$REPO_NAME]"
 cd "$REPO_PATH"
-shopt -s nullglob; declare -a all=( *.pkg.tar.* ); shopt -u nullglob
+# Drop detached .sig from the index input — repo-add treats them as packages and
+# fails. Keep debug packages (they're indexed as before). (BUILD-01)
+shopt -s nullglob
+declare -a all=()
+for f in *.pkg.tar.*; do [[ "$f" == *.sig ]] && continue; all+=("$f"); done
+shopt -u nullglob
 (( ${#all[@]} > 0 )) || die "no packages in $REPO_PATH"
 sudo rm -f "$REPO_NAME".db* "$REPO_NAME".files*
 sudo repo-add "$REPO_DB" "${all[@]}" >/dev/null
@@ -254,7 +265,8 @@ missing=()
 for pkg in "${REQUIRED[@]}"; do
   shopt -s nullglob; hits=( "$REPO_PATH/$pkg-"*.pkg.tar.* ); shopt -u nullglob
   has_file=false
-  for f in "${hits[@]}"; do [[ "$f" != *-debug-* ]] && has_file=true; done
+  # A lone .sig must not satisfy "package present" (BUILD-01).
+  for f in "${hits[@]}"; do [[ "$f" != *-debug-* && "$f" != *.sig ]] && has_file=true; done
   $has_file || missing+=("$pkg (no .pkg.tar.*)")
   tar -tf "$REPO_DB" 2>/dev/null | grep -E "^$pkg-[^/]+/desc$" | grep -v -- '-debug-' | grep -q . \
     || missing+=("$pkg (not in DB)")
@@ -272,7 +284,10 @@ if [[ -s "$NV_AUR_LIST" ]]; then
   install -d "$BUILD/airootfs/usr/share/illogical-impulse/nvidia"
   while IFS= read -r p; do
     [[ -z "$p" ]] && continue
-    f=$(ls -t "$REPO_PATH/$p-"*.pkg.tar.* 2>/dev/null | grep -v -- '-debug-' | head -1 || true)
+    # Exclude detached .sig: head -1 over the mtime-sorted glob could otherwise
+    # pick $p-….sig (written just after the package) and stage a non-package
+    # into the nvidia stash, which chroot.sh's repo-add would reject. (BUILD-01)
+    f=$(ls -t "$REPO_PATH/$p-"*.pkg.tar.* 2>/dev/null | grep -v -- '-debug-' | grep -v -- '\.sig$' | head -1 || true)
     [[ -n "$f" ]] || die "nvidia AUR package missing from $REPO_PATH: $p"
     cp -f "$f" "$BUILD/airootfs/usr/share/illogical-impulse/nvidia/"
   done < "$NV_AUR_LIST"
