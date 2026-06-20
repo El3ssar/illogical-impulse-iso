@@ -725,6 +725,35 @@ for h in archiso_pxe_nbd archiso_pxe_http archiso_pxe_nfs; do
     && _v_fail "HOOKS contains '$h' (needs nbd-client not in pacstrap)"
 done
 
+step "prebuild [$REPO_NAME] .sig hygiene (BUILD-01)"
+# repo-add rejects a detached signature ("not a package file") and, under
+# set -e, that aborts the whole build. A signing-enabled host (BUILDENV+=sign
+# / a GPGKEY) drops a *.pkg.tar.zst.sig next to every artifact, so every
+# *.pkg.tar.* glob in prebuild that feeds repo-add or the nvidia stash MUST
+# exclude .sig — mirroring chroot.sh's _nv_pkgs filter. Static grep on the
+# source (these scripts run on the host, not in build/).
+_PREBUILD="$SCRIPTS/prebuild.sh"
+if [[ ! -f "$_PREBUILD" ]]; then
+  _v_fail "scripts/prebuild.sh missing"
+else
+  _pb_sig_ok=1
+  # (a) the per-build staging loop (its array feeds 'repo-add … staged_paths[]')
+  grep -F -A11 'for b in "${built[@]}"' "$_PREBUILD" | grep -q '== \*\.sig' \
+    || { _v_fail "prebuild _build staging loop no longer skips .sig → repo-add chokes on signed-host builds"; _pb_sig_ok=0; }
+  # (b) the final re-index must NOT assign an unfiltered glob array (the original bug)
+  if grep -qE 'all=\(\s*\*\.pkg\.tar\.\*\s*\)' "$_PREBUILD"; then
+    _v_fail "prebuild builds 'all=( *.pkg.tar.* )' unfiltered → final repo-add gets .sig files"; _pb_sig_ok=0
+  fi
+  # (c) no repo-add is handed a raw glob inline — it must go through a filtered array
+  if grep -E 'repo-add[^|]*\*\.pkg\.tar\.\*' "$_PREBUILD" | grep -qvE '^[[:space:]]*#'; then
+    _v_fail "prebuild feeds a raw *.pkg.tar.* glob straight to repo-add"; _pb_sig_ok=0
+  fi
+  # (d) the nvidia-stash staging glob excludes .sig (head -1 could otherwise pick one)
+  grep -F 'ls -t "$REPO_PATH/$p-"' "$_PREBUILD" | grep -q 'sig' \
+    || { _v_fail "prebuild nvidia-stash glob no longer excludes .sig"; _pb_sig_ok=0; }
+  (( _pb_sig_ok )) && _v_ok "prebuild filters detached .sig from every repo-add/stash glob (BUILD-01)"
+fi
+
 step "[$REPO_NAME] repo"
 [[ -f "$BUILD/pacman.conf" ]] && grep -q "^\[$REPO_NAME\]" "$BUILD/pacman.conf" \
   && _v_ok "pacman.conf has [$REPO_NAME]" || _v_fail "pacman.conf missing [$REPO_NAME]"
