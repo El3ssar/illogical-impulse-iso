@@ -222,6 +222,17 @@ Don't "simplify" these away — each cost real debugging time:
   window can't non-fast-forward-fail). Any earlier failure aborts before that
   step → `main` keeps the old pin → the next cron retries. `validate.sh` guards
   the ordering (CI-01).
+- **Smoke test under TCG (no KVM) hangs to a misleading timeout** → the smoke
+  probe boots the ISO into a full graphical session and counts framebuffer
+  colours; that cold boot never completes in time under TCG software emulation.
+  `ubuntu-latest` exposes `/dev/kvm` but the runner user isn't in the `kvm`
+  group, so `[[ -w /dev/kvm ]]` failed and `smoke.sh` silently dropped to TCG.
+  `release.yml` now adds the standard "Enable KVM access" udev step
+  (`99-kvm4all.rules`, `MODE="0666"`) before the smoke step so the boot is
+  hardware-accelerated; `smoke.sh` **fails fast** with a clear "KVM required for
+  the graphical probe" message when `/dev/kvm` is unavailable (set
+  `SMOKE_ALLOW_TCG=1` to force the slow TCG path with eyes open) rather than
+  hanging. `validate.sh` guards both halves (CI-03).
 
 ## 7. Debug paths
 

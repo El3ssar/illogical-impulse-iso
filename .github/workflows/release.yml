@@ -55,6 +55,13 @@ jobs:
   release:
     needs: gate
     if: needs.gate.outputs.go == 'yes'
+    # CI-03 — runner requirement: the smoke step boots the ISO into a full
+    # graphical session and is effectively unwinnable under TCG software
+    # emulation, so it needs hardware KVM. ubuntu-latest IS KVM-capable: it
+    # exposes /dev/kvm, but the runner user isn't in the kvm group, so the
+    # "Enable KVM access" step below makes /dev/kvm writable before smoke runs.
+    # If this job is ever moved to a runner without /dev/kvm, smoke.sh fails
+    # fast with a clear message rather than hanging to its 420s timeout.
     runs-on: ubuntu-latest
     timeout-minutes: 300
     steps:
@@ -99,6 +106,18 @@ jobs:
 
       - name: Fix ownership for caching + checksums
         run: sudo chown -R "$(id -u):$(id -g)" out .ii-cache
+
+      # CI-03 — ubuntu-latest exposes /dev/kvm but the runner user isn't in the
+      # kvm group, so it isn't writable by default and smoke.sh's `[[ -w /dev/kvm
+      # ]]` gate would fail → TCG → an unwinnable boot (now a fast failure). This
+      # udev rule makes /dev/kvm world-accessible so the headless boot runs with
+      # hardware acceleration. Standard idiom (same as the Android emulator action).
+      - name: Enable KVM access for the smoke test
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
 
       - name: Smoke test (headless boot to graphical session)
         run: |

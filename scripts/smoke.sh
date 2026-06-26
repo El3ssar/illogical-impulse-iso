@@ -7,6 +7,14 @@
 #
 #   smoke.sh [--timeout SECONDS]      (default 300)
 #
+# Requires hardware virtualization (KVM). The probe boots a full UEFI ISO all
+# the way into a graphical session, which effectively never completes within the
+# timeout under TCG software emulation — so with no writable /dev/kvm this FAILS
+# FAST with a clear message instead of hanging to a misleading timeout (CI-03).
+# Set SMOKE_ALLOW_TCG=1 to force the slow TCG path anyway (expect it to time out
+# on real ISOs). On GitHub-hosted ubuntu-latest, /dev/kvm exists but the runner
+# user needs the enable step in release.yml to make it writable.
+#
 # Used by `just smoke` locally and by the release CI before publishing.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
@@ -31,11 +39,23 @@ done
 OVMF_VARS_SRC="${OVMF_CODE/CODE/VARS}"
 [[ -f "$OVMF_VARS_SRC" ]] || die "OVMF VARS template missing: $OVMF_VARS_SRC"
 
+# KVM gate (CI-03) — decided BEFORE we allocate the tempdir/trap so an early
+# `die` can't trip the EXIT trap's (still-unset) $QPID. The probe below needs a
+# real cold boot into a graphical session; under TCG software emulation that
+# never finishes in time, so a KVM-less run would silently hang to its timeout.
+# Fail fast with a clear message instead — unless the caller opts into the slow
+# TCG path with eyes open via SMOKE_ALLOW_TCG=1.
+KVM_ARGS=()
+if [[ -w /dev/kvm ]]; then
+  KVM_ARGS=( -enable-kvm -cpu host )
+elif [[ -n "${SMOKE_ALLOW_TCG:-}" ]]; then
+  warn "KVM required for the graphical probe, but SMOKE_ALLOW_TCG is set — booting under TCG software emulation (very slow; a real ISO will likely time out within ${TIMEOUT}s)"
+else
+  die "KVM required for the graphical probe: /dev/kvm is absent or not writable. This boots a full UEFI ISO into a Hyprland/Quickshell graphical session and counts distinct framebuffer colors; under TCG emulation that boot does not finish in time, so the run would hang to a misleading timeout rather than fail here. Run on a KVM-capable host/runner (kvm group + writable /dev/kvm), or set SMOKE_ALLOW_TCG=1 to force the slow TCG path with eyes open."
+fi
+
 T=$(mktemp -d); trap 'kill "$QPID" 2>/dev/null; rm -rf "$T"' EXIT
 cp "$OVMF_VARS_SRC" "$T/vars.fd"
-
-KVM_ARGS=()
-[[ -w /dev/kvm ]] && KVM_ARGS=( -enable-kvm -cpu host ) || warn "no /dev/kvm — TCG (slow)"
 
 step "smoke-boot $(basename "$ISO") (timeout ${TIMEOUT}s)"
 qemu-system-x86_64 \
