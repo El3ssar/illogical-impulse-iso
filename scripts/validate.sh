@@ -792,6 +792,47 @@ else
   _v_fail ".nspawn-cache/ not in .gitignore — the just nspawn base rootfs could be committed"
 fi
 
+step "release pin-bump ordering (CI-01)"
+# The dots-pin bump is split around the build: the submodule WORKING TREE is
+# bumped before the build (so the ISO ships the new dots), but the pin is
+# committed + pushed to main ONLY after a successful GitHub release. Committing
+# the pin up-front strands a fresh-but-unreleased pin on any build/smoke/publish
+# failure, which update.sh --check's age gate then reads as "too young → no
+# bump" — suppressing releases for ~min_days_between_releases days. Static grep
+# on the workflow (release.yml is a tracked file; no build/ needed).
+_REL="$ROOT/.github/workflows/release.yml"
+if [[ ! -f "$_REL" ]]; then
+  _v_fail ".github/workflows/release.yml missing — CI-01 ordering guard can't run"
+else
+  # First-occurrence line numbers of each ordering marker (|| true so a removed
+  # marker yields an empty string the check below reports, rather than tripping
+  # set -e). Exclude the gate job's `update.sh --check` from the bump marker.
+  _ci_ln() { grep -n -- "$1" "$_REL" | head -1 | cut -d: -f1 || true; }
+  _bump_ln="$(grep -Fn './scripts/update.sh' "$_REL" | grep -vF -- '--check' | head -1 | cut -d: -f1 || true)"
+  _build_ln="$(_ci_ln 'just docked')"
+  _pub_ln="$(_ci_ln 'gh release create')"
+  _commit_ln="$(_ci_ln '\[release cron\]')"
+  _push_ln="$(grep -n 'git push' "$_REL" | head -1 | cut -d: -f1 || true)"
+  if [[ -z "$_bump_ln" || -z "$_build_ln" || -z "$_pub_ln" || -z "$_commit_ln" || -z "$_push_ln" ]]; then
+    _v_fail "release.yml missing an ordering marker (update.sh bump / just docked / gh release create / [release cron] / git push) — CI-01 ordering unverifiable"
+  else
+    _ci_ord_ok=1
+    # 1. the working-tree bump must precede the build (the ISO ships new dots).
+    if (( _bump_ln >= _build_ln )); then
+      _v_fail "release.yml: dots working-tree bump (update.sh) does not precede the build (just docked) — the ISO would ship the OLD dots"; _ci_ord_ok=0
+    fi
+    # 2. the pin COMMIT must come after the publish (no up-front commit).
+    if (( _commit_ln <= _pub_ln )); then
+      _v_fail "release.yml: the pin commit ([release cron]) is not after 'gh release create' — a failed build would strand the pin (CI-01)"; _ci_ord_ok=0
+    fi
+    # 3. the pin PUSH must come after the publish (no up-front push).
+    if (( _push_ln <= _pub_ln )); then
+      _v_fail "release.yml: 'git push' of the pin is not after 'gh release create' — a failed build would strand the pin (CI-01)"; _ci_ord_ok=0
+    fi
+    (( _ci_ord_ok )) && _v_ok "release.yml bumps the dots working tree before the build but commits+pushes the pin only after a successful release (CI-01)"
+  fi
+fi
+
 step "runtime + chroot scripts syntax"
 for sc in "$AIROOTFS/usr/local/bin/"ii-session \
           "$AIROOTFS/usr/local/bin/"ii-launch-installer \

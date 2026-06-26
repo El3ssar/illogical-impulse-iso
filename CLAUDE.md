@@ -211,6 +211,17 @@ Don't "simplify" these away — each cost real debugging time:
   view-or-edit (`gh release edit` + `gh release upload --clobber` when the
   release exists, else create), so re-runs converge on ONE release;
   `validate.sh` guards it (CI-02).
+- **Release dots-pin committed/pushed *before* build/publish** → a later
+  build/smoke/SourceForge/GitHub-release failure strands a fresh pin on `main`
+  with no release; `update.sh --check`'s age gate (`PIN_AGE_DAYS <
+  min_days_between_releases`) then reads it as "too young → no bump" and
+  suppresses retries for ~15 days. `release.yml` splits the bump: the submodule
+  **working tree** is bumped *before* the build (so the ISO ships the new dots),
+  but the pin is **committed + pushed to `main` only after a successful GitHub
+  release** (the last step; it rebases onto `main` first so the long build
+  window can't non-fast-forward-fail). Any earlier failure aborts before that
+  step → `main` keeps the old pin → the next cron retries. `validate.sh` guards
+  the ordering (CI-01).
 
 ## 7. Debug paths
 

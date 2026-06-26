@@ -68,15 +68,19 @@ jobs:
                       /opt/hostedtoolcache /usr/local/.ghcup /usr/share/swift
           df -h / | tail -1
 
-      - name: Bump dots pin (cron-triggered releases only)
+      # CI-01 ordering invariant (split into two halves around the build):
+      #   1. HERE — bump the submodule *working tree* to the new dots so the ISO
+      #      is built from them. The pin is NOT committed or pushed yet.
+      #   2. After a successful GitHub release (final step) — commit + push the
+      #      pin to main. Any failure in between (build/smoke/SourceForge/release)
+      #      aborts before that step, so origin/main keeps the OLD pin and the
+      #      next cron retries the bump. Pushing the pin up-front (the old bug)
+      #      stranded a fresh-but-unreleased pin that `update.sh --check`'s age
+      #      gate then read as "too young → no bump", suppressing releases for
+      #      ~min_days_between_releases days.
+      - name: Bump dots pin in the working tree (cron-triggered releases only)
         if: needs.gate.outputs.bump == 'yes'
-        run: |
-          ./scripts/update.sh
-          git config user.name 'github-actions[bot]'
-          git config user.email 'github-actions[bot]@users.noreply.github.com'
-          git add upstream/illogical-impulse
-          git commit -m "chore: bump dots to $(git -C upstream/illogical-impulse rev-parse --short HEAD) [release cron]"
-          git push
+        run: ./scripts/update.sh
 
       - name: Restore AUR package cache
         uses: actions/cache@v4
@@ -149,3 +153,21 @@ jobs:
           else
             gh release create "$VER" out/SHA256SUMS --title "Illogical Impulse ISO $VER" --notes-file notes.md
           fi
+
+      # CI-01: commit + push the bumped pin ONLY here — after the release is
+      # published. This is the second half of the ordering invariant above; if
+      # any earlier step failed, this never runs and the pin stays unbumped on
+      # main, so tomorrow's cron retries instead of stranding a fresh-but-
+      # unreleased pin. Must remain the LAST step of the job.
+      - name: Commit + push the bumped pin (cron-triggered, only after a successful release)
+        if: needs.gate.outputs.bump == 'yes'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add upstream/illogical-impulse
+          git commit -m "chore: bump dots to $(git -C upstream/illogical-impulse rev-parse --short HEAD) [release cron]"
+          # main may have advanced during the long build/publish; replay our
+          # single pin commit on top so the push fast-forwards instead of
+          # clobbering or non-fast-forward-failing.
+          git pull --rebase origin "$GITHUB_REF_NAME"
+          git push origin "HEAD:$GITHUB_REF_NAME"
