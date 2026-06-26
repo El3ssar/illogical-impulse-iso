@@ -841,6 +841,34 @@ else
   fi
 fi
 
+step "smoke KVM strategy (CI-03)"
+# The smoke test boots a multi-GB UEFI ISO into a full Hyprland/Quickshell
+# graphical session and probes the framebuffer for >=16 distinct colors — a cold
+# boot that effectively never completes within the timeout under TCG software
+# emulation. So (a) smoke.sh must FAIL FAST with a clear message when /dev/kvm is
+# unavailable rather than silently entering an unwinnable TCG boot, and (b) the
+# release workflow must give the runner access to /dev/kvm before the smoke step
+# (it is present on ubuntu-latest but not writable by the runner user without the
+# enable step). Static greps on the tracked smoke.sh + release.yml.
+_SMOKE="$ROOT/scripts/smoke.sh"
+if [[ ! -f "$_SMOKE" ]]; then
+  _v_fail "scripts/smoke.sh missing — CI-03 fail-fast guard can't run"
+elif grep -q 'die "KVM required for the graphical probe' "$_SMOKE" && grep -q '/dev/kvm' "$_SMOKE"; then
+  _v_ok "smoke.sh fails fast with a clear message when /dev/kvm is absent instead of hanging under TCG (CI-03)"
+else
+  _v_fail "smoke.sh does not fail fast on missing /dev/kvm — a KVM-less run silently boots under TCG and hangs to its timeout (CI-03)"
+fi
+_REL="$ROOT/.github/workflows/release.yml"
+if [[ ! -f "$_REL" ]]; then
+  _v_warn "release.yml not found — skipping CI-03 KVM-runner check"
+elif ! grep -q 'just smoke' "$_REL"; then
+  _v_warn "release.yml has no smoke step — CI-03 KVM-runner check not applicable"
+elif grep -q '99-kvm4all.rules' "$_REL" || grep -q 'KERNEL=="kvm"' "$_REL"; then
+  _v_ok "release.yml grants the runner /dev/kvm access before the smoke test (CI-03)"
+else
+  _v_fail "release.yml runs the smoke test without enabling /dev/kvm access — the graphical boot probe hangs under TCG on the standard runner (CI-03)"
+fi
+
 step "runtime + chroot scripts syntax"
 for sc in "$AIROOTFS/usr/local/bin/"ii-session \
           "$AIROOTFS/usr/local/bin/"ii-launch-installer \
