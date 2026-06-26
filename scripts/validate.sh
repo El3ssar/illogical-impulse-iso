@@ -754,6 +754,26 @@ else
   (( _pb_sig_ok )) && _v_ok "prebuild filters detached .sig from every repo-add/stash glob (BUILD-01)"
 fi
 
+step "release.yml idempotent re-release (CI-02)"
+# The GitHub-release version $VER is the build DATE, so a same-day re-run or a
+# workflow_dispatch reuses it — and publish-sf.sh has ALREADY overwritten the
+# SourceForge VER/ folder in place by the time the release step runs. An
+# UNGUARDED `gh release create "$VER"` then errors on the pre-existing tag and
+# reds the run, leaving a published ISO on SourceForge with no matching GitHub
+# release (a partial, inconsistent release). Require an idempotency mechanism
+# (view-or-edit, delete-then-create, or `--clobber`) so re-runs converge on a
+# single consistent release. Static grep on the host-side workflow file.
+_REL="$ROOT/.github/workflows/release.yml"
+if [[ ! -f "$_REL" ]]; then
+  _v_warn "release.yml not found — skipping CI-02 idempotency check"
+elif ! grep -q 'gh release create' "$_REL"; then
+  _v_warn "release.yml has no 'gh release create' — CI-02 guard not applicable"
+elif grep -Eq 'gh release (view|edit|delete)' "$_REL" || grep -q -- '--clobber' "$_REL"; then
+  _v_ok "release.yml guards 'gh release create' against same-day tag collisions (CI-02)"
+else
+  _v_fail "release.yml: 'gh release create' is unconditional — a same-day re-run collides on the date-derived tag, stranding the SourceForge upload (CI-02)"
+fi
+
 step "[$REPO_NAME] repo"
 [[ -f "$BUILD/pacman.conf" ]] && grep -q "^\[$REPO_NAME\]" "$BUILD/pacman.conf" \
   && _v_ok "pacman.conf has [$REPO_NAME]" || _v_fail "pacman.conf missing [$REPO_NAME]"

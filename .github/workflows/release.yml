@@ -136,4 +136,16 @@ jobs:
           Ships [end-4/dots-hyprland](https://github.com/end-4/dots-hyprland) @ \`$DOTS\`.
           Boot-tested headlessly in QEMU before publishing.
           EOF
-          gh release create "$VER" out/SHA256SUMS --title "Illogical Impulse ISO $VER" --notes-file notes.md
+          # Idempotent release (CI-02): $VER is the build DATE, so a same-day
+          # re-run / workflow_dispatch reuses it and the tag+release may already
+          # exist — and the SourceForge upload above ALWAYS runs first (rsync
+          # overwrites the same VER/ folder in place). A plain `gh release create`
+          # errors on an existing tag, reds the run, and strands a published ISO
+          # on SourceForge with no matching GitHub release. Converge on ONE
+          # release instead: edit it if present, create it if not.
+          if gh release view "$VER" >/dev/null 2>&1; then
+            gh release edit "$VER" --title "Illogical Impulse ISO $VER" --notes-file notes.md
+            gh release upload "$VER" out/SHA256SUMS --clobber
+          else
+            gh release create "$VER" out/SHA256SUMS --title "Illogical Impulse ISO $VER" --notes-file notes.md
+          fi
