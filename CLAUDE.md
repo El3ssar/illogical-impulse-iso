@@ -202,6 +202,15 @@ Don't "simplify" these away — each cost real debugging time:
   `set -e`, aborts the whole build. Every `*.pkg.tar.*` glob in `prebuild.sh`
   that feeds `repo-add` or the nvidia stash filters `.sig` (mirrors
   `chroot.sh`'s `_nv_pkgs`); `validate.sh` guards it (BUILD-01).
+- **`gh release create` with a date-derived tag is not idempotent** → the
+  release version is the build DATE, so a same-day cron re-run or a
+  `workflow_dispatch` reuses it. `publish-sf.sh` overwrites the SourceForge
+  `VER/` folder in place (fine), but an unguarded `gh release create "$VER"`
+  errors on the now-existing tag and reds the run — leaving a published ISO on
+  SourceForge with no matching GitHub release. `release.yml`'s release step is
+  view-or-edit (`gh release edit` + `gh release upload --clobber` when the
+  release exists, else create), so re-runs converge on ONE release;
+  `validate.sh` guards it (CI-02).
 - **Release dots-pin committed/pushed *before* build/publish** → a later
   build/smoke/SourceForge/GitHub-release failure strands a fresh pin on `main`
   with no release; `update.sh --check`'s age gate (`PIN_AGE_DAYS <
