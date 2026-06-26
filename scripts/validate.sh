@@ -174,12 +174,20 @@ if [[ -f "$SETTINGS" ]]; then
   ! grep -qE '^\s*sourcefs:\s*"?squashfs"?' "$uc" \
     && _v_ok "unpackfs.conf: sourcefs is not 'squashfs'" \
     || _v_fail "unpackfs.conf: sourcefs: squashfs is wrong (install will crash)"
-  # SEC-01: the tty2 passwordless-root rescue autologin is live-ISO-only. Its
-  # drop-in (dir or file) MUST be in unpackfs.conf's exclude list, else every
-  # installed system ships passwordless root on Ctrl+Alt+F2.
+  # SEC-01/SEC-02: the tty1 (releng baseline) and tty2 (our overlay) getty
+  # passwordless-root autologin drop-ins are live-ISO-only. Each drop-in (dir or
+  # file) MUST be in unpackfs.conf's exclude list AND removed by ii-post-install,
+  # else every installed system ships passwordless root on Ctrl+Alt+F1/F2 (tty1
+  # the moment greetd is disabled/removed).
+  grep -qE '^\s*-\s+etc/systemd/system/getty@tty1\.service\.d' "$uc" \
+    && _v_ok "unpackfs.conf: tty1 root autologin excluded from install (SEC-02)" \
+    || _v_fail "unpackfs.conf: tty1 passwordless-root autologin NOT excluded — leaks onto installed systems (SEC-02)"
   grep -qE '^\s*-\s+etc/systemd/system/getty@tty2\.service\.d' "$uc" \
     && _v_ok "unpackfs.conf: tty2 root autologin excluded from install (SEC-01)" \
     || _v_fail "unpackfs.conf: tty2 passwordless-root autologin NOT excluded — leaks onto installed systems (SEC-01)"
+  grep -q 'getty@tty1.service.d/autologin.conf' "$AIROOTFS/usr/local/bin/ii-post-install" \
+    && _v_ok "ii-post-install strips tty1 root autologin (defense-in-depth, SEC-02)" \
+    || _v_fail "ii-post-install missing tty1 autologin removal (SEC-02)"
   grep -q 'getty@tty2.service.d/autologin.conf' "$AIROOTFS/usr/local/bin/ii-post-install" \
     && _v_ok "ii-post-install strips tty2 root autologin (defense-in-depth, SEC-01)" \
     || _v_fail "ii-post-install missing tty2 autologin removal (SEC-01)"

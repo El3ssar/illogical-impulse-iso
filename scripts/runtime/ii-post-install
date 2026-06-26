@@ -47,6 +47,18 @@ try "drop live gnupg tmpfs mount" bash -c '
   rm -f /etc/systemd/system/multi-user.target.wants/etc-pacman.d-gnupg.mount
 '
 
+# ── remove live-only tty1 passwordless-root autologin (SEC-02) ──────────────
+# The archiso releng baseline ships a getty@tty1 drop-in with `--autologin root`
+# (no password). It is inert on the live ISO (greetd Conflicts=getty@tty1 and
+# owns vt1) but would autologin root on the default console the instant greetd
+# is disabled/removed on an installed system. unpackfs.conf already excludes the
+# drop-in dir from the target; this is defense-in-depth in case that exclude
+# ever regresses. Plain getty (password login) takes over tty1.
+try "drop live tty1 root autologin" bash -c '
+  rm -f /etc/systemd/system/getty@tty1.service.d/autologin.conf
+  rmdir /etc/systemd/system/getty@tty1.service.d 2>/dev/null || true
+'
+
 # ── remove live-only tty2 passwordless-root rescue autologin (SEC-01) ───────
 # The getty@tty2 drop-in gives `--autologin root` with no password — a live-ISO
 # rescue console ONLY. unpackfs.conf already excludes the drop-in dir from the
