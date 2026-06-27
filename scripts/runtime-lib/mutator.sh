@@ -87,16 +87,27 @@ _ii_in_group() {   # _ii_in_group <user> <group> — true if already a member
 # (groupadd -f first). Records ONLY the memberships WE add (skips and does not
 # record ones already present) so revert removes only ours. Mirrors the raw
 # usermod -aG pattern in ii-post-install, made reversible.
+#
+# Install-time vs iictl-time tagging: set II_GROUP_SRC=install in the environment
+# to mark the recorded rows as install-time distro setup — the restore_hint then
+# carries the reserved `src=install` token alongside `user=<u>`, so revert-all's
+# `_is_install_row` gates them under `--deep` (BLUEPRINT §"Two-tier"). The
+# default (unset) records `user=<u>` only → an iictl-time row a plain
+# `iictl revert-all` peels (the pack-post-add path). The two tokens are
+# space-separated and order-independent: revert-all extracts `user=` by token
+# scan, so a co-present `src=install` never corrupts the username.
 ii_group_add() {
   local user="${1:-}"; shift || true
   [[ -n "$user" ]] || { _ii_mut_err "ii_group_add: no user"; return 1; }
+  local hint="user=$user"
+  [[ "${II_GROUP_SRC:-}" == install ]] && hint="$hint src=install"
   local g rc=0
   for g in "$@"; do
     [[ -n "$g" ]] || continue
     groupadd -f "$g" 2>/dev/null || true
     _ii_in_group "$user" "$g" && continue   # already a member → not ours to revert
     if usermod -aG "$g" "$user" 2>/dev/null || gpasswd -a "$user" "$g" >/dev/null 2>&1; then
-      ledger_record group "$g" "" "" "user=$user"
+      ledger_record group "$g" "" "" "$hint"
     else
       _ii_mut_err "group add $g for $user failed"; rc=1
     fi

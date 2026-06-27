@@ -423,6 +423,32 @@ if [[ -f "$POST_F" ]]; then
   else
     _v_fail "welcome execs.lua fence not recorded as a 'lua-block' row in ii-post-install — iictl revert-all can't strip it (static skel fence is unrevertable)"
   fi
+  # REV-02: install-time group memberships must go through the idempotent,
+  # ledger-recording ii_group_add mutator (tagged src=install) — NOT a raw
+  # `usermod -aG` (unledgered → `revert-all --deep` can't peel them; wheel is
+  # load-bearing for the nopasswd sudo drop-in) and NOT a raw `ledger_record
+  # group` (bypasses the mutator's idempotency + only-record-what-we-add
+  # contract). Comments stripped so the code-only lines are what we judge. The
+  # raw `usermod -aG video,input,...` survives ONLY as the dev-checkout fallback
+  # (gated behind a `type ii_group_add` else-branch); the install path must use
+  # ii_group_add. We assert: (a) ii_group_add is invoked, (b) it's tagged
+  # II_GROUP_SRC=install, and (c) no `ledger_record group` raw row remains.
+  _post_nc=$(grep -vE '^[[:space:]]*#' "$POST_F")
+  if grep -q 'ii_group_add' <<<"$_post_nc"; then
+    _v_ok "ii-post-install adds groups via ii_group_add (idempotent, ledgered, revertible)"
+  else
+    _v_fail "ii-post-install does not use ii_group_add for group memberships — raw usermod -aG is unledgered (revert-all --deep can't peel it)"
+  fi
+  if grep -q 'II_GROUP_SRC=install' <<<"$_post_nc"; then
+    _v_ok "ii-post-install tags install-time group rows src=install (II_GROUP_SRC=install → revert-all --deep gates them)"
+  else
+    _v_fail "ii-post-install group adds are not tagged II_GROUP_SRC=install — revert-all --deep can't distinguish them from iictl-time rows"
+  fi
+  if grep -Eq 'ledger_record[[:space:]]+group\b' <<<"$_post_nc"; then
+    _v_fail "ii-post-install records a group via raw ledger_record — route it through ii_group_add (idempotent + only-records-what-it-adds) instead"
+  else
+    _v_ok "ii-post-install records no raw 'ledger_record group' rows (group adds go through ii_group_add)"
+  fi
 fi
 
 step "first-run welcome suppression (skel marker)"
@@ -609,6 +635,36 @@ else
   else
     _v_ok "pack engine makes no [ii-extra] assumption (installs from public mirrors + AUR)"
   fi
+  # (e) ATOMIC RECORDING (REV-03 / #67). The success path MUST record the
+  # kind=pack row BEFORE running the post-add hook — otherwise a post-add that
+  # exit/die's would leave the just-installed members with no ledger row
+  # (`pack remove` → "not installed", `revert-all` can't undo them). Assert the
+  # FIRST line that records a pack row (a ledger_record pack OR the factored
+  # _record_pack helper) precedes the FIRST _run_hook ... post-add invocation in
+  # cmd_install. Line-number ordering over the comment-stripped code.
+  _pk_rec_ln="$(grep -nE '(ledger_record[[:space:]]+pack|_record_pack)' "$PK" | grep -vE '^[0-9]+:[[:space:]]*#' | head -n1 | cut -d: -f1)"
+  _pk_hook_ln="$(grep -nE '_run_hook[^#]*post-add' "$PK" | grep -vE '^[0-9]+:[[:space:]]*#' | head -n1 | cut -d: -f1)"
+  if [[ -n "$_pk_rec_ln" && -n "$_pk_hook_ln" && "$_pk_rec_ln" -lt "$_pk_hook_ln" ]]; then
+    _v_ok "pack engine records the kind=pack row BEFORE the post-add hook (atomic on hook failure, REV-03)"
+  else
+    _v_fail "pack engine runs the post-add hook before recording the pack row — a die()-ing hook would orphan the install (REV-03/#67)"
+  fi
+  # (f) The AUR-phase failure path must record what landed instead of die()-ing
+  # with the misleading 'nothing recorded' line: after an official `pacman -S`
+  # commits, a later paru failure that aborts BEFORE recording orphans the
+  # official members. Forbid the old misleading message and require a record
+  # call on the failure side (the paru branch must reach a pack-record).
+  if grep -qE 'nothing recorded \(no half state\)' "$PK"; then
+    _v_fail "pack engine still emits 'nothing recorded (no half state)' on a partial-commit failure — official members can be orphaned (REV-03/#67)"
+  else
+    _v_ok "pack engine no longer claims 'no half state' on partial failure (records what landed, REV-03)"
+  fi
+  # (g) post-add hooks are subshell-fenced so a stray exit/die can't abort the
+  # engine before/after the row is recorded. Require the hook source to run in a
+  # ( … ) subshell.
+  grep -qE '\([[:space:]]*source[[:space:]]+"\$hook"[[:space:]]*\)' "$PK" \
+    && _v_ok "pack engine subshell-fences sourced hooks (a hook exit/die can't abort the engine, REV-03)" \
+    || _v_fail "pack engine sources hooks unfenced — a hook that exit/die's aborts the engine before recording (REV-03/#67)"
 fi
 # (e) no pack NAME is a string-prefix of another. `iictl pack remove X` delegates
 # `iictl revert-all pack:X`, whose filter matches a target EXACTLY OR AS A PREFIX
@@ -788,10 +844,54 @@ else
   if grep -E 'repo-add[^|]*\*\.pkg\.tar\.\*' "$_PREBUILD" | grep -qvE '^[[:space:]]*#'; then
     _v_fail "prebuild feeds a raw *.pkg.tar.* glob straight to repo-add"; _pb_sig_ok=0
   fi
-  # (d) the nvidia-stash staging glob excludes .sig (head -1 could otherwise pick one)
-  grep -F 'ls -t "$REPO_PATH/$p-"' "$_PREBUILD" | grep -q 'sig' \
-    || { _v_fail "prebuild nvidia-stash glob no longer excludes .sig"; _pb_sig_ok=0; }
+  # (d) the nvidia-stash + git-freshness artifact pick goes through
+  #     _newest_cached_exact, whose body skips .sig (and -debug) so head -1 can't
+  #     pick a detached signature (BUILD-01) or a dash-prefix sibling (PB-02).
+  grep -F -A9 '_newest_cached_exact() {' "$_PREBUILD" | grep -q '\*\.sig' \
+    || { _v_fail "prebuild _newest_cached_exact no longer excludes .sig → head -1 could stage a signature"; _pb_sig_ok=0; }
+  grep -F 'nvidia stash' "$_PREBUILD" >/dev/null && \
+  grep -A12 'stage AUR nvidia packages' "$_PREBUILD" | grep -q '_newest_cached_exact' \
+    || { _v_fail "prebuild nvidia-stash no longer uses _newest_cached_exact (.sig/sibling-safe artifact pick)"; _pb_sig_ok=0; }
   (( _pb_sig_ok )) && _v_ok "prebuild filters detached .sig from every repo-add/stash glob (BUILD-01)"
+fi
+
+step "prebuild exact-name matching + prune (BUILD-03)"
+# A `$REPO_PATH/$name-*` / `$REPO_PATH/$pkg-*` prefix glob matches dash-prefix
+# SIBLINGS: building `python` could delete or misread a cached `python-build`
+# (PB-02). The verify loop must match the repo DB by FIXED STRING, not by
+# interpolating $pkg raw into an ERE (+/. in a name then mis-match — PB-03). The
+# AUR RPC must be cached so a transient second lookup isn't fatal for a split
+# pkgbase (PB-04). The cache must be pruned of obsolete members after a
+# successful run, else [ii-extra] (ordered before core/extra) shadows officials
+# (PB-05). Static grep on the host-side source.
+if [[ ! -f "$_PREBUILD" ]]; then
+  : # already failed above
+else
+  _pb_name_ok=1
+  # (PB-02) no bare `$REPO_PATH/$<var>-`* prefix glob survives — every artifact
+  # lookup/removal goes through the exact-name helpers instead.
+  if grep -nE '\$REPO_PATH/\$[A-Za-z_][A-Za-z0-9_]*-["'\'']?\*' "$_PREBUILD" | grep -qvE '^\s*[0-9]+:\s*#'; then
+    _v_fail "prebuild still has a \$REPO_PATH/\$name-* prefix glob → dash-prefix sibling collision (PB-02)"; _pb_name_ok=0
+  fi
+  # exact-name helpers exist and are used for cache read / removal / newest-pick
+  for fn in _pkg_name_from_file _rm_cached_exact _newest_cached_exact; do
+    grep -qF "$fn() {" "$_PREBUILD" || { _v_fail "prebuild missing exact-name helper $fn (PB-02)"; _pb_name_ok=0; }
+  done
+  grep -qF '_rm_cached_exact "$name"' "$_PREBUILD" \
+    || { _v_fail "prebuild staging no longer removes by exact name (_rm_cached_exact) (PB-02)"; _pb_name_ok=0; }
+  # (PB-03) verify is a fixed-string DB-name set lookup, NOT a `$pkg`-as-ERE grep
+  if grep -qE 'grep -E "\^\$pkg-' "$_PREBUILD"; then
+    _v_fail "prebuild verify greps \$pkg raw into an ERE → +/. names mis-match (PB-03)"; _pb_name_ok=0
+  fi
+  grep -qF 'DB_NAMES[' "$_PREBUILD" \
+    || { _v_fail "prebuild verify no longer uses a fixed-string DB-name set (PB-03)"; _pb_name_ok=0; }
+  # (PB-04) the AUR RPC is memoised (one fetch shared by _aur_ver + _aur_base)
+  grep -qF '_aur_rpc() {' "$_PREBUILD" && grep -qF 'AUR_JSON[' "$_PREBUILD" \
+    || { _v_fail "prebuild no longer caches the AUR RPC JSON → transient 2nd RPC fatal for split pkgbase (PB-04)"; _pb_name_ok=0; }
+  # (PB-05) obsolete cache members are pruned after a successful run
+  grep -qiF 'prune obsolete' "$_PREBUILD" && grep -qF 'KEEP[' "$_PREBUILD" \
+    || { _v_fail "prebuild no longer prunes obsolete cache members → [ii-extra] can shadow officials (PB-05)"; _pb_name_ok=0; }
+  (( _pb_name_ok )) && _v_ok "prebuild matches by exact name + fixed-string DB + caches RPC + prunes (BUILD-03)"
 fi
 
 step "release.yml idempotent re-release (CI-02)"
@@ -930,6 +1030,48 @@ if (( ${#_nl_files[@]} == 0 )); then
   _v_warn "no list files found to newline-check (packages/*.list, profile lists, skel-distro.fetch)"
 elif (( _nl_bad == 0 )); then
   _v_ok "${#_nl_files[@]} list file(s) end with a trailing newline (BUILD-04)"
+fi
+
+step "ii-verify covers every installed kernel (INST-03)"
+# Bug-class guard (issue #71): ii-verify used to hardcode the `linux`
+# vmlinuz/initramfs(.img/-fallback.img) triple and only repair linux.preset.
+# But goodies.list ships linux-lts and ii-prepare-bootloader builds a
+# default+fallback initramfs for EVERY pkgbase in /usr/lib/modules/*/ (writing
+# each path into .ii-boot-state.json's expected_paths). With the hardcoded
+# triple a broken linux-lts initramfs passed verification and the LTS rescue
+# entry booted to a broken image — the exact failure the "always build fallback"
+# design exists to catch. So ii-verify MUST (a) derive the kernel set
+# dynamically (from .ii-boot-state.json's expected_paths and/or
+# /usr/lib/modules/*/pkgbase, mirroring ii-prepare-bootloader) and (b) NOT carry
+# a hardcoded single-`linux` artefact triple. Comments stripped first so this
+# header's prose can neither satisfy nor trip the code greps.
+IVERIFY="$AIROOTFS/usr/local/bin/ii-verify"
+if [[ ! -f "$IVERIFY" ]]; then
+  _v_fail "ii-verify missing from airootfs — INST-03 guard can't run"
+else
+  _iv_code="$(grep -vE '^[[:space:]]*#' "$IVERIFY")"
+  # (a) it reads .ii-boot-state.json's expected_paths (not merely its existence).
+  if grep -q '.ii-boot-state.json' <<<"$_iv_code" \
+     && grep -qE 'vmlinuz-' <<<"$_iv_code" \
+     && grep -q 'expected_paths' "$IVERIFY"; then
+    _v_ok "ii-verify reads .ii-boot-state.json's expected_paths to derive the kernel set (INST-03)"
+  else
+    _v_fail "ii-verify does not read .ii-boot-state.json's expected_paths — it can't validate every kernel's artefacts (INST-03)"
+  fi
+  # (b) it enumerates kernels dynamically via /usr/lib/modules/*/pkgbase (the
+  #     same source ii-prepare-bootloader uses), as the fallback/cross-check.
+  grep -q '/usr/lib/modules/\*/' <<<"$_iv_code" && grep -q 'pkgbase' <<<"$_iv_code" \
+    && _v_ok "ii-verify enumerates kernels via /usr/lib/modules/*/pkgbase (mirrors ii-prepare-bootloader) (INST-03)" \
+    || _v_fail "ii-verify does not enumerate /usr/lib/modules/*/pkgbase — a non-default kernel set goes unverified (INST-03)"
+  # (c) the hardcoded single-`linux` artefact triple must be gone. The old code
+  #     literally checked vmlinuz-linux / initramfs-linux.img /
+  #     initramfs-linux-fallback.img; any of those LITERAL tokens means the
+  #     regression is back. Per-kernel code uses vmlinuz-$kb / -$pkgbase instead.
+  if grep -qE '(vmlinuz-linux\b|initramfs-linux\.img|initramfs-linux-fallback\.img)' <<<"$_iv_code"; then
+    _v_fail "ii-verify still references the hardcoded 'linux' artefact triple (vmlinuz-linux/initramfs-linux*.img) — linux-lts artefacts go unchecked (INST-03)"
+  else
+    _v_ok "ii-verify has no hardcoded single-'linux' artefact triple (per-kernel checks instead) (INST-03)"
+  fi
 fi
 
 step "runtime + chroot scripts syntax"
