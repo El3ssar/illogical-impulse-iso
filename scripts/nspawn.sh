@@ -114,6 +114,19 @@ _stage "etc/$DISTRO_ID"
 _stage etc/skel
 [[ -f "$BUILD/airootfs/etc/os-release" ]] \
   && install -Dm0644 "$BUILD/airootfs/etc/os-release" "$BASE/etc/os-release"
+
+# A working pacman config + mirrorlist so the box can install on demand — this is
+# what `iictl pack` needs (its whole point). `pacstrap base` does not reliably
+# leave a usable /etc/pacman.conf in the target (it is a backup-array file the
+# host pacman uses for the install, not necessarily written into the root), so a
+# bare box hits "config file /etc/pacman.conf could not be read" on the first
+# `pacman -S{y,i}` — which makes the pack engine misclassify official members as
+# AUR. Seed the host's known-good config + mirrors (only if absent, so a base
+# that already has them is left alone).
+for _pf in /etc/pacman.conf /etc/pacman.d/mirrorlist; do
+  [[ -f "$BASE$_pf" ]] && continue
+  [[ -f "$_pf" ]] && install -Dm0644 "$_pf" "$BASE$_pf"
+done
 ok "runtime layer staged"
 
 # ── 3. boot ephemerally — every write below the base is discarded on exit ────
