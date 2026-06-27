@@ -52,7 +52,11 @@ _append_manifest() {
   [[ -f "$file" ]] || { info "$label: no manifest"; return 0; }
   local -a official=() aur=()
   local pkg
-  while IFS= read -r pkg; do
+  # `|| [[ -n "$pkg" ]]` keeps a final line with no trailing newline (read
+  # returns non-zero at EOF but still populates $pkg) — a maintainer/profile
+  # manifest must never silently drop its last package. validate.sh guards the
+  # trailing newline too (belt-and-suspenders).
+  while IFS= read -r pkg || [[ -n "$pkg" ]]; do
     pkg="${pkg%%#*}"; pkg="${pkg//[[:space:]]/}"
     [[ -n "$pkg" ]] || continue
     if pacman -Si "$pkg" &>/dev/null; then official+=("$pkg"); else aur+=("$pkg"); fi
@@ -87,7 +91,10 @@ NV_OFF="$BUILD/airootfs/root/nvidia-official.txt"
 NV_AUR="$BUILD/airootfs/root/nvidia-aur.txt"
 : > "$NV_OFF"; : > "$NV_AUR"
 if [[ -f "$PACKAGES/nvidia.list" ]]; then
-  while IFS= read -r _nv_line; do
+  # `|| [[ -n "$_nv_line" ]]` keeps a final no-trailing-newline line — an edited
+  # nvidia.list must never silently drop its last driver entry (validate.sh also
+  # guards the trailing newline).
+  while IFS= read -r _nv_line || [[ -n "$_nv_line" ]]; do
     _nv_line="${_nv_line%%#*}"
     for p in $_nv_line; do
       if pacman -Si "$p" &>/dev/null; then echo "$p" >> "$NV_OFF"; else echo "$p" >> "$NV_AUR"; fi
@@ -104,7 +111,9 @@ step "cosmetic AUR list for chroot (fail-soft paru pass)"
 : > "$BUILD/airootfs/root/aur-packages.txt"
 declare -A is_local=()
 if [[ -f "$RESOLVE/local-names.list" ]]; then
-  while IFS= read -r ln; do [[ -n "$ln" ]] && is_local["$ln"]=1; done < "$RESOLVE/local-names.list"
+  # `|| [[ -n "$ln" ]]` keeps a final line lacking a trailing newline so a local
+  # PKGBUILD name on the last line still classifies (skips the cosmetic AUR pass).
+  while IFS= read -r ln || [[ -n "$ln" ]]; do [[ -n "$ln" ]] && is_local["$ln"]=1; done < "$RESOLVE/local-names.list"
 fi
 for p in "${up_aur[@]}"; do
   [[ -z "${is_local[$p]:-}" ]] && echo "$p" >> "$BUILD/airootfs/root/aur-packages.txt"
