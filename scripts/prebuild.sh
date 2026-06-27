@@ -7,11 +7,20 @@
 #   local PKGBUILD  → source it, compare pkgver-pkgrel to cached filename
 #   plain AUR       → query AUR RPC, compare Version to cached filename
 #   match           → skip
-#   mismatch/none   → makepkg into staging, wipe stale, swap in (atomic)
+#   mismatch/none   → makepkg into staging, replace the cached artifact, index
 #   RPC failure     → trust cache (don't rebuild on transient network errors)
 #
-# The cache wipe happens AFTER a successful makepkg, so a build failure
-# leaves the previous version intact for the next mkarchiso run.
+# The cache replace (rm-then-mv of the EXACT-named artifact) happens AFTER a
+# successful makepkg, so a build failure leaves the previous version intact for
+# the next mkarchiso run. It is a delete-then-rename, not a single atomic op —
+# but it only ever runs post-success, so the window it opens is a momentary
+# absence of one package between two indexings, never an empty/corrupt cache.
+#
+# Name matching everywhere is EXACT on the pkgname parsed from the artifact
+# filename — never a `$name-*` prefix glob, which would let `python` clobber or
+# misread a sibling like `python-build` (PB-02). Stale cache members no longer
+# in the required set are pruned only AFTER a fully successful run (PB-05),
+# preserving BUILD-01's "wipe only after success" invariant.
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
 
@@ -27,7 +36,7 @@ _is_git() { [[ "$1" == *-git ]]; }
 GIT_FRESH_HOURS="${GIT_FRESH_HOURS:-6}"
 _fresh_git_cache() {
   local pkg="$1" f
-  f=$(ls -t "$REPO_PATH/$pkg-"*.pkg.tar.* 2>/dev/null | grep -v -- '-debug-' | grep -v -- '\.sig$' | head -1) || true
+  f=$(_newest_cached_exact "$pkg") || true   # exact name — no `$pkg-*` sibling (PB-02)
   [[ -n "$f" ]] || return 1
   (( $(date +%s) - $(stat -c %Y "$f") < GIT_FRESH_HOURS * 3600 ))
 }
@@ -51,9 +60,31 @@ _pkgbuild_ver() {
   )
 }
 
+# Single AUR RPC per package name, memoised. _aur_ver (the cache-decision
+# lookup) and _aur_base (the clone-target lookup) read the SAME cached JSON,
+# so a transient SECOND RPC can't be fatal for a pkgbase≠pkgname split package,
+# and there's no TOCTOU between "version says rebuild" and "where do I clone"
+# (PB-04). A confirmed failure is memoised as "" so a down server isn't re-hit.
+declare -A AUR_JSON=()
+declare -A AUR_TRIED=()
+_aur_rpc() {
+  local arg="$1" j
+  if [[ -n "${AUR_TRIED[$arg]:-}" ]]; then
+    [[ -n "${AUR_JSON[$arg]:-}" ]] || return 1
+    printf '%s' "${AUR_JSON[$arg]}"; return 0
+  fi
+  AUR_TRIED["$arg"]=1
+  if j=$(curl -fsS --max-time 5 "https://aur.archlinux.org/rpc/?v=5&type=info&arg=$arg"); then
+    AUR_JSON["$arg"]="$j"
+    printf '%s' "$j"; return 0
+  fi
+  AUR_JSON["$arg"]=""
+  return 1
+}
+
 _aur_ver() {
   local j
-  j=$(curl -fsS --max-time 5 "https://aur.archlinux.org/rpc/?v=5&type=info&arg=$1") || return 1
+  j=$(_aur_rpc "$1") || return 1
   python3 -c '
 import json, sys
 r = json.loads(sys.argv[1]).get("results") or []
@@ -66,7 +97,7 @@ print(v)
 
 _aur_base() {
   local j
-  j=$(curl -fsS --max-time 5 "https://aur.archlinux.org/rpc/?v=5&type=info&arg=$1") || return 1
+  j=$(_aur_rpc "$1") || return 1
   python3 -c '
 import json, sys
 r = json.loads(sys.argv[1]).get("results") or []
@@ -75,12 +106,57 @@ print(r[0]["PackageBase"])
 ' "$j" 2>/dev/null
 }
 
+# pkgname parsed from an artifact basename by stripping -pkgver-pkgrel-arch and
+# the .pkg.tar.* suffix — the canonical split used everywhere we need a name.
+_pkg_name_from_file() {
+  local b="${1##*/}"
+  printf '%s' "${b%-*-*-*}"
+}
+
+# Remove every cached artifact (and its .sig) whose parsed pkgname EXACTLY
+# equals $1 (or its matching $1-debug split) — never a `$name-*` prefix glob,
+# which would also delete dash-prefix siblings (staging `python` would erase a
+# cached `python-build`). The replacing build only ever stages the non-debug
+# artifact, so the stale debug member must be cleared by name too. (PB-02)
+_rm_cached_exact() {
+  local name="$1" f fn
+  shopt -s nullglob
+  for f in "$REPO_PATH"/*.pkg.tar.*; do
+    [[ "$f" == *.sig ]] && continue
+    fn="$(_pkg_name_from_file "$f")"
+    [[ "$fn" == "$name" || "$fn" == "$name-debug" ]] || continue
+    sudo rm -f "$f" "$f.sig"
+  done
+  shopt -u nullglob
+}
+
+# Path of the newest non-debug, non-sig cached artifact whose parsed pkgname
+# EXACTLY equals $1, "" if none. Replaces `ls -t "$REPO_PATH/$x-"*` head-1 picks
+# that a dash-prefix sibling could win (PB-02). mtime ordering via `ls -t`.
+_newest_cached_exact() {
+  local name="$1" f
+  local -a hits=()
+  shopt -s nullglob
+  for f in "$REPO_PATH"/*.pkg.tar.*; do
+    [[ "$f" == *-debug-* || "$f" == *.sig ]] && continue
+    [[ "$(_pkg_name_from_file "$f")" == "$name" ]] && hits+=("$f")
+  done
+  shopt -u nullglob
+  (( ${#hits[@]} )) || return 1
+  ls -t "${hits[@]}" 2>/dev/null | head -1
+}
+
+# Version of the EXACTLY-named cached artifact, "" if absent. Iterate the whole
+# repo and compare the parsed pkgname for equality — NOT a `$pkg-*` prefix glob,
+# which matched dash-prefix siblings (looking up `python` returned the version
+# of a cached `python-build`). (PB-02)
 _cached_ver() {
   local pkg="$1" f b rest
   shopt -s nullglob
-  for f in "$REPO_PATH/$pkg-"*.pkg.tar.*; do
+  for f in "$REPO_PATH"/*.pkg.tar.*; do
     [[ "$f" == *-debug-* ]] && continue
     [[ "$f" == *.sig ]] && continue   # read the version from packages, not signatures (BUILD-01)
+    [[ "$(_pkg_name_from_file "$f")" == "$pkg" ]] || continue
     b="${f##*/}"; rest="${b#"$pkg"-}"; rest="${rest%-*.pkg.tar.*}"
     shopt -u nullglob
     echo "$rest"; return 0
@@ -98,8 +174,12 @@ _current_ver() {
   fi
 }
 
-# Build a PKGBUILD dir into staging; on success, atomically swap into the cache.
-# Args: src_dir, label, pkgname
+# Build a PKGBUILD dir into staging; on success, replace the same-named cached
+# artifact(s) in the [ii-extra] repo and index them. (Replace = delete-then-mv,
+# only ever post-success — see the header note on why that's safe, not atomic.)
+# Every staged pkgname is recorded in STAGED_NAMES so the end-of-run prune keeps
+# split siblings this run produced (PB-05). Args: src_dir, label, pkgname
+declare -A STAGED_NAMES=()
 _build() {
   local src="$1" label="$2" pkg="$3"
   local dest="$WORK/$pkg-$RANDOM"
@@ -128,10 +208,11 @@ _build() {
     # ("not a package file") — under set -e that aborts the whole build. Mirror
     # chroot.sh's _nv_pkgs filter and never stage/index a .sig. (BUILD-01)
     [[ "$base" == *.sig ]] && continue
-    name="${base%-*-*-*}"   # strip pkgver-pkgrel-arch.pkg.tar.*
-    sudo rm -f "$REPO_PATH/$name-"*.pkg.tar.*
+    name="$(_pkg_name_from_file "$base")"   # strip pkgver-pkgrel-arch.pkg.tar.*
+    _rm_cached_exact "$name"   # exact name only — no `$name-*` sibling clobber (PB-02)
     sudo mv "$b" "$REPO_PATH/"
     staged_paths+=("$REPO_PATH/$base")
+    STAGED_NAMES["$name"]=1   # remembered so the end-of-run prune keeps it (PB-05)
     info "staged $base"
     staged=$((staged + 1))
     [[ "$name" == "$pkg" ]] && have_pkg=1
@@ -247,6 +328,34 @@ for d in "${LOCAL_PKG_DIRS[@]}"; do
   _build "$d" "$pkg (upstream)" "$pkg"
 done
 
+# ── prune obsolete cache members (PB-05) ───────────────────────────────────
+# The cache used to only grow: a member no longer required lingered forever, and
+# because [ii-extra] is ordered BEFORE core/extra a stale equal-or-higher
+# version could SHADOW an official package at pacstrap. Now that every build
+# above succeeded (set -e would have aborted otherwise — keeping BUILD-01's
+# "wipe only after a successful run" invariant), drop any artifact whose pkgname
+# is NOT in the keep set: the required AUR names, the local PKGBUILD names, and
+# every split sibling THIS run staged (STAGED_NAMES) — plus each one's -debug
+# split. This never deletes a package some required entry still needs.
+step "prune obsolete [$REPO_NAME] members"
+declare -A KEEP=()
+for pkg in "${REQUIRED[@]}";          do KEEP["$pkg"]=1; done
+for d   in "${LOCAL_PKG_DIRS[@]}";    do KEEP["$(basename "$d")"]=1; done
+for pkg in "${!STAGED_NAMES[@]}";     do KEEP["$pkg"]=1; done
+pruned=0
+shopt -s nullglob
+for f in "$REPO_PATH"/*.pkg.tar.*; do
+  [[ "$f" == *.sig ]] && continue
+  n="$(_pkg_name_from_file "$f")"
+  base="${n%-debug}"   # a foo-debug member is kept iff foo is kept
+  [[ -n "${KEEP[$base]:-}" ]] && continue
+  sudo rm -f "$f" "$f.sig"
+  info "pruned ${f##*/}"
+  pruned=$((pruned + 1))
+done
+shopt -u nullglob
+ok "$pruned obsolete artifact(s) pruned"
+
 step "re-index [$REPO_NAME]"
 cd "$REPO_PATH"
 # Drop detached .sig from the index input — repo-add treats them as packages and
@@ -261,15 +370,31 @@ sudo repo-add "$REPO_DB" "${all[@]}" >/dev/null
 ok "${#all[@]} packages indexed"
 
 step "verify required packages present + indexed"
+# DB entries are "<pkgname>-<pkgver>-<pkgrel>/desc"; collect each non-debug
+# entry's EXACT pkgname once so the per-package check is a fixed-string set
+# lookup, not a `$pkg`-as-ERE grep (names with +/. mis-matched). (PB-03)
+declare -A DB_NAMES=()
+while IFS= read -r e; do
+  e="${e%/desc}"                     # strip the /desc suffix
+  [[ "$e" == */* ]] && continue      # only top-level <name-ver-rel> entries
+  n="${e%-*-*}"                       # strip -pkgver-pkgrel
+  [[ "$n" == *-debug ]] && continue  # debug split doesn't satisfy a requirement
+  DB_NAMES["$n"]=1
+done < <(tar -tf "$REPO_DB" 2>/dev/null | grep -- '/desc$')
+
 missing=()
 for pkg in "${REQUIRED[@]}"; do
-  shopt -s nullglob; hits=( "$REPO_PATH/$pkg-"*.pkg.tar.* ); shopt -u nullglob
   has_file=false
-  # A lone .sig must not satisfy "package present" (BUILD-01).
-  for f in "${hits[@]}"; do [[ "$f" != *-debug-* && "$f" != *.sig ]] && has_file=true; done
+  shopt -s nullglob
+  for f in "$REPO_PATH"/*.pkg.tar.*; do
+    # A lone .sig must not satisfy "package present" (BUILD-01); match the
+    # EXACT parsed name, not a `$pkg-*` prefix that catches siblings. (PB-02)
+    [[ "$f" == *.sig || "$f" == *-debug-* ]] && continue
+    [[ "$(_pkg_name_from_file "$f")" == "$pkg" ]] && { has_file=true; break; }
+  done
+  shopt -u nullglob
   $has_file || missing+=("$pkg (no .pkg.tar.*)")
-  tar -tf "$REPO_DB" 2>/dev/null | grep -E "^$pkg-[^/]+/desc$" | grep -v -- '-debug-' | grep -q . \
-    || missing+=("$pkg (not in DB)")
+  [[ -n "${DB_NAMES[$pkg]:-}" ]] || missing+=("$pkg (not in DB)")
 done
 (( ${#missing[@]} == 0 )) || die "missing: ${missing[*]}"
 ok "all ${#REQUIRED[@]} required packages ready"
@@ -284,10 +409,11 @@ if [[ -s "$NV_AUR_LIST" ]]; then
   install -d "$BUILD/airootfs/usr/share/illogical-impulse/nvidia"
   while IFS= read -r p; do
     [[ -z "$p" ]] && continue
-    # Exclude detached .sig: head -1 over the mtime-sorted glob could otherwise
-    # pick $p-….sig (written just after the package) and stage a non-package
-    # into the nvidia stash, which chroot.sh's repo-add would reject. (BUILD-01)
-    f=$(ls -t "$REPO_PATH/$p-"*.pkg.tar.* 2>/dev/null | grep -v -- '-debug-' | grep -v -- '\.sig$' | head -1 || true)
+    # Newest EXACTLY-named artifact: a `$p-*` prefix glob could pick a dash-prefix
+    # sibling (PB-02), and _newest_cached_exact already drops .sig/-debug so a
+    # detached signature can't be staged (chroot.sh's repo-add would reject it,
+    # BUILD-01).
+    f=$(_newest_cached_exact "$p") || true
     [[ -n "$f" ]] || die "nvidia AUR package missing from $REPO_PATH: $p"
     cp -f "$f" "$BUILD/airootfs/usr/share/illogical-impulse/nvidia/"
   done < "$NV_AUR_LIST"

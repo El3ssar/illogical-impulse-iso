@@ -814,10 +814,54 @@ else
   if grep -E 'repo-add[^|]*\*\.pkg\.tar\.\*' "$_PREBUILD" | grep -qvE '^[[:space:]]*#'; then
     _v_fail "prebuild feeds a raw *.pkg.tar.* glob straight to repo-add"; _pb_sig_ok=0
   fi
-  # (d) the nvidia-stash staging glob excludes .sig (head -1 could otherwise pick one)
-  grep -F 'ls -t "$REPO_PATH/$p-"' "$_PREBUILD" | grep -q 'sig' \
-    || { _v_fail "prebuild nvidia-stash glob no longer excludes .sig"; _pb_sig_ok=0; }
+  # (d) the nvidia-stash + git-freshness artifact pick goes through
+  #     _newest_cached_exact, whose body skips .sig (and -debug) so head -1 can't
+  #     pick a detached signature (BUILD-01) or a dash-prefix sibling (PB-02).
+  grep -F -A9 '_newest_cached_exact() {' "$_PREBUILD" | grep -q '\*\.sig' \
+    || { _v_fail "prebuild _newest_cached_exact no longer excludes .sig → head -1 could stage a signature"; _pb_sig_ok=0; }
+  grep -F 'nvidia stash' "$_PREBUILD" >/dev/null && \
+  grep -A12 'stage AUR nvidia packages' "$_PREBUILD" | grep -q '_newest_cached_exact' \
+    || { _v_fail "prebuild nvidia-stash no longer uses _newest_cached_exact (.sig/sibling-safe artifact pick)"; _pb_sig_ok=0; }
   (( _pb_sig_ok )) && _v_ok "prebuild filters detached .sig from every repo-add/stash glob (BUILD-01)"
+fi
+
+step "prebuild exact-name matching + prune (BUILD-03)"
+# A `$REPO_PATH/$name-*` / `$REPO_PATH/$pkg-*` prefix glob matches dash-prefix
+# SIBLINGS: building `python` could delete or misread a cached `python-build`
+# (PB-02). The verify loop must match the repo DB by FIXED STRING, not by
+# interpolating $pkg raw into an ERE (+/. in a name then mis-match — PB-03). The
+# AUR RPC must be cached so a transient second lookup isn't fatal for a split
+# pkgbase (PB-04). The cache must be pruned of obsolete members after a
+# successful run, else [ii-extra] (ordered before core/extra) shadows officials
+# (PB-05). Static grep on the host-side source.
+if [[ ! -f "$_PREBUILD" ]]; then
+  : # already failed above
+else
+  _pb_name_ok=1
+  # (PB-02) no bare `$REPO_PATH/$<var>-`* prefix glob survives — every artifact
+  # lookup/removal goes through the exact-name helpers instead.
+  if grep -nE '\$REPO_PATH/\$[A-Za-z_][A-Za-z0-9_]*-["'\'']?\*' "$_PREBUILD" | grep -qvE '^\s*[0-9]+:\s*#'; then
+    _v_fail "prebuild still has a \$REPO_PATH/\$name-* prefix glob → dash-prefix sibling collision (PB-02)"; _pb_name_ok=0
+  fi
+  # exact-name helpers exist and are used for cache read / removal / newest-pick
+  for fn in _pkg_name_from_file _rm_cached_exact _newest_cached_exact; do
+    grep -qF "$fn() {" "$_PREBUILD" || { _v_fail "prebuild missing exact-name helper $fn (PB-02)"; _pb_name_ok=0; }
+  done
+  grep -qF '_rm_cached_exact "$name"' "$_PREBUILD" \
+    || { _v_fail "prebuild staging no longer removes by exact name (_rm_cached_exact) (PB-02)"; _pb_name_ok=0; }
+  # (PB-03) verify is a fixed-string DB-name set lookup, NOT a `$pkg`-as-ERE grep
+  if grep -qE 'grep -E "\^\$pkg-' "$_PREBUILD"; then
+    _v_fail "prebuild verify greps \$pkg raw into an ERE → +/. names mis-match (PB-03)"; _pb_name_ok=0
+  fi
+  grep -qF 'DB_NAMES[' "$_PREBUILD" \
+    || { _v_fail "prebuild verify no longer uses a fixed-string DB-name set (PB-03)"; _pb_name_ok=0; }
+  # (PB-04) the AUR RPC is memoised (one fetch shared by _aur_ver + _aur_base)
+  grep -qF '_aur_rpc() {' "$_PREBUILD" && grep -qF 'AUR_JSON[' "$_PREBUILD" \
+    || { _v_fail "prebuild no longer caches the AUR RPC JSON → transient 2nd RPC fatal for split pkgbase (PB-04)"; _pb_name_ok=0; }
+  # (PB-05) obsolete cache members are pruned after a successful run
+  grep -qiF 'prune obsolete' "$_PREBUILD" && grep -qF 'KEEP[' "$_PREBUILD" \
+    || { _v_fail "prebuild no longer prunes obsolete cache members → [ii-extra] can shadow officials (PB-05)"; _pb_name_ok=0; }
+  (( _pb_name_ok )) && _v_ok "prebuild matches by exact name + fixed-string DB + caches RPC + prunes (BUILD-03)"
 fi
 
 step "release.yml idempotent re-release (CI-02)"
