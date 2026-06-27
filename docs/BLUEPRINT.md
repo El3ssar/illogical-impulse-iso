@@ -115,7 +115,14 @@ of the whole distro rests on respecting their classes. Full table in
   exec-hook (`hl.on` / `hl.exec_cmd`) appears outside a fence — an unfenced block
   would survive a revert, so it is a build-failing bug. The baked welcome-card
   block in `overlay/skel-distro/.config/hypr/custom/execs.lua` is the canonical
-  example.
+  example — with one wrinkle: it ships **statically** through `skel-distro` →
+  `/etc/skel` → `useradd -m`, so it never passes through `ii_lua_block_write` and
+  no `lua-block` ledger row is created at write time. `ii-post-install` therefore
+  records that row itself for the installed user (target+owned = their
+  `custom/execs.lua`, `restore_hint` = the block name `welcome`); that recording
+  is what lets `iictl revert-all` strip the fence and restore upstream's empty
+  stub (REV-01). `validate.sh`'s welcome step asserts the row is recorded, so a
+  static fence can never ship unrevertable.
 - **unowned** — `~/.bashrc`, `~/.config/nvim`, `~/.config/{git,btop,bat,…}`,
   `~/Projects` (upstream ships nothing → no collision). Themed tool configs,
   dev defaults, scaffolds.

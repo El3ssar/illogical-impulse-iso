@@ -288,6 +288,25 @@ step "distro perks (iictl + welcome card)"
 grep -q 'iictl welcome --auto' "$AIROOTFS/etc/skel/.config/hypr/custom/execs.lua" 2>/dev/null \
   && _v_ok "installed-user skel launches the welcome card" \
   || _v_fail "skel custom/execs.lua missing the welcome launcher"
+# REV-01: the skel execs.lua ships the welcome hook as a STATIC file that fully
+# replaces upstream's empty stub. For `iictl revert-all` to restore vanilla
+# byte-for-byte, EVERY distro-authored line must live inside the sentinel fence —
+# stripping all `illogical-impulse` fences must leave exactly upstream's stub
+# (any leftover comment/code outside the fence would survive revert). Proven
+# statically here against the live submodule stub so a stray out-of-fence line
+# fails the build, not the install. (Paired with the ledger-record check below
+# in the "iictl update flags + embedded welcome" step.)
+_skel_execs="$AIROOTFS/etc/skel/.config/hypr/custom/execs.lua"
+_up_execs="$DOTS/dots/.config/hypr/custom/execs.lua"
+if [[ -f "$_skel_execs" && -f "$_up_execs" ]]; then
+  if cmp -s <(awk '/^-- >>> illogical-impulse /{f=1;next} /^-- <<< illogical-impulse /{f=0;next} !f' "$_skel_execs") "$_up_execs"; then
+    _v_ok "stripping the welcome fence from skel execs.lua yields upstream's stub byte-for-byte (revert-all restores vanilla)"
+  else
+    _v_fail "skel execs.lua has distro content OUTSIDE the welcome fence — revert-all would not restore upstream's stub; move it inside the -- >>> illogical-impulse welcome fence"
+  fi
+elif [[ ! -f "$_up_execs" ]]; then
+  _v_warn "upstream execs.lua stub not found ($_up_execs) — fence byte-identity check skipped (run git submodule update)"
+fi
 # Strip comment lines first: ii-verify legitimately *documents* the iictl
 # survive-path (iictl.d/ + ledger), so only a reference in real code (e.g.
 # iictl added to the purge loop, or an rm of /usr/local/bin/iictl) is a bug.
@@ -390,6 +409,19 @@ if [[ -f "$POST_F" ]]; then
     _v_fail "first_run.txt marker recorded with a non-'file' kind — revert-all can't replay it (use kind 'file')"
   else
     _v_warn "first_run.txt marker not recorded in the ledger — revert-all couldn't undo it"
+  fi
+  # REV-01: the distro welcome exec-hook is a sentinel-fenced `welcome` block in
+  # the upstream custom/execs.lua slot, shipped STATICALLY via skel-distro →
+  # /etc/skel. Arriving as a static skel file it never passes through
+  # ii_lua_block_write, so ii-post-install must record the matching 'lua-block'
+  # ledger row itself — otherwise `iictl revert-all` can't strip the fence and
+  # custom/execs.lua never returns to upstream's empty stub (the distro hook
+  # survives a "vanilla" revert). The row must reference the execs.lua path with
+  # the 'welcome' block name as restore_hint (what ii_lua_block_remove consumes).
+  if grep -Eq 'ledger_record[[:space:]]+lua-block[^#]*custom/execs\.lua[^#]*welcome' "$POST_F"; then
+    _v_ok "welcome execs.lua fence ledger-recorded as kind 'lua-block' (revert-all strips it → upstream stub returns)"
+  else
+    _v_fail "welcome execs.lua fence not recorded as a 'lua-block' row in ii-post-install — iictl revert-all can't strip it (static skel fence is unrevertable)"
   fi
 fi
 
