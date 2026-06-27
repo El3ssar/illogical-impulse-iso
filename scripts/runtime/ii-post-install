@@ -294,6 +294,30 @@ if [[ -n "$NEW_USER" ]]; then
         HOME="$H" XDG_STATE_HOME="$H/.local/state" \
         bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record file first-run-welcome "" "$HOME/.local/state/quickshell/user/first_run.txt" "rm to restore upstream first-run welcome"'
     fi
+    # ── ledger: welcome exec-hook fence (REV-01) ──────────────────────────
+    # The distro welcome hook is a sentinel-fenced block named `welcome` in the
+    # upstream-sanctioned custom/execs.lua slot, shipped STATICALLY via
+    # overlay/skel-distro → /etc/skel → useradd -m. Arriving as a static skel
+    # file, it never passes through mutator.sh's ii_lua_block_write, so no
+    # `lua-block` ledger row is created and `iictl revert-all` cannot strip it —
+    # the distro exec hook would survive a full revert (BLUEPRINT cites this exact
+    # block as THE canonical revert-strippable fence, so that doc was false until
+    # now). Record the row here, AS the new user so it lands in their state dir,
+    # exactly as ii_lua_block_write would (kind=lua-block, target+owned=the file,
+    # restore_hint=the block name `welcome`); revert-all's existing lua-block
+    # inverse (ii_lua_block_remove) then strips precisely our fence, leaving
+    # upstream's empty execs.lua stub and any user lines intact. Default scope —
+    # the matched pair of the first_run.txt override above: a plain `iictl
+    # revert-all` restores the vanilla upstream welcome (marker removed + our exec
+    # hook stripped). Idempotent + reversible. The `welcome` token must equal the
+    # block name in overlay/skel-distro/.config/hypr/custom/execs.lua.
+    EXECS="$H/.config/hypr/custom/execs.lua"
+    if [[ -r "$EXECS" && -r /usr/local/lib/ii/ledger.sh ]] \
+       && grep -qxF -- '-- >>> illogical-impulse welcome' "$EXECS"; then
+      try "ledger: welcome exec-hook fence" sudo -u "$NEW_USER" env \
+        HOME="$H" XDG_STATE_HOME="$H/.local/state" \
+        bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record lua-block "$HOME/.config/hypr/custom/execs.lua" "" "$HOME/.config/hypr/custom/execs.lua" welcome'
+    fi
   fi
 fi
 
