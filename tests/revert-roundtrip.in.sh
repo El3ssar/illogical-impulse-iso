@@ -189,24 +189,39 @@ PACK_TESTED=skipped
 # a SigLevel under a [repo] would only cover that repo), dropping any existing
 # [options] SigLevel so Never is authoritative.
 if [[ -f /etc/pacman.conf ]]; then
-  # Also drop ParallelDownloads: the db sync (serial) downloaded fine, but
-  # parallel PACKAGE downloads open several concurrent connections that can
-  # deadlock in the nested nspawn-in-Docker network namespace and stall the
-  # transaction at "Retrieving packages". Removing it makes pacman download
-  # serially like the db sync.
+  # Three [options] rewrites, all scoped to the disposable box:
+  #  • SigLevel = Never        — the box's gpg-agent is broken (see above).
+  #  • drop ParallelDownloads  — the db sync (serial) worked, but pacman's
+  #    internal libcurl multi-handle for PACKAGE downloads deadlocks in the
+  #    nested nspawn-in-Docker network namespace and stalls at "Retrieving
+  #    packages".
+  #  • XferCommand = curl …    — sidestep pacman's internal downloader entirely
+  #    and shell out to plain curl with hard connect/transfer timeouts, so a
+  #    retrieval either completes or fails FAST (never hangs the job). curl is
+  #    present (pulled in by git). %u = URL, %o = output path (pacman's contract).
   awk '
     /^\[/ {
-      if (inopts) { print "SigLevel = Never"; inopts=0 }
+      if (inopts) {
+        print "SigLevel = Never"
+        print "XferCommand = /usr/bin/curl -fL --connect-timeout 15 --max-time 180 -C - -o %o %u"
+        inopts=0
+      }
       if ($0 == "[options]") inopts=1
       print; next
     }
     inopts && /^[[:space:]]*SigLevel[[:space:]]*=/ { next }
     inopts && /^[[:space:]]*ParallelDownloads[[:space:]]*=/ { next }
+    inopts && /^[[:space:]]*XferCommand[[:space:]]*=/ { next }
     { print }
-    END { if (inopts) print "SigLevel = Never" }
+    END {
+      if (inopts) {
+        print "SigLevel = Never"
+        print "XferCommand = /usr/bin/curl -fL --connect-timeout 15 --max-time 180 -C - -o %o %u"
+      }
+    }
   ' /etc/pacman.conf > /etc/pacman.conf.e2e \
     && mv /etc/pacman.conf.e2e /etc/pacman.conf \
-    || _info "could not rewrite pacman.conf — pacman may still verify sigs / use parallel downloads"
+    || _info "could not rewrite pacman.conf — pacman may still verify sigs / use its internal downloader"
 fi
 
 _info "refreshing pacman sync db so the pack engine classifies members correctly"

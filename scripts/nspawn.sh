@@ -29,8 +29,11 @@ STAMP="$CACHE/base.stamp"
 # it is NOT in `base`, so without it fenced-block writes warn "cmp: command not
 # found" and lose their byte-identical short-circuit. Any iictl behaviour test in
 # the box that touches a custom/*.lua slot needs it, so it belongs in the base.
-BASE_PKGS=(base git sudo diffutils)
-BASE_TAG="v2: ${BASE_PKGS[*]}"
+# curl: `iictl pack` installs members with pacman; in a non-booted nspawn box
+# pacman's internal libcurl downloader can deadlock, so tests point pacman's
+# XferCommand at the curl CLI — `base` only pulls libcurl, not the binary.
+BASE_PKGS=(base git sudo diffutils curl)
+BASE_TAG="v3: ${BASE_PKGS[*]}"
 
 usage() {
   cat >&2 <<EOF
