@@ -251,12 +251,19 @@ for _hk in /usr/share/libalpm/hooks/*.hook; do
 done
 shopt -u nullglob
 
-_info "installing pack '$PACK' (real iictl pack engine; needs network)"
-if as_user iictl pack install "$PACK"; then
+# Run the pack install with stdin from /dev/null. The engine only adds pacman's
+# --noconfirm when it sees NO controlling terminal (`[[ -t 0 ]]` false) — and
+# inside systemd-nspawn stdin is a pty (a TTY), so without this redirect
+# `pacman -S` prompts ":: Proceed with installation? [Y/n]" and HANGS forever
+# (nobody types Y). </dev/null makes the engine go fully non-interactive, exactly
+# as it does on the welcome-card console. (revert-all's pacman -Rns already
+# passes --noconfirm itself, so the remove leg needs no such redirect.)
+_info "installing pack '$PACK' (real iictl pack engine, non-interactive)"
+if as_user iictl pack install "$PACK" </dev/null; then
   PACK_TESTED=engine
-  _pass "iictl pack install $PACK (online)"
+  _pass "iictl pack install $PACK"
 else
-  _fail "iictl pack install $PACK failed (no network?) — the kind=pack inverse cannot be exercised"
+  _fail "iictl pack install $PACK failed — the kind=pack inverse cannot be exercised"
 fi
 
 # Snapshot AFTER seeding so we can prove the deltas are real (not no-ops).
