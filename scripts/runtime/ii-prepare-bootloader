@@ -48,31 +48,113 @@ COMPRESSION_OPTIONS=()
 MKI
 log "wrote /etc/mkinitcpio.conf (hooks: ${HOOKS[*]})"
 
+# ── resume helpers (pure where possible — table-tested by validate.sh) ──────
+#
+# Classify an fstab swap source (field 1). A swap *partition* is a block-device
+# reference (UUID=/LABEL=/PARTUUID=/PARTLABEL= or a /dev/ node); a swap *file* is
+# an ordinary path under the root filesystem (e.g. /swapfile). The kernel can
+# resume directly from a partition (resume=<dev>), but a swapfile needs
+# resume=<the block device holding the fs> + resume_offset=<physical block>.
+# Returns: "partition" or "file". Pure: depends only on its argument.
+ii_classify_swap_source() {
+  local src="$1"
+  case "$src" in
+    UUID=*|LABEL=*|PARTUUID=*|PARTLABEL=*|/dev/*) echo "partition" ;;
+    /*)                                           echo "file" ;;
+    *)                                            echo "partition" ;;  # opaque → treat as device spec
+  esac
+}
+
+# Build the `cryptdevice=` token for one crypttab line. The mapping target is
+# field 1, the backing source field 2. Only a bare `UUID=<uuid>` source becomes
+# `cryptdevice=UUID=<uuid>:<name>`; any other spec (a /dev node, LABEL=, …) is
+# passed through verbatim as `cryptdevice=<source>:<name>` — never wrapped in a
+# spurious second `UUID=` (the old bug produced `cryptdevice=UUID=/dev/sda2:…`).
+# Pure: depends only on its two arguments. Echoes nothing if either is empty.
+ii_cryptdevice_token() {
+  local name="$1" source="$2"
+  [[ -n "$name" && -n "$source" ]] || return 0
+  # The source is emitted VERBATIM (UUID=… stays UUID=…, a /dev node or LABEL=
+  # stays as written). The old code did `${source#UUID=}` and re-prefixed UUID=
+  # unconditionally → `cryptdevice=UUID=/dev/sda2:name` for a non-UUID source.
+  echo "cryptdevice=$source:$name"
+}
+
+# Physical byte offset of the first extent of a swapfile, divided by the page
+# size → the value the kernel wants in resume_offset=. ext4/xfs via filefrag,
+# btrfs via `btrfs inspect-internal map-swapfile` (filefrag's logical extents
+# are meaningless on btrfs). Echoes the offset on success, nothing on failure.
+ii_swapfile_resume_offset() {
+  local file="$1" fstype="$2" off=""
+  [[ -f "$file" ]] || return 0
+  if [[ "$fstype" == btrfs ]]; then
+    # modern btrfs-progs prints "resume_offset NNN" (in pages already)
+    if command -v btrfs >/dev/null; then
+      off=$(btrfs inspect-internal map-swapfile -r "$file" 2>/dev/null | awk '{print $1}')
+    fi
+  else
+    # filefrag -v: physical offset is the "physical_offset" column of extent 0,
+    # in filesystem blocks; multiply by the block size, divide by the page size.
+    if command -v filefrag >/dev/null; then
+      local phys_blk blk_sz pg_sz
+      phys_blk=$(filefrag -v "$file" 2>/dev/null \
+                 | awk '/^[[:space:]]*0:/ { gsub(/\.\./,"",$4); print $4+0; exit }')
+      blk_sz=$(filefrag -v "$file" 2>/dev/null \
+               | sed -n 's/.*of \([0-9]\+\)-byte blocks.*/\1/p' | head -1)
+      [[ -z "$blk_sz" ]] && blk_sz=$(stat -f -c %S "$file" 2>/dev/null || echo 4096)
+      pg_sz=$(getconf PAGE_SIZE 2>/dev/null || echo 4096)
+      [[ -n "$phys_blk" && -n "$blk_sz" && "$pg_sz" -gt 0 ]] \
+        && off=$(( phys_blk * blk_sz / pg_sz ))
+    fi
+  fi
+  [[ -n "$off" ]] && echo "$off"
+}
+
 # ── kernel cmdline (read by systemd-boot via kernel-install) ───────────────
 write_cmdline() {
   local -a parts=(loglevel=4 rootwait rw)
-  local root_line
+  local root_line root_dev root_fstype
   root_line=$(grep -E '^\S+\s+/\s+' /etc/fstab 2>/dev/null | head -1 || true)
   if [[ -n "$root_line" ]]; then
-    parts+=("root=$(awk '{print $1}' <<< "$root_line")")
+    root_dev=$(awk '{print $1}' <<< "$root_line")
+    root_fstype=$(awk '{print $3}' <<< "$root_line")
+    parts+=("root=$root_dev")
     local opts subvol
     opts=$(awk '{print $4}' <<< "$root_line")
     subvol=$(grep -oE 'subvol=[^,]+' <<< "$opts" | head -1 | cut -d= -f2 || true)
-    [[ "$(awk '{print $3}' <<< "$root_line")" == btrfs && -n "$subvol" ]] \
+    [[ "$root_fstype" == btrfs && -n "$subvol" ]] \
       && parts+=("rootflags=subvol=$subvol")
   fi
   if [[ -f /etc/crypttab ]]; then
     while IFS= read -r line; do
       [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
-      local m u
+      local m s tok
       m=$(awk '{print $1}' <<< "$line")
-      u=$(awk '{print $2}' <<< "$line"); u=${u#UUID=}
-      [[ -n "$m" && -n "$u" ]] && parts+=("cryptdevice=UUID=$u:$m")
+      s=$(awk '{print $2}' <<< "$line")
+      tok=$(ii_cryptdevice_token "$m" "$s")
+      [[ -n "$tok" ]] && parts+=("$tok")
     done < /etc/crypttab
   fi
-  local swap
+  local swap swap_src
   swap=$(grep -E '^\S+\s+none\s+swap' /etc/fstab 2>/dev/null | head -1 || true)
-  [[ -n "$swap" ]] && parts+=("resume=$(awk '{print $1}' <<< "$swap")")
+  if [[ -n "$swap" ]]; then
+    swap_src=$(awk '{print $1}' <<< "$swap")
+    if [[ "$(ii_classify_swap_source "$swap_src")" == file ]]; then
+      # Swapfile: resume from the BLOCK DEVICE holding the root fs + an offset.
+      # Never emit the swapfile PATH as resume= — the kernel can't resume from it.
+      local off
+      off=$(ii_swapfile_resume_offset "$swap_src" "${root_fstype:-}")
+      if [[ -n "$root_dev" && -n "$off" ]]; then
+        parts+=("resume=$root_dev" "resume_offset=$off")
+        log "swapfile resume: resume=$root_dev resume_offset=$off (file $swap_src)"
+      else
+        log "WARN: swapfile $swap_src — could not compute resume_offset; hibernation disabled"
+      fi
+    else
+      parts+=("resume=$swap_src")
+      log "swap partition resume: resume=$swap_src"
+    fi
+  fi
   mkdir -p /etc/kernel/cmdline.d
   echo "${parts[*]}" > /etc/kernel/cmdline.d/illogical-impulse.conf
 }
