@@ -45,7 +45,11 @@ _skel_fetch() {
   local list="$1" root="$2" dest url rev key _ftmp
   local cache="$ROOT/.fetch-cache"
   install -d "$cache"
-  while read -r dest url rev; do
+  # `|| [[ -n "$dest$url$rev" ]]` keeps the last line when the list has no
+  # trailing newline (read returns non-zero but still fills the vars) — a
+  # maintainer/profile-editable fetch list must never silently drop its last
+  # entry. validate.sh also guards the trailing newline (belt-and-suspenders).
+  while read -r dest url rev || [[ -n "$dest$url$rev" ]]; do
     [[ -z "$dest" || "$dest" == \#* ]] && continue
     [[ -n "${rev:-}" ]] || die "fetch list line needs: <dest> <git-url> <rev> ($list)"
     _skel_fetch_guard "$dest" "$list"

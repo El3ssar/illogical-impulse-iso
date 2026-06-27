@@ -901,6 +901,37 @@ else
   _v_fail "release.yml runs the smoke test without enabling /dev/kvm access — the graphical boot probe hangs under TCG on the standard runner (CI-03)"
 fi
 
+step "list files end with a trailing newline (BUILD-04)"
+# The prepare-time list readers are now newline-agnostic
+# (`while read … || [[ -n "$line" ]]`, scripts/prepare.d/30-skel.sh +
+# 40-packages.sh), so a no-trailing-newline list keeps its last entry. This is
+# the belt-and-suspenders half: a maintainer/profile-editable manifest or fetch
+# list that does NOT end in '\n' is the bug-class (a final package not installed,
+# a final tree not cloned) — flag it at build time so an editor that strips the
+# trailing newline is caught here, not silently mis-built. Static, source-only.
+_nl_files=()
+shopt -s nullglob
+for _lf in "$PACKAGES"/*.list "$OVERLAY/skel-distro.fetch"; do
+  [[ -f "$_lf" ]] && _nl_files+=("$_lf")
+done
+for _pf in "$PROFILES"/*/packages.list "$PROFILES"/*/fetch.list; do
+  [[ -f "$_pf" ]] && _nl_files+=("$_pf")
+done
+shopt -u nullglob
+_nl_bad=0
+for _lf in "${_nl_files[@]}"; do
+  # A trailing newline means the last byte is '\n'. Empty files are fine.
+  if [[ -s "$_lf" && -n "$(tail -c1 "$_lf")" ]]; then
+    _v_fail "list file lacks a trailing newline: ${_lf#$ROOT/} — an editor stripped it; the prepare readers tolerate this but re-add the newline (BUILD-04)"
+    _nl_bad=$((_nl_bad+1))
+  fi
+done
+if (( ${#_nl_files[@]} == 0 )); then
+  _v_warn "no list files found to newline-check (packages/*.list, profile lists, skel-distro.fetch)"
+elif (( _nl_bad == 0 )); then
+  _v_ok "${#_nl_files[@]} list file(s) end with a trailing newline (BUILD-04)"
+fi
+
 step "runtime + chroot scripts syntax"
 for sc in "$AIROOTFS/usr/local/bin/"ii-session \
           "$AIROOTFS/usr/local/bin/"ii-launch-installer \
