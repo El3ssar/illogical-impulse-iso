@@ -581,6 +581,42 @@ else
   fi
 fi
 
+# REV-05: ledger durability bug-class guard. Three real failure modes:
+#   (a) ledger_record's append and revert-all's snapshot→replay→rewrite race. A
+#       row appended (e.g. a parallel `iictl pack install`) between revert-all's
+#       mapfile snapshot and its rewrite would be silently dropped → permanently
+#       unrevertable. BOTH sides must serialize on a flock (the sidecar lock).
+#   (b) owned_paths is comma-JOINED but a path may CONTAIN a comma. Without
+#       escaping, such a path splits into bogus fragments at revert → wrong files
+#       removed / the real one survives. Paths must be comma-escaped at write and
+#       decoded at read (ledger_escape_path / ledger_unescape_path).
+# Comments are stripped first so this section's own prose can't satisfy a grep.
+LG="$AIROOTFS/usr/local/lib/ii/ledger.sh"
+if [[ ! -f "$LG" ]]; then
+  _v_fail "ledger.sh not staged — the reversibility manifest is missing"
+elif [[ ! -f "$RA" ]]; then
+  : # revert-all absence already failed above
+else
+  _lg_code="$(grep -vE '^[[:space:]]*#' "$LG")"
+  # (a) flock serialization — ledger_record (writer) AND revert-all (rewriter).
+  grep -q 'flock' <<<"$_lg_code" \
+    && _v_ok "ledger_record serializes its append under flock (no lost concurrent record)" \
+    || _v_fail "ledger.sh never calls flock — a concurrent ledger_record races revert-all's rewrite and is silently lost (REV-05)"
+  grep -q 'flock' <<<"$_ra_code" \
+    && _v_ok "revert-all takes a flock around its read-replay-rewrite (no row lost mid-revert)" \
+    || _v_fail "revert-all never calls flock — a row appended between its snapshot and rewrite is silently dropped (REV-05)"
+  # (b) comma-escape helpers defined in ledger.sh AND consumed on the revert path.
+  if grep -qE '^[[:space:]]*ledger_escape_path[[:space:]]*\(\)' <<<"$_lg_code" \
+     && grep -qE '^[[:space:]]*ledger_unescape_path[[:space:]]*\(\)' <<<"$_lg_code"; then
+    _v_ok "ledger.sh defines ledger_escape_path/ledger_unescape_path (owned_paths comma-safe)"
+  else
+    _v_fail "ledger.sh lacks ledger_escape_path/ledger_unescape_path — a path containing a comma corrupts the owned_paths column (REV-05)"
+  fi
+  grep -q 'ledger_unescape_path' <<<"$_ra_code" \
+    && _v_ok "revert-all decodes owned_paths via ledger_unescape_path before splitting (comma-in-path round-trips)" \
+    || _v_fail "revert-all splits owned_paths on comma without ledger_unescape_path — a comma-bearing path reverts wrongly (REV-05)"
+fi
+
 step "iictl pack engine"
 # Bug-class guards for the online pack installer (#6). Generic +x/shebang/bash -n/
 # #help are already asserted by "iictl.d/ plugin architecture"; these add the

@@ -142,12 +142,22 @@ _sudo() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
 _plan_line() {
   case "$F_kind" in
     lua-block)       printf 'strip fenced block "%s" from %s' "$F_hint" "$F_target" ;;
-    service)         printf 'disable service %s (was: %s)' "$F_target" "${F_hint:-disabled}" ;;
+    service)         if [[ "$F_hint" == enabled ]]; then
+                       printf 'leave service %s enabled (was enabled before us)' "$F_target"
+                     else
+                       printf 'disable service %s (was: %s)' "$F_target" "${F_hint:-disabled}"
+                     fi ;;
     service-disable) printf 're-enable service %s' "$F_target" ;;
     group)           printf 'remove %s from group %s' "${F_hint#user=}" "$F_target" ;;
     chsh)            printf 'restore login shell of %s to %s' "$F_target" "$F_hint" ;;
     pkg|pack)        printf 'pacman -Rns %s' "$F_pkgs" ;;
-    path|file)       printf 'remove path(s): %s' "$F_owned" ;;
+    path|file)       local _pp _pl="" _pq            # decode each owned token for display (REV-05)
+                     IFS=',' read -ra _pq <<< "$F_owned"
+                     for _pp in "${_pq[@]}"; do
+                       [[ -n "$_pp" ]] || continue
+                       _pl+="${_pl:+, }$(ledger_unescape_path "$_pp")"
+                     done
+                     printf 'remove path(s): %s' "$_pl" ;;
     skel-shadow)     printf 'restore upstream copy of %s' "$F_target" ;;
     *)               printf 'UNKNOWN kind "%s" — leave in place' "$F_kind" ;;
   esac
@@ -164,7 +174,9 @@ _revert_row() {
   case "$F_kind" in
     lua-block)
       local file="$F_target" name="$F_hint"
-      [[ -z "$file" && -n "$F_owned" ]] && file="${F_owned%%,*}"   # fall back to owned_paths
+      # fall back to owned_paths: take the first comma-delimited token and DECODE
+      # it (owned tokens are comma-escaped at write time — REV-05).
+      [[ -z "$file" && -n "$F_owned" ]] && file="$(ledger_unescape_path "${F_owned%%,*}")"
       [[ -n "$file" && -n "$name" ]] || { warn "lua-block row missing file/name — left in place"; return 1; }
       [[ -f "$file" ]] || return 0                                  # already gone
       if _block_user_edited "$file" "$name"; then
@@ -177,7 +189,16 @@ _revert_row() {
       fi
       ii_lua_block_remove "$file" "$name" && return 0 || return 1
       ;;
-    service)            # we enabled it → restore prior by disabling
+    service)            # we enabled it → restore the RECORDED prior state, not
+                        # an unconditional disable. ii_service_enable records the
+                        # prior `systemctl is-enabled` in restore_hint; if the
+                        # unit was already enabled before us (hint=enabled), the
+                        # inverse is a no-op — disabling it would wrongly turn off
+                        # a unit the user/distro had on. Anything else (disabled/
+                        # masked/static/empty) → disable to restore prior. (REV-05)
+      if [[ "$F_hint" == enabled ]]; then
+        return 0        # prior state already enabled → nothing to undo
+      fi
       _sudo systemctl disable "$F_target" >/dev/null 2>&1 && return 0 || return 1
       ;;
     service-disable)    # we disabled it → re-enable if prior was enabled
@@ -199,10 +220,15 @@ _revert_row() {
       _sudo pacman -Rns --noconfirm $F_pkgs >/dev/null 2>&1 && return 0 || return 1
       ;;
     path|file)
+      # owned_paths is comma-joined of comma-ESCAPED tokens (ledger.sh) → split
+      # on the delimiter, then DECODE each token so a path that contained a
+      # literal comma is removed as one path, not split into bogus fragments
+      # (REV-05). Without the decode, "a,b" stored as "a%2Cb" would survive.
       local p rc=0 paths
       IFS=',' read -ra paths <<< "$F_owned"
       for p in "${paths[@]}"; do
         [[ -n "$p" ]] || continue
+        p="$(ledger_unescape_path "$p")"
         rm -f "$p" 2>/dev/null || rc=1
       done
       return $rc
@@ -267,6 +293,26 @@ if [[ ! -f "$II_LEDGER" ]]; then
   echo "${C_B}iictl revert-all${C_0}: nothing to revert (no ledger at $II_LEDGER)"
   exit 0
 fi
+
+# REV-05: the snapshot→replay→rewrite below is NOT atomic against a concurrent
+# ledger_record (e.g. a parallel `iictl pack install`). A row appended between
+# our mapfile snapshot and the _rewrite_ledger overwrite would be silently
+# dropped by the rewrite → permanently unrevertable. Take the SAME sidecar lock
+# ledger_record uses (II_LEDGER_LOCK, defined by ledger.sh) and hold it for the
+# whole critical section: fd 9 stays open until this process exits, so appends
+# block until the rewrite is done. The lock is a separate inode from the ledger
+# so our replace-the-file rewrite never invalidates it. flock(1) is util-linux
+# (always present); if it is somehow missing we proceed unlocked rather than
+# fail (the prior, racy behaviour) — never abort a revert over a missing tool.
+if command -v flock >/dev/null 2>&1; then
+  [[ -e "$II_LEDGER_LOCK" ]] || : > "$II_LEDGER_LOCK" 2>/dev/null || true
+  if exec 9>"$II_LEDGER_LOCK" 2>/dev/null; then
+    flock -x 9 2>/dev/null || warn "could not lock the ledger — proceeding unlocked (concurrent records may be lost)"
+  else
+    warn "could not open the ledger lock — proceeding unlocked (concurrent records may be lost)"
+  fi
+fi
+
 mapfile -t RAW < "$II_LEDGER"
 
 # Index the data rows (everything that is not a comment/blank), in file order —

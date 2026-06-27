@@ -292,7 +292,7 @@ if [[ -n "$NEW_USER" ]]; then
     if [[ -e "$FRUN" && -r /usr/local/lib/ii/ledger.sh ]]; then
       try "ledger: first-run welcome override" sudo -u "$NEW_USER" env \
         HOME="$H" XDG_STATE_HOME="$H/.local/state" \
-        bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record file first-run-welcome "" "$HOME/.local/state/quickshell/user/first_run.txt" "rm to restore upstream first-run welcome"'
+        bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record file first-run-welcome "" "$(ledger_escape_path "$HOME/.local/state/quickshell/user/first_run.txt")" "rm to restore upstream first-run welcome"'
     fi
     # ── ledger: welcome exec-hook fence (REV-01) ──────────────────────────
     # The distro welcome hook is a sentinel-fenced block named `welcome` in the
@@ -316,7 +316,7 @@ if [[ -n "$NEW_USER" ]]; then
        && grep -qxF -- '-- >>> illogical-impulse welcome' "$EXECS"; then
       try "ledger: welcome exec-hook fence" sudo -u "$NEW_USER" env \
         HOME="$H" XDG_STATE_HOME="$H/.local/state" \
-        bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record lua-block "$HOME/.config/hypr/custom/execs.lua" "" "$HOME/.config/hypr/custom/execs.lua" welcome'
+        bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record lua-block "$HOME/.config/hypr/custom/execs.lua" "" "$(ledger_escape_path "$HOME/.config/hypr/custom/execs.lua")" welcome'
     fi
   fi
 fi

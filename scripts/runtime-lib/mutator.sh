@@ -145,7 +145,10 @@ ii_lua_block_write() {
     rm -f "$tmp"; return 0   # no change → idempotent, no duplicate ledger row
   fi
   cat "$tmp" > "$file" && rm -f "$tmp" || { _ii_mut_err "write $file failed"; rm -f "$tmp"; return 1; }
-  ledger_record lua-block "$file" "" "$file" "$name"
+  # owned_paths is comma-joined → comma-escape the path so one containing a comma
+  # survives the round trip (REV-05). The target column is single-valued and
+  # carries the raw path for human-readable plan lines.
+  ledger_record lua-block "$file" "" "$(ledger_escape_path "$file")" "$name"
 }
 
 # ii_lua_block_remove <file> <name> — strip exactly the named fenced region.
