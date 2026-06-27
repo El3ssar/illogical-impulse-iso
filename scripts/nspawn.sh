@@ -25,8 +25,12 @@ BASE="$CACHE/base"
 STAMP="$CACHE/base.stamp"
 # Minimal bootable rootfs + iictl's hard deps. Bump the tag when this set (or
 # the staging step below) changes, so the cached base is rebuilt on next run.
-BASE_PKGS=(base git sudo)
-BASE_TAG="v1: ${BASE_PKGS[*]}"
+# diffutils: mutator.sh's ii_lua_block_write/remove call `cmp` for idempotence —
+# it is NOT in `base`, so without it fenced-block writes warn "cmp: command not
+# found" and lose their byte-identical short-circuit. Any iictl behaviour test in
+# the box that touches a custom/*.lua slot needs it, so it belongs in the base.
+BASE_PKGS=(base git sudo diffutils)
+BASE_TAG="v2: ${BASE_PKGS[*]}"
 
 usage() {
   cat >&2 <<EOF

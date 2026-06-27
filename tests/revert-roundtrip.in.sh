@@ -169,6 +169,14 @@ chown -R "$TESTUSER":"$TESTUSER" "$USER_HOME/.local" "$USER_HOME/.config" 2>/dev
 # have it). A failure here is reported and fails the test rather than being
 # silently skipped, so an offline run is loud, not a false green.
 PACK_TESTED=skipped
+# Refresh the sync db first: the throwaway base was pacstrapped with a snapshot
+# db, and the pack engine classifies each member official-vs-AUR with
+# `pacman -Si <m>` — a stale/empty db misclassifies the official demo members
+# (sl, cowsay) as AUR and triggers a paru bootstrap that needs base-devel. A
+# plain `pacman -Sy` makes `pacman -Si` resolve them as official so they install
+# via `pacman -S` with no AUR path. (Setup concern only; the engine is unchanged.)
+_info "refreshing pacman sync db so the pack engine classifies members correctly"
+pacman -Sy --noconfirm >/dev/null 2>&1 || warn "pacman -Sy failed (offline?) — pack classification may fall back to AUR"
 _info "installing pack '$PACK' (real iictl pack engine; needs network)"
 if as_user iictl pack install "$PACK"; then
   PACK_TESTED=engine
