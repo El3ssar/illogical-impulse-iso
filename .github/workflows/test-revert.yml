@@ -86,6 +86,24 @@ jobs:
           mkdir -p /run/systemd
           mount -t tmpfs tmpfs /run/systemd
 
+      # Pre-seed the demo pack's members into the nspawn base's pacman cache from
+      # the HOST (whose pacman + network work fine). Inside the nested nspawn box
+      # `pacman -S`'s package retrieval deadlocks in the nested network namespace;
+      # with the .pkg.tar.zst files already in /var/cache/pacman/pkg, the box's
+      # `pacman -S sl cowsay` installs from cache with NO download — so the real
+      # pack engine + the real `pacman -Rns` inverse are exercised offline, with
+      # no nested-netns network dependency. A warmup `just nspawn true` builds the
+      # base first (idempotent; the round-trip reuses it via the base stamp).
+      - name: Warm the nspawn base pacman cache with the demo pack members
+        run: |
+          just nspawn true || true   # build/refresh the cached base rootfs
+          BASE=.nspawn-cache/base
+          if [[ -d "$BASE" ]]; then
+            pacman -Sy --noconfirm
+            pacman -Sw --noconfirm --cachedir "$BASE/var/cache/pacman/pkg" sl cowsay
+            ls -1 "$BASE/var/cache/pacman/pkg"/{sl,cowsay}-*.pkg.tar.* 2>/dev/null || true
+          fi
+
       # The round-trip seeds via the real mutators + pack engine, runs
       # `iictl revert-all`, and asserts vanilla returns byte-for-byte. On a real
       # systemd host every leg passes; in this nested-nspawn sandbox the pack
