@@ -988,6 +988,62 @@ else
   (( _pb_name_ok )) && _v_ok "prebuild matches by exact name + fixed-string DB + caches RPC + prunes (BUILD-03)"
 fi
 
+step "resolve-deps dependency discovery (BUILD-02)"
+# resolve-deps.py scrapes upstream's sdata/dist-arch/*/PKGBUILD into
+# packages.x86_64. The dependency-only meta-packages (no package() body) used to
+# be found ONLY via a hardcoded METAPKGS list; the structural rglob skipped them.
+# An upstream bump that ADDS such a meta-package would then silently drop its
+# depends from packages.x86_64 — a missing-dependency ISO with no error, and
+# `just update` bumps the pin without re-checking. Two guards (static, no root,
+# no network; mirrors the first_run.txt cross-check pattern):
+#   1. layout drift — the dist-arch PKGBUILD root exists, is non-empty, and every
+#      hardcoded METAPKGS entry still resolves to a real PKGBUILD (an upstream
+#      rename screams HERE, not at a user's broken install).
+#   2. structural discovery — resolve-deps.py must discover meta-packages by the
+#      illogical-impulse- pkgname prefix (not be reverted to hardcoded-only) and
+#      parse_depends must handle the append form (depends+=).
+_DISTARCH="$DOTS/sdata/dist-arch"
+_RESOLVE="$TOOLS/resolve-deps.py"
+if [[ ! -d "$_DISTARCH" ]]; then
+  _v_fail "dist-arch PKGBUILD root missing ($_DISTARCH) — resolve-deps.py scrapes nothing → packages.x86_64 loses every upstream dep (BUILD-02)"
+else
+  mapfile -t _da_pkgbuilds < <(find "$_DISTARCH" -name PKGBUILD -type f 2>/dev/null)
+  if (( ${#_da_pkgbuilds[@]} == 0 )); then
+    _v_fail "dist-arch root has no PKGBUILDs ($_DISTARCH) — upstream layout drifted; resolve-deps.py would emit empty lists (BUILD-02)"
+  else
+    _v_ok "dist-arch PKGBUILD root present (${#_da_pkgbuilds[@]} PKGBUILDs) (BUILD-02)"
+    # Every hardcoded METAPKGS entry must still resolve to a real PKGBUILD.
+    mapfile -t _metapkgs < <(
+      sed -nE '/^METAPKGS\s*=\s*\[/,/^\]/p' "$_RESOLVE" \
+        | grep -oE '"[^"]+"' | tr -d '"'
+    )
+    if (( ${#_metapkgs[@]} == 0 )); then
+      _v_warn "could not parse METAPKGS from resolve-deps.py — drift cross-check skipped (BUILD-02)"
+    else
+      _meta_miss=()
+      for _m in "${_metapkgs[@]}"; do
+        [[ -f "$_DISTARCH/$_m/PKGBUILD" ]] || _meta_miss+=("$_m")
+      done
+      (( ${#_meta_miss[@]} == 0 )) \
+        && _v_ok "all ${#_metapkgs[@]} METAPKGS entries resolve to a real dist-arch PKGBUILD (BUILD-02)" \
+        || _v_fail "METAPKGS entries missing from dist-arch (upstream renamed/removed): ${_meta_miss[*]} — their depends would never reach packages.x86_64 (BUILD-02)"
+    fi
+  fi
+fi
+# Structural-discovery guards: the regression is reverting to hardcoded-only
+# discovery (rglob limited to package()-bearing PKGBUILDs) or a parse_depends that
+# only reads the first literal depends=().
+if [[ ! -f "$_RESOLVE" ]]; then
+  _v_fail "tools/resolve-deps.py missing — no upstream dependency scraping (BUILD-02)"
+else
+  grep -Eq 'name\.startswith\(META_PREFIX\)' "$_RESOLVE" \
+    && _v_ok "resolve-deps.py discovers dependency-only meta-packages structurally by pkgname prefix (BUILD-02)" \
+    || _v_fail "resolve-deps.py no longer does structural meta-package discovery — an upstream-added meta-package would silently drop its depends (BUILD-02)"
+  grep -Eq 'depends.*\\\+\?=' "$_RESOLVE" \
+    && _v_ok "resolve-deps.py parse_depends handles append/arch-suffixed depends (BUILD-02)" \
+    || _v_warn "resolve-deps.py parse_depends may not handle depends+= / arch-suffixed arrays (BUILD-02)"
+fi
+
 step "release.yml idempotent re-release (CI-02)"
 # The GitHub-release version $VER is the build DATE, so a same-day re-run or a
 # workflow_dispatch reuses it — and publish-sf.sh has ALREADY overwritten the
