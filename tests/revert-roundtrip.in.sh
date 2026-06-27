@@ -189,6 +189,11 @@ PACK_TESTED=skipped
 # a SigLevel under a [repo] would only cover that repo), dropping any existing
 # [options] SigLevel so Never is authoritative.
 if [[ -f /etc/pacman.conf ]]; then
+  # Also drop ParallelDownloads: the db sync (serial) downloaded fine, but
+  # parallel PACKAGE downloads open several concurrent connections that can
+  # deadlock in the nested nspawn-in-Docker network namespace and stall the
+  # transaction at "Retrieving packages". Removing it makes pacman download
+  # serially like the db sync.
   awk '
     /^\[/ {
       if (inopts) { print "SigLevel = Never"; inopts=0 }
@@ -196,11 +201,12 @@ if [[ -f /etc/pacman.conf ]]; then
       print; next
     }
     inopts && /^[[:space:]]*SigLevel[[:space:]]*=/ { next }
+    inopts && /^[[:space:]]*ParallelDownloads[[:space:]]*=/ { next }
     { print }
     END { if (inopts) print "SigLevel = Never" }
   ' /etc/pacman.conf > /etc/pacman.conf.e2e \
     && mv /etc/pacman.conf.e2e /etc/pacman.conf \
-    || _info "could not set SigLevel=Never — pacman may still verify signatures"
+    || _info "could not rewrite pacman.conf — pacman may still verify sigs / use parallel downloads"
 fi
 
 _info "refreshing pacman sync db so the pack engine classifies members correctly"
