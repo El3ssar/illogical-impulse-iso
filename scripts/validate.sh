@@ -901,6 +901,48 @@ else
   _v_fail "release.yml runs the smoke test without enabling /dev/kvm access — the graphical boot probe hangs under TCG on the standard runner (CI-03)"
 fi
 
+step "ii-verify covers every installed kernel (INST-03)"
+# Bug-class guard (issue #71): ii-verify used to hardcode the `linux`
+# vmlinuz/initramfs(.img/-fallback.img) triple and only repair linux.preset.
+# But goodies.list ships linux-lts and ii-prepare-bootloader builds a
+# default+fallback initramfs for EVERY pkgbase in /usr/lib/modules/*/ (writing
+# each path into .ii-boot-state.json's expected_paths). With the hardcoded
+# triple a broken linux-lts initramfs passed verification and the LTS rescue
+# entry booted to a broken image — the exact failure the "always build fallback"
+# design exists to catch. So ii-verify MUST (a) derive the kernel set
+# dynamically (from .ii-boot-state.json's expected_paths and/or
+# /usr/lib/modules/*/pkgbase, mirroring ii-prepare-bootloader) and (b) NOT carry
+# a hardcoded single-`linux` artefact triple. Comments stripped first so this
+# header's prose can neither satisfy nor trip the code greps.
+IVERIFY="$AIROOTFS/usr/local/bin/ii-verify"
+if [[ ! -f "$IVERIFY" ]]; then
+  _v_fail "ii-verify missing from airootfs — INST-03 guard can't run"
+else
+  _iv_code="$(grep -vE '^[[:space:]]*#' "$IVERIFY")"
+  # (a) it reads .ii-boot-state.json's expected_paths (not merely its existence).
+  if grep -q '.ii-boot-state.json' <<<"$_iv_code" \
+     && grep -qE 'vmlinuz-' <<<"$_iv_code" \
+     && grep -q 'expected_paths' "$IVERIFY"; then
+    _v_ok "ii-verify reads .ii-boot-state.json's expected_paths to derive the kernel set (INST-03)"
+  else
+    _v_fail "ii-verify does not read .ii-boot-state.json's expected_paths — it can't validate every kernel's artefacts (INST-03)"
+  fi
+  # (b) it enumerates kernels dynamically via /usr/lib/modules/*/pkgbase (the
+  #     same source ii-prepare-bootloader uses), as the fallback/cross-check.
+  grep -q '/usr/lib/modules/\*/' <<<"$_iv_code" && grep -q 'pkgbase' <<<"$_iv_code" \
+    && _v_ok "ii-verify enumerates kernels via /usr/lib/modules/*/pkgbase (mirrors ii-prepare-bootloader) (INST-03)" \
+    || _v_fail "ii-verify does not enumerate /usr/lib/modules/*/pkgbase — a non-default kernel set goes unverified (INST-03)"
+  # (c) the hardcoded single-`linux` artefact triple must be gone. The old code
+  #     literally checked vmlinuz-linux / initramfs-linux.img /
+  #     initramfs-linux-fallback.img; any of those LITERAL tokens means the
+  #     regression is back. Per-kernel code uses vmlinuz-$kb / -$pkgbase instead.
+  if grep -qE '(vmlinuz-linux\b|initramfs-linux\.img|initramfs-linux-fallback\.img)' <<<"$_iv_code"; then
+    _v_fail "ii-verify still references the hardcoded 'linux' artefact triple (vmlinuz-linux/initramfs-linux*.img) — linux-lts artefacts go unchecked (INST-03)"
+  else
+    _v_ok "ii-verify has no hardcoded single-'linux' artefact triple (per-kernel checks instead) (INST-03)"
+  fi
+fi
+
 step "runtime + chroot scripts syntax"
 for sc in "$AIROOTFS/usr/local/bin/"ii-session \
           "$AIROOTFS/usr/local/bin/"ii-launch-installer \
