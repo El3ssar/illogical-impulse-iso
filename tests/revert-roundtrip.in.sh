@@ -213,6 +213,22 @@ fi
 # pacman-key --populate → gpg, and the box's gpg-agent is flaky, so that upgrade
 # can HANG. With SigLevel=Never above, the [extra] members install without it.
 
+# Neutralise the systemd-touching alpm hooks for THIS box. When `pacman -S`
+# installs the demo members it fires post-transaction hooks; in a non-booted
+# nspawn container (we run a one-shot /bin/bash, not --boot, so there is no PID-1
+# systemd / system bus) the daemon-reload / enqueue-marked / tmpfiles / udev
+# hooks block trying to reach the manager and HANG the install. pacman skips a
+# stock hook when a same-named file exists in /etc/pacman.d/hooks/, so shadow the
+# systemd ones with /dev/null symlinks. Disposable-box only (evaporates on exit);
+# the demo members (sl, cowsay) are plain CLIs that need none of these hooks.
+install -d /etc/pacman.d/hooks
+for _h in 20-systemd-sysusers 21-systemd-tmpfiles 25-systemd-binfmt \
+          25-systemd-catalog 25-systemd-hwdb 25-systemd-sysctl \
+          30-systemd-daemon-reload-system 30-systemd-daemon-reload-user \
+          35-systemd-enqueue-marked 35-systemd-udev-reload 35-systemd-update; do
+  ln -sf /dev/null "/etc/pacman.d/hooks/$_h.hook"
+done
+
 _info "installing pack '$PACK' (real iictl pack engine; needs network)"
 if as_user iictl pack install "$PACK"; then
   PACK_TESTED=engine
