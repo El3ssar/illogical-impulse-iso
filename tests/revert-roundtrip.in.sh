@@ -178,6 +178,31 @@ PACK_TESTED=skipped
 # makes `pacman -Si` resolve them as official so they install via `pacman -S`
 # with NO AUR path. (Setup-only; the pack engine itself is unchanged.) We run as
 # root here (the in-container payload is root before any as_user call).
+# Disable signature checking for THIS throwaway box's pacman before any -S{y,i}.
+# The container's gpg-agent is broken (the pacstrap "gpg-agent unusable"
+# warnings), so default SigLevel verification can spawn/wait on gpg-agent and
+# HANG the install indefinitely. This test proves the iictl ledger/revert
+# round-trip, NOT Arch's package signing — turning SigLevel off in the disposable
+# box removes every gpg-agent stall. Scoped to the ephemeral container only (it
+# evaporates on exit); the real distro's pacman.conf is untouched. Set it as the
+# LAST SigLevel in the GLOBAL [options] section (pacman honours the last one, and
+# a SigLevel under a [repo] would only cover that repo), dropping any existing
+# [options] SigLevel so Never is authoritative.
+if [[ -f /etc/pacman.conf ]]; then
+  awk '
+    /^\[/ {
+      if (inopts) { print "SigLevel = Never"; inopts=0 }
+      if ($0 == "[options]") inopts=1
+      print; next
+    }
+    inopts && /^[[:space:]]*SigLevel[[:space:]]*=/ { next }
+    { print }
+    END { if (inopts) print "SigLevel = Never" }
+  ' /etc/pacman.conf > /etc/pacman.conf.e2e \
+    && mv /etc/pacman.conf.e2e /etc/pacman.conf \
+    || _info "could not set SigLevel=Never — pacman may still verify signatures"
+fi
+
 _info "refreshing pacman sync db so the pack engine classifies members correctly"
 if pacman -Sy --noconfirm; then
   _pass "pacman sync db refreshed (sl/cowsay now classify as official)"
@@ -185,10 +210,8 @@ else
   _fail "pacman -Sy failed — pack member classification will fall back to AUR"
 fi
 # NB: do NOT `pacman -Sy archlinux-keyring` here — its post-install hook runs
-# pacman-key --populate → gpg, and the throwaway box's gpg-agent is flaky (the
-# pacstrap "gpg-agent unusable" warnings), so that upgrade can HANG. pacstrap
-# already imported archlinux-keyring, so signature checks on the [extra] members
-# work without touching it.
+# pacman-key --populate → gpg, and the box's gpg-agent is flaky, so that upgrade
+# can HANG. With SigLevel=Never above, the [extra] members install without it.
 
 _info "installing pack '$PACK' (real iictl pack engine; needs network)"
 if as_user iictl pack install "$PACK"; then
