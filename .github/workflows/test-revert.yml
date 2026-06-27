@@ -19,6 +19,9 @@ on:
 jobs:
   revert-roundtrip:
     runs-on: ubuntu-latest
+    # Cheap test (no ISO bake); cap it so a container/nspawn hang fails fast
+    # instead of burning the default 6h budget.
+    timeout-minutes: 20
     container:
       image: archlinux:base-devel
       # systemd-nspawn + pacstrap + --volatile=overlay (tmpfs/overlay mounts)

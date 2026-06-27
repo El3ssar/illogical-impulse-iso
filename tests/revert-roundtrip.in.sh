@@ -184,10 +184,11 @@ if pacman -Sy --noconfirm; then
 else
   _fail "pacman -Sy failed — pack member classification will fall back to AUR"
 fi
-# Sanity: pacstrap imported archlinux-keyring, so signature checks on the [extra]
-# members should pass despite the harmless gpg-agent warnings during pacstrap.
-# If the db somehow predates a keyring rotation, top it up (best-effort, quiet).
-pacman -Sy --noconfirm archlinux-keyring >/dev/null 2>&1 || true
+# NB: do NOT `pacman -Sy archlinux-keyring` here — its post-install hook runs
+# pacman-key --populate → gpg, and the throwaway box's gpg-agent is flaky (the
+# pacstrap "gpg-agent unusable" warnings), so that upgrade can HANG. pacstrap
+# already imported archlinux-keyring, so signature checks on the [extra] members
+# work without touching it.
 
 _info "installing pack '$PACK' (real iictl pack engine; needs network)"
 if as_user iictl pack install "$PACK"; then
