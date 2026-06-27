@@ -50,9 +50,18 @@ jobs:
       # /run/systemd/nspawn/propagate/base, and we can't allow that"). Mounting a
       # tmpfs at /run/systemd makes that propagate dir live on a real mount nspawn
       # can cleanly tear down — the standard nspawn-in-Docker remedy.
-      - name: Provision a machine-id + tmpfs /run/systemd for systemd-nspawn
+      - name: Provision a machine-id + private mounts for systemd-nspawn
         run: |
           systemd-machine-id-setup
+          # The GHA service container's mounts are SHARED-propagation; nspawn
+          # sets up its own mount tree (--volatile=overlay + binds) and the
+          # outer process dies during that setup ("Parent died too early") when
+          # propagation isn't private. Make the mount tree recursively private
+          # first (needs --privileged, which this job has).
+          mount --make-rprivate /
+          # tmpfs at /run/systemd so nspawn's propagate bind-mount lives on a
+          # real mount it can cleanly tear down (otherwise it refuses to remove
+          # the propagate dir off the container overlay at teardown).
           mkdir -p /run/systemd
           mount -t tmpfs tmpfs /run/systemd
 
