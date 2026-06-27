@@ -27,33 +27,83 @@ fix()    { T "  fix   $*"; FIX+=("$*"); }
 
 T "==== $(date -u +%FT%TZ) ===="
 
-# ── /boot artefacts ────────────────────────────────────────────────────────
-declare -A MIN=( [vmlinuz-linux]=$((1*1024*1024))
-                 [initramfs-linux.img]=$((5*1024*1024))
-                 [initramfs-linux-fallback.img]=$((5*1024*1024)) )
+# ── /boot artefacts (EVERY installed kernel, not just `linux`) ───────────────
+# goodies.list ships linux-lts beside linux, and ii-prepare-bootloader builds a
+# default+fallback initramfs for EVERY pkgbase in /usr/lib/modules/*/ (writing
+# each expected path into /boot/.ii-boot-state.json). A hardcoded `linux` triple
+# here let a broken linux-lts initramfs slip through — the LTS rescue entry then
+# boots to a broken image, defeating the whole point of always building both
+# presets. So derive the kernel set the SAME way the bootloader hook did:
+# prefer .ii-boot-state.json's expected_paths (authoritative — it is exactly
+# what was built), else enumerate /usr/lib/modules/*/pkgbase (the bootloader
+# hook's own source). Then size-check default+fallback for EACH kernel.
+MIN_VMLINUZ=$((1*1024*1024))
+MIN_INITRAMFS=$((5*1024*1024))
 
-# Repair: missing fallback initramfs → fix preset, rebuild
-if [[ -f /boot/initramfs-linux.img && ! -f /boot/initramfs-linux-fallback.img ]]; then
-  P=/etc/mkinitcpio.d/linux.preset
-  if [[ -f "$P" ]] && ! grep -qE "^PRESETS=\(.*\bfallback\b.*\)" "$P"; then
-    sed -i "s|^PRESETS=.*$|PRESETS=('default' 'fallback')|" "$P"
-    grep -q '^fallback_image=' "$P" || cat >> "$P" <<'F'
-fallback_image="/boot/initramfs-linux-fallback.img"
-fallback_options="-S autodetect"
-F
-    fix "patched $P to enable fallback preset"
-  fi
-  mkinitcpio -p linux 2>&1 | sed 's/^/[ii-verify]     /' \
-    && fix "built initramfs-linux-fallback.img"
+BOOT_STATE=/boot/.ii-boot-state.json
+kernels=()   # pkgbase list (e.g. linux linux-lts)
+
+# (1) authoritative source: the per-kernel expected_paths the bootloader hook
+# wrote. Pull each vmlinuz-<pkgbase> and recover the pkgbase from it; this also
+# implicitly validates the JSON carries real paths, not just that it exists.
+if [[ -f "$BOOT_STATE" ]]; then
+  pass "boot-state.json present"
+  while IFS= read -r kb; do
+    [[ -n "$kb" ]] && kernels+=("$kb")
+  done < <(grep -oE '/boot/vmlinuz-[A-Za-z0-9._+-]+' "$BOOT_STATE" \
+             | sed 's|^/boot/vmlinuz-||' | sort -u)
+  (( ${#kernels[@]} > 0 )) \
+    && pass "boot-state.json expected_paths name ${#kernels[@]} kernel(s): ${kernels[*]}" \
+    || fail "boot-state.json has no vmlinuz-* expected_paths — bootloader hook wrote a malformed state file"
+else
+  fail "boot-state.json missing"
 fi
 
-for f in vmlinuz-linux initramfs-linux.img initramfs-linux-fallback.img; do
-  p="/boot/$f"
-  if [[ ! -e "$p" ]]; then fail "$p missing"; continue; fi
-  sz=$(stat -c %s "$p" 2>/dev/null || echo 0)
-  (( sz >= MIN[$f] )) && pass "$p ($sz B)" || fail "$p too small ($sz B, need ≥ ${MIN[$f]})"
+# (2) fallback source (or cross-check): enumerate installed kernels exactly as
+# ii-prepare-bootloader does, via /usr/lib/modules/*/pkgbase. Used when the
+# state file is missing/empty so a verify still covers every kernel.
+if (( ${#kernels[@]} == 0 )); then
+  shopt -s nullglob
+  for d in /usr/lib/modules/*/; do
+    [[ -f "${d}pkgbase" ]] || continue
+    kb=$(< "${d}pkgbase"); kb="${kb//[$'\t\r\n ']/}"
+    [[ -n "$kb" ]] && kernels+=("$kb")
+  done
+  shopt -u nullglob
+  # de-dupe (a pkgbase can own multiple module dirs)
+  if (( ${#kernels[@]} > 0 )); then
+    mapfile -t kernels < <(printf '%s\n' "${kernels[@]}" | sort -u)
+    pass "enumerated ${#kernels[@]} kernel(s) from /usr/lib/modules/*/pkgbase: ${kernels[*]}"
+  fi
+fi
+(( ${#kernels[@]} > 0 )) || fail "no installed kernels found (neither boot-state.json nor /usr/lib/modules/*/pkgbase)"
+
+# Per-kernel repair + size-check. Repair a missing fallback (the rescue-kernel
+# case) by fixing that kernel's preset and rebuilding ITS images, then size-check
+# vmlinuz + default + fallback for each.
+for kb in "${kernels[@]}"; do
+  if [[ -f "/boot/initramfs-$kb.img" && ! -f "/boot/initramfs-$kb-fallback.img" ]]; then
+    P="/etc/mkinitcpio.d/$kb.preset"
+    if [[ -f "$P" ]] && ! grep -qE "^PRESETS=\(.*\bfallback\b.*\)" "$P"; then
+      sed -i "s|^PRESETS=.*$|PRESETS=('default' 'fallback')|" "$P"
+      grep -q '^fallback_image=' "$P" || cat >> "$P" <<F
+fallback_image="/boot/initramfs-$kb-fallback.img"
+fallback_options="-S autodetect"
+F
+      fix "patched $P to enable fallback preset"
+    fi
+    mkinitcpio -p "$kb" 2>&1 | sed 's/^/[ii-verify]     /' \
+      && fix "built initramfs-$kb-fallback.img"
+  fi
+  for spec in "vmlinuz-$kb:$MIN_VMLINUZ" \
+              "initramfs-$kb.img:$MIN_INITRAMFS" \
+              "initramfs-$kb-fallback.img:$MIN_INITRAMFS"; do
+    f="${spec%:*}"; min="${spec##*:}"; p="/boot/$f"
+    if [[ ! -e "$p" ]]; then fail "$p missing"; continue; fi
+    sz=$(stat -c %s "$p" 2>/dev/null || echo 0)
+    (( sz >= min )) && pass "$p ($sz B)" || fail "$p too small ($sz B, need ≥ $min)"
+  done
 done
-[[ -f /boot/.ii-boot-state.json ]] && pass "boot-state.json present" || fail "boot-state.json missing"
 
 # ── archiso hooks must NOT survive on the installed system ─────────────────
 rebuild_initramfs=false
@@ -64,24 +114,31 @@ if compgen -G '/etc/mkinitcpio.conf.d/archiso*.conf' >/dev/null; then
 else
   pass "no archiso mkinitcpio drop-ins"
 fi
-P=/etc/mkinitcpio.d/linux.preset
-if [[ -f "$P" ]] && grep -qE 'archiso_config|PRESETS=.*archiso' "$P"; then
-  fail "$P references archiso"
-  cat > "$P" <<'EOF'
-ALL_kver="/boot/vmlinuz-linux"
+# Scan EVERY kernel's preset + default image for archiso leftovers, not just
+# `linux` — a stray archiso reference under any kernel must trigger the rebuild.
+# The rewrite is per-kernel; the rebuild below delegates to ii-prepare-bootloader
+# (which re-authors all presets correctly), so this only needs to defuse the
+# archiso reference so that re-run is taken.
+for kb in "${kernels[@]:-linux}"; do
+  P="/etc/mkinitcpio.d/$kb.preset"
+  if [[ -f "$P" ]] && grep -qE 'archiso_config|PRESETS=.*archiso' "$P"; then
+    fail "$P references archiso"
+    cat > "$P" <<EOF
+ALL_kver="/boot/vmlinuz-$kb"
 PRESETS=('default' 'fallback')
-default_image="/boot/initramfs-linux.img"
-fallback_image="/boot/initramfs-linux-fallback.img"
+default_image="/boot/initramfs-$kb.img"
+fallback_image="/boot/initramfs-$kb-fallback.img"
 fallback_options="-S autodetect"
 EOF
-  fix "rewrote $P"
-  rebuild_initramfs=true
-fi
-if [[ -f /boot/initramfs-linux.img ]] && command -v lsinitcpio >/dev/null \
-   && lsinitcpio /boot/initramfs-linux.img 2>/dev/null | grep -q '/hooks/archiso'; then
-  fail "initramfs-linux.img contains archiso hook"
-  rebuild_initramfs=true
-fi
+    fix "rewrote $P"
+    rebuild_initramfs=true
+  fi
+  if [[ -f "/boot/initramfs-$kb.img" ]] && command -v lsinitcpio >/dev/null \
+     && lsinitcpio "/boot/initramfs-$kb.img" 2>/dev/null | grep -q '/hooks/archiso'; then
+    fail "initramfs-$kb.img contains archiso hook"
+    rebuild_initramfs=true
+  fi
+done
 if $rebuild_initramfs; then
   if [[ -x /usr/local/bin/ii-prepare-bootloader ]]; then
     /usr/local/bin/ii-prepare-bootloader 2>&1 | sed 's/^/[ii-verify]     /' \
