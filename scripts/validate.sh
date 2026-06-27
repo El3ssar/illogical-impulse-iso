@@ -648,6 +648,43 @@ else
   _v_fail ".github/workflows/test-revert.yml missing or does not invoke the round-trip"
 fi
 
+step "ledger durability — flock + comma-safe owned_paths (REV-05)"
+# REV-05: ledger durability bug-class guard. Three real failure modes:
+#   (a) ledger_record's append and revert-all's snapshot→replay→rewrite race. A
+#       row appended (e.g. a parallel `iictl pack install`) between revert-all's
+#       mapfile snapshot and its rewrite would be silently dropped → permanently
+#       unrevertable. BOTH sides must serialize on a flock (the sidecar lock).
+#   (b) owned_paths is comma-JOINED but a path may CONTAIN a comma. Without
+#       escaping, such a path splits into bogus fragments at revert → wrong files
+#       removed / the real one survives. Paths must be comma-escaped at write and
+#       decoded at read (ledger_escape_path / ledger_unescape_path).
+# Comments are stripped first so this section's own prose can't satisfy a grep.
+LG="$AIROOTFS/usr/local/lib/ii/ledger.sh"
+if [[ ! -f "$LG" ]]; then
+  _v_fail "ledger.sh not staged — the reversibility manifest is missing"
+elif [[ ! -f "$RA" ]]; then
+  : # revert-all absence already failed above
+else
+  _lg_code="$(grep -vE '^[[:space:]]*#' "$LG")"
+  # (a) flock serialization — ledger_record (writer) AND revert-all (rewriter).
+  grep -q 'flock' <<<"$_lg_code" \
+    && _v_ok "ledger_record serializes its append under flock (no lost concurrent record)" \
+    || _v_fail "ledger.sh never calls flock — a concurrent ledger_record races revert-all's rewrite and is silently lost (REV-05)"
+  grep -q 'flock' <<<"$_ra_code" \
+    && _v_ok "revert-all takes a flock around its read-replay-rewrite (no row lost mid-revert)" \
+    || _v_fail "revert-all never calls flock — a row appended between its snapshot and rewrite is silently dropped (REV-05)"
+  # (b) comma-escape helpers defined in ledger.sh AND consumed on the revert path.
+  if grep -qE '^[[:space:]]*ledger_escape_path[[:space:]]*\(\)' <<<"$_lg_code" \
+     && grep -qE '^[[:space:]]*ledger_unescape_path[[:space:]]*\(\)' <<<"$_lg_code"; then
+    _v_ok "ledger.sh defines ledger_escape_path/ledger_unescape_path (owned_paths comma-safe)"
+  else
+    _v_fail "ledger.sh lacks ledger_escape_path/ledger_unescape_path — a path containing a comma corrupts the owned_paths column (REV-05)"
+  fi
+  grep -q 'ledger_unescape_path' <<<"$_ra_code" \
+    && _v_ok "revert-all decodes owned_paths via ledger_unescape_path before splitting (comma-in-path round-trips)" \
+    || _v_fail "revert-all splits owned_paths on comma without ledger_unescape_path — a comma-bearing path reverts wrongly (REV-05)"
+fi
+
 step "iictl pack engine"
 # Bug-class guards for the online pack installer (#6). Generic +x/shebang/bash -n/
 # #help are already asserted by "iictl.d/ plugin architecture"; these add the
@@ -862,6 +899,59 @@ for h in archiso_pxe_nbd archiso_pxe_http archiso_pxe_nfs; do
     && _v_fail "HOOKS contains '$h' (needs nbd-client not in pacstrap)"
 done
 
+step "swapfile resume + cmdline fallback (INST-02)"
+# A swapfile cannot be resumed from by PATH: the kernel needs resume=<block
+# device> + resume_offset=<physical offset>. ii-prepare-bootloader used to emit
+# `resume=$(awk '{print $1}' <<< swap)` verbatim → `resume=/swapfile`, silently
+# breaking hibernation; the cmdline FALLBACK in ii-finish-systemd-boot dropped
+# LUKS cryptdevice= and resume= entirely; a non-UUID crypttab source produced a
+# malformed `cryptdevice=UUID=/dev/…`. This guards all three on the SOURCE
+# scripts (they run inside the target chroot, not in build/), plus table-tests
+# the pure swap-source classifier extracted from ii-prepare-bootloader.
+_PB="$SCRIPTS/runtime/ii-prepare-bootloader"
+_FB="$SCRIPTS/runtime/ii-finish-systemd-boot"
+if [[ ! -f "$_PB" || ! -f "$_FB" ]]; then
+  _v_fail "ii-prepare-bootloader / ii-finish-systemd-boot missing — INST-02 guard can't run"
+else
+  _inst02_ok=1
+  # (a) neither script emits the swapfile field-1 PATH bare as resume=. The old
+  #     line was `resume=$(awk '{print $1}' <<< "$swap")`; classification must
+  #     gate it now. Flag any resume= built directly from the swap field.
+  if grep -E 'resume=\$\(awk .*\$1.*<<< *"?\$swap' "$_PB" "$_FB" | grep -qv '^[^:]*:[[:space:]]*#'; then
+    _v_fail "a bootloader script still emits the swap field-1 verbatim as resume= → a swapfile path breaks resume (INST-02)"; _inst02_ok=0
+  fi
+  # (b) the swapfile branch must compute resume_offset= (filefrag / btrfs).
+  grep -q 'resume_offset=' "$_PB" \
+    || { _v_fail "ii-prepare-bootloader emits no resume_offset= — swapfile hibernation can't resume (INST-02)"; _inst02_ok=0; }
+  grep -qE 'filefrag|map-swapfile' "$_PB" \
+    || { _v_fail "ii-prepare-bootloader computes no swapfile offset (filefrag/btrfs) (INST-02)"; _inst02_ok=0; }
+  # (c) the cmdline fallback in ii-finish-systemd-boot must carry LUKS + resume.
+  grep -q 'cryptdevice=' "$_FB" \
+    || { _v_fail "ii-finish-systemd-boot cmdline fallback drops LUKS cryptdevice= → a LUKS fallback entry can't unlock (INST-02)"; _inst02_ok=0; }
+  grep -qE '(^|[^_])resume=' "$_FB" \
+    || { _v_fail "ii-finish-systemd-boot cmdline fallback drops resume= → fallback entry can't hibernate-resume (INST-02)"; _inst02_ok=0; }
+  # (d) crypttab source emitted VERBATIM, never re-wrapped as UUID=$stripped.
+  if grep -qE 'cryptdevice=UUID=\$\{?u' "$_PB"; then
+    _v_fail "ii-prepare-bootloader still wraps the crypttab source as UUID=\$u → malformed for a non-UUID source (INST-02)"; _inst02_ok=0
+  fi
+  # (e) table-test the pure classifier extracted from the source (no side effects).
+  if _cls=$(awk '/^ii_classify_swap_source\(\)/{p=1} p{print} p&&/^}/{exit}' "$_PB") && [[ -n "$_cls" ]]; then
+    if ( eval "$_cls"
+         [[ "$(ii_classify_swap_source 'UUID=x')"   == partition ]] &&
+         [[ "$(ii_classify_swap_source '/dev/sda2')" == partition ]] &&
+         [[ "$(ii_classify_swap_source 'LABEL=swap')" == partition ]] &&
+         [[ "$(ii_classify_swap_source '/swapfile')" == file ]] &&
+         [[ "$(ii_classify_swap_source '/var/swapfile')" == file ]] ); then
+      _v_ok "ii_classify_swap_source maps UUID/LABEL/dev→partition, paths→file (INST-02)"
+    else
+      _v_fail "ii_classify_swap_source misclassifies a swap source (INST-02)"; _inst02_ok=0
+    fi
+  else
+    _v_fail "could not extract ii_classify_swap_source from ii-prepare-bootloader (INST-02)"; _inst02_ok=0
+  fi
+  (( _inst02_ok )) && _v_ok "bootloader scripts never emit a swapfile path bare as resume=; fallback carries LUKS+resume (INST-02)"
+fi
+
 step "prebuild [$REPO_NAME] .sig hygiene (BUILD-01)"
 # repo-add rejects a detached signature ("not a package file") and, under
 # set -e, that aborts the whole build. A signing-enabled host (BUILDENV+=sign
@@ -934,6 +1024,115 @@ else
     || { _v_fail "prebuild no longer prunes obsolete cache members → [ii-extra] can shadow officials (PB-05)"; _pb_name_ok=0; }
   (( _pb_name_ok )) && _v_ok "prebuild matches by exact name + fixed-string DB + caches RPC + prunes (BUILD-03)"
 fi
+
+step "resolve-deps dependency discovery (BUILD-02)"
+# resolve-deps.py scrapes upstream's sdata/dist-arch/*/PKGBUILD into
+# packages.x86_64. The dependency-only meta-packages (no package() body) used to
+# be found ONLY via a hardcoded METAPKGS list; the structural rglob skipped them.
+# An upstream bump that ADDS such a meta-package would then silently drop its
+# depends from packages.x86_64 — a missing-dependency ISO with no error, and
+# `just update` bumps the pin without re-checking. Two guards (static, no root,
+# no network; mirrors the first_run.txt cross-check pattern):
+#   1. layout drift — the dist-arch PKGBUILD root exists, is non-empty, and every
+#      hardcoded METAPKGS entry still resolves to a real PKGBUILD (an upstream
+#      rename screams HERE, not at a user's broken install).
+#   2. structural discovery — resolve-deps.py must discover meta-packages by the
+#      illogical-impulse- pkgname prefix (not be reverted to hardcoded-only) and
+#      parse_depends must handle the append form (depends+=).
+_DISTARCH="$DOTS/sdata/dist-arch"
+_RESOLVE="$TOOLS/resolve-deps.py"
+if [[ ! -d "$_DISTARCH" ]]; then
+  _v_fail "dist-arch PKGBUILD root missing ($_DISTARCH) — resolve-deps.py scrapes nothing → packages.x86_64 loses every upstream dep (BUILD-02)"
+else
+  mapfile -t _da_pkgbuilds < <(find "$_DISTARCH" -name PKGBUILD -type f 2>/dev/null)
+  if (( ${#_da_pkgbuilds[@]} == 0 )); then
+    _v_fail "dist-arch root has no PKGBUILDs ($_DISTARCH) — upstream layout drifted; resolve-deps.py would emit empty lists (BUILD-02)"
+  else
+    _v_ok "dist-arch PKGBUILD root present (${#_da_pkgbuilds[@]} PKGBUILDs) (BUILD-02)"
+    # Every hardcoded METAPKGS entry must still resolve to a real PKGBUILD.
+    mapfile -t _metapkgs < <(
+      sed -nE '/^METAPKGS\s*=\s*\[/,/^\]/p' "$_RESOLVE" \
+        | grep -oE '"[^"]+"' | tr -d '"'
+    )
+    if (( ${#_metapkgs[@]} == 0 )); then
+      _v_warn "could not parse METAPKGS from resolve-deps.py — drift cross-check skipped (BUILD-02)"
+    else
+      _meta_miss=()
+      for _m in "${_metapkgs[@]}"; do
+        [[ -f "$_DISTARCH/$_m/PKGBUILD" ]] || _meta_miss+=("$_m")
+      done
+      (( ${#_meta_miss[@]} == 0 )) \
+        && _v_ok "all ${#_metapkgs[@]} METAPKGS entries resolve to a real dist-arch PKGBUILD (BUILD-02)" \
+        || _v_fail "METAPKGS entries missing from dist-arch (upstream renamed/removed): ${_meta_miss[*]} — their depends would never reach packages.x86_64 (BUILD-02)"
+    fi
+  fi
+fi
+# Structural-discovery guards: the regression is reverting to hardcoded-only
+# discovery (rglob limited to package()-bearing PKGBUILDs) or a parse_depends that
+# only reads the first literal depends=().
+if [[ ! -f "$_RESOLVE" ]]; then
+  _v_fail "tools/resolve-deps.py missing — no upstream dependency scraping (BUILD-02)"
+else
+  grep -Eq 'name\.startswith\(META_PREFIX\)' "$_RESOLVE" \
+    && _v_ok "resolve-deps.py discovers dependency-only meta-packages structurally by pkgname prefix (BUILD-02)" \
+    || _v_fail "resolve-deps.py no longer does structural meta-package discovery — an upstream-added meta-package would silently drop its depends (BUILD-02)"
+  grep -Eq 'depends.*\\\+\?=' "$_RESOLVE" \
+    && _v_ok "resolve-deps.py parse_depends handles append/arch-suffixed depends (BUILD-02)" \
+    || _v_warn "resolve-deps.py parse_depends may not handle depends+= / arch-suffixed arrays (BUILD-02)"
+fi
+
+step "archiso customize_airootfs hook guard (BUILD-05)"
+# chroot.sh is staged as /root/customize_airootfs.sh and run by mkarchiso via a
+# mechanism mkarchiso ITSELF warns is deprecated ("Support for it will be removed
+# in a future archiso version"). archiso is pulled UNPINNED from the host. If a
+# host bump drops the hook, the keyring/paru/wheelhouse/liveuser-seed/microcode-
+# stash/sanity-gate bootstrap SILENTLY stops running — the ISO still builds but
+# ships broken. Two halves, mirroring the CI-0x split:
+#   (a) the builder container PINS archiso AND fails its own build if the pinned
+#       mkarchiso no longer runs the hook (containers/builder.Dockerfile).
+#   (b) scripts/mkiso.sh re-checks the *installed* mkarchiso at build time and
+#       dies loudly if the hook reference is gone.
+# Plus: when an installed mkarchiso is on this validate host's PATH (it is on the
+# Arch CI container, but NOT necessarily a contributor laptop), assert the hook
+# directly. Static greps on tracked sources + a best-effort live binary probe.
+_DF="$ROOT/containers/builder.Dockerfile"
+_MKISO="$SCRIPTS/mkiso.sh"
+_b5_ok=1
+# (a) Dockerfile must pin archiso (archiso=… or an ARCHISO_PIN ARG) ...
+if [[ ! -f "$_DF" ]]; then
+  _v_fail "containers/builder.Dockerfile missing — BUILD-05 archiso pin unverifiable"; _b5_ok=0
+else
+  if grep -Eq 'archiso=\$\{?ARCHISO_PIN' "$_DF" || grep -Eq 'ARG[[:space:]]+ARCHISO_PIN=' "$_DF" || grep -Eq 'archiso=[0-9]' "$_DF"; then
+    _v_ok "builder.Dockerfile pins archiso (BUILD-05)"
+  else
+    _v_fail "builder.Dockerfile pulls archiso UNPINNED — a host bump dropping the customize_airootfs.sh hook would silently ship a broken ISO (BUILD-05)"; _b5_ok=0
+  fi
+  # ... and re-assert the hook against the pinned mkarchiso at image-build time.
+  if grep -q 'customize_airootfs' "$_DF"; then
+    _v_ok "builder.Dockerfile re-checks mkarchiso runs customize_airootfs.sh at image build (BUILD-05)"
+  else
+    _v_fail "builder.Dockerfile does not assert the pinned mkarchiso still runs customize_airootfs.sh (BUILD-05)"; _b5_ok=0
+  fi
+fi
+# (b) mkiso.sh must guard the installed mkarchiso before running it.
+if [[ ! -f "$_MKISO" ]]; then
+  _v_fail "scripts/mkiso.sh missing — BUILD-05 runtime guard unverifiable"; _b5_ok=0
+elif grep -q 'customize_airootfs' "$_MKISO"; then
+  _v_ok "mkiso.sh asserts the installed mkarchiso still runs customize_airootfs.sh before building (BUILD-05)"
+else
+  _v_fail "mkiso.sh runs an unpinned mkarchiso without checking it still runs customize_airootfs.sh — a silent hook drop ships a broken ISO (BUILD-05)"; _b5_ok=0
+fi
+# Live probe (best-effort; skipped where mkarchiso isn't installed, e.g. a laptop).
+if command -v mkarchiso >/dev/null 2>&1; then
+  if grep -q 'customize_airootfs\.sh' "$(command -v mkarchiso)" 2>/dev/null; then
+    _v_ok "installed mkarchiso ($(command -v mkarchiso)) runs customize_airootfs.sh (BUILD-05, live probe)"
+  else
+    _v_fail "installed mkarchiso ($(command -v mkarchiso)) NO LONGER references customize_airootfs.sh — the chroot bootstrap would not run (BUILD-05); pin/downgrade archiso or port chroot.sh off the deprecated hook"; _b5_ok=0
+  fi
+else
+  _v_warn "mkarchiso not on PATH — BUILD-05 live hook probe skipped (the Dockerfile pin + mkiso.sh guard still apply; this host can't build an ISO anyway)"
+fi
+(( _b5_ok )) && _v_ok "BUILD-05 archiso/customize_airootfs hook guard intact (pin + image-build assert + mkiso.sh runtime guard)"
 
 step "release.yml idempotent re-release (CI-02)"
 # The GitHub-release version $VER is the build DATE, so a same-day re-run or a

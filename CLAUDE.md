@@ -202,6 +202,19 @@ Don't "simplify" these away — each cost real debugging time:
   `set -e`, aborts the whole build. Every `*.pkg.tar.*` glob in `prebuild.sh`
   that feeds `repo-add` or the nvidia stash filters `.sig` (mirrors
   `chroot.sh`'s `_nv_pkgs`); `validate.sh` guards it (BUILD-01).
+- **Unpinned archiso silently dropping the `customize_airootfs.sh` hook** →
+  `chroot.sh` is staged as `/root/customize_airootfs.sh` and run by `mkarchiso`
+  via a mechanism `mkarchiso` ITSELF warns is deprecated ("Support for it will be
+  removed in a future archiso version"); archiso is pulled from the host package.
+  If a host bump drops the hook, the entire keyring/paru/wheelhouse/liveuser-seed/
+  microcode-stash/sanity-gate bootstrap SILENTLY stops running — the ISO still
+  BUILDS but ships broken. `containers/builder.Dockerfile` PINS archiso
+  (`ARCHISO_PIN`) and fails its own image build if the pinned `mkarchiso` no
+  longer references `customize_airootfs.sh`; `mkiso.sh` re-checks the actually-
+  installed `mkarchiso` at build time and dies loudly; `validate.sh` guards both
+  halves and probes the live binary when present (BUILD-05). To bump archiso,
+  raise `ARCHISO_PIN` only after re-confirming the hook survives. Don't unpin or
+  drop the guard — a host bump must fail LOUDLY, not silently.
 - **`gh release create` with a date-derived tag is not idempotent** → the
   release version is the build DATE, so a same-day cron re-run or a
   `workflow_dispatch` reuses it. `publish-sf.sh` overwrites the SourceForge

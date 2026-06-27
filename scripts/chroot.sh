@@ -81,7 +81,7 @@ fi
 # target by unpackfs. ii-post-install detects NVIDIA hardware there and
 # installs the right variant offline, then removes the stash.
 # AUR variants (nvidia-580xx-*) were prebuilt on the host and staged here
-# by mkiso.sh; we add the official ones + the full dependency closure.
+# by prebuild.sh; we add the official ones + the full dependency closure.
 step "NVIDIA driver stash → /usr/share/illogical-impulse/nvidia"
 NVSTASH=/usr/share/illogical-impulse/nvidia
 install -d "$NVSTASH"

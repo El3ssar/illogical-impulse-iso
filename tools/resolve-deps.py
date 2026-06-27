@@ -17,7 +17,12 @@ from __future__ import annotations
 import os, re, subprocess, sys
 from pathlib import Path
 
-# Hardcoded — these are upstream illogical-impulse meta-packages always present
+# Known-present baseline. NOT the discovery mechanism (that is structural — see
+# find_pkgbuilds below) but a drift tripwire: validate.sh (BUILD-02) asserts every
+# entry still resolves to a real PKGBUILD, so an upstream rename screams at build
+# time instead of silently shipping a missing-dependency ISO. Discovery no longer
+# depends on this list — a NEW dependency-only meta-package is picked up by its
+# `illogical-impulse-` pkgname + absent package() body, not by being hand-added here.
 METAPKGS = [
     "illogical-impulse-audio", "illogical-impulse-backlight",
     "illogical-impulse-basic", "illogical-impulse-fonts-themes",
@@ -29,14 +34,39 @@ METAPKGS = [
     "illogical-impulse-bibata-modern-classic-bin",
 ]
 
+# Prefix every upstream illogical-impulse meta-package shares. A dependency-only
+# meta-package (no package() body) is recognised structurally by this prefix, so
+# an upstream bump that adds a new one is scraped automatically.
+META_PREFIX = "illogical-impulse-"
+
+
+def _has_package_body(content: str) -> bool:
+    return bool(re.search(r"^\s*package\s*\(\)", content, re.MULTILINE))
+
 
 def find_pkgbuilds(root: Path) -> list[Path]:
-    pkgs = [p for name in METAPKGS
-            if (p := root / name / "PKGBUILD").is_file()]
-    for sub in root.rglob("PKGBUILD"):
-        if sub in pkgs or any(part.startswith(".") for part in sub.parts):
+    """Every PKGBUILD whose depends must be scraped, discovered STRUCTURALLY.
+
+    Two structural classes are collected (the hardcoded METAPKGS list is NOT a
+    discovery input — it is only cross-checked by validate.sh):
+      • locally-buildable PKGBUILDs   — have a package() body
+      • dependency-only meta-packages — no package() body, but the pkgname
+        starts with illogical-impulse- (these used to be found ONLY via the
+        hardcoded list; an upstream-added one was silently dropped — BUILD-02)
+    """
+    pkgs: list[Path] = []
+    for sub in sorted(root.rglob("PKGBUILD")):
+        # Skip dot-dirs WITHIN the tree, but only relative to root — an ancestor
+        # like .../.claude/worktrees/... must not poison every match (the absolute
+        # path is what prepare.sh passes in).
+        if any(part.startswith(".") for part in sub.relative_to(root).parts):
             continue
-        if re.search(r"^package\s*\(\)", sub.read_text(), re.MULTILINE):
+        content = sub.read_text()
+        if _has_package_body(content):
+            pkgs.append(sub)
+            continue
+        name = parse_pkgname(content)
+        if name and name.startswith(META_PREFIX):
             pkgs.append(sub)
     return pkgs
 
@@ -59,15 +89,23 @@ def parse_pkgname(content: str) -> str | None:
 
 
 def parse_depends(content: str) -> list[str]:
+    """Collect runtime deps from every depends array in a PKGBUILD.
+
+    Handles `depends=(...)`, append form `depends+=(...)`, and arch-suffixed
+    arrays (`depends_x86_64=(...)`, `depends_aarch64=(...)`) — all of which are
+    legitimate ways an upstream bump could declare a dependency. Tokens that
+    reference a `$var` are dropped (can't resolve them reliably here).
+    """
     content = re.sub(r"#[^\n]*", "", content)
-    m = re.search(r"depends\s*=\s*\((.*?)\)", content, re.DOTALL)
-    if not m:
-        return []
-    out = []
-    for tok in m.group(1).split():
-        tok = re.sub(r"[><=].*", "", tok.strip("'\"")).strip()
-        if tok and "$" not in tok:
-            out.append(tok)
+    out: list[str] = []
+    # depends, depends+=, depends_<arch>, depends_<arch>+=
+    for m in re.finditer(
+        r"\bdepends(?:_[A-Za-z0-9_]+)?\s*\+?=\s*\((.*?)\)", content, re.DOTALL
+    ):
+        for tok in m.group(1).split():
+            tok = re.sub(r"[><=].*", "", tok.strip("'\"")).strip()
+            if tok and "$" not in tok:
+                out.append(tok)
     return out
 
 
@@ -95,11 +133,11 @@ def main() -> int:
     all_deps: list[str] = []
     pkgbuilds = find_pkgbuilds(pkgbuild_dir)
 
-    # Pass 1: which PKGBUILDs are locally buildable
+    # Pass 1: which PKGBUILDs are locally buildable (have a package() body)
     for pb in pkgbuilds:
         content = pb.read_text()
         name = parse_pkgname(content)
-        if name and re.search(r"^package\s*\(\)", content, re.MULTILINE):
+        if name and _has_package_body(content):
             local_names.add(name)
             local_dirs.append(pb.parent)
 
