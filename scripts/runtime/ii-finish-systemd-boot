@@ -12,16 +12,75 @@ trap 'log "FATAL: unexpected error at line $LINENO: $BASH_COMMAND"' ERR
 ESP="${ESP:-/boot/efi}"
 [[ -d "$ESP" ]] || { log "no ESP at $ESP — skipping (non-UEFI install?)"; exit 0; }
 
+# ── resume helpers (mirror ii-prepare-bootloader; only used by the fallback) ─
+# The fallback path below must carry the SAME LUKS + resume tokens as the
+# primary writer — dropping cryptdevice=/resume= here strands an unbootable (or
+# un-resumable) entry. See ii-prepare-bootloader for the rationale; kept in sync.
+ii_classify_swap_source() {
+  case "$1" in
+    UUID=*|LABEL=*|PARTUUID=*|PARTLABEL=*|/dev/*) echo "partition" ;;
+    /*)                                           echo "file" ;;
+    *)                                            echo "partition" ;;
+  esac
+}
+ii_cryptdevice_token() {
+  local name="$1" source="$2"
+  [[ -n "$name" && -n "$source" ]] || return 0
+  echo "cryptdevice=$source:$name"
+}
+ii_swapfile_resume_offset() {
+  local file="$1" fstype="$2" off=""
+  [[ -f "$file" ]] || return 0
+  if [[ "$fstype" == btrfs ]]; then
+    command -v btrfs >/dev/null \
+      && off=$(btrfs inspect-internal map-swapfile -r "$file" 2>/dev/null | awk '{print $1}')
+  elif command -v filefrag >/dev/null; then
+    local phys_blk blk_sz pg_sz
+    phys_blk=$(filefrag -v "$file" 2>/dev/null \
+               | awk '/^[[:space:]]*0:/ { gsub(/\.\./,"",$4); print $4+0; exit }')
+    blk_sz=$(filefrag -v "$file" 2>/dev/null \
+             | sed -n 's/.*of \([0-9]\+\)-byte blocks.*/\1/p' | head -1)
+    [[ -z "$blk_sz" ]] && blk_sz=$(stat -f -c %S "$file" 2>/dev/null || echo 4096)
+    pg_sz=$(getconf PAGE_SIZE 2>/dev/null || echo 4096)
+    [[ -n "$phys_blk" && -n "$blk_sz" && "$pg_sz" -gt 0 ]] \
+      && off=$(( phys_blk * blk_sz / pg_sz ))
+  fi
+  [[ -n "$off" ]] && echo "$off"
+}
+
 # Kernel cmdline (ii-prepare-bootloader writes it; recompute here as fallback).
 CMDLINE_FILE=/etc/kernel/cmdline.d/illogical-impulse.conf
 if [[ ! -s "$CMDLINE_FILE" ]]; then
-  log "cmdline drop-in missing — recomputing from fstab"
+  log "cmdline drop-in missing — recomputing from fstab (incl. LUKS + resume)"
   parts=(loglevel=4 rootwait rw)
+  root_dev="" root_fstype=""
   root_line=$(grep -E '^\S+\s+/\s+' /etc/fstab 2>/dev/null | head -1 || true)
   if [[ -n "$root_line" ]]; then
-    parts+=("root=$(awk '{print $1}' <<< "$root_line")")
+    root_dev=$(awk '{print $1}' <<< "$root_line")
+    root_fstype=$(awk '{print $3}' <<< "$root_line")
+    parts+=("root=$root_dev")
     subvol=$(grep -oE 'subvol=[^,]+' <<< "$(awk '{print $4}' <<< "$root_line")" | cut -d= -f2 || true)
-    [[ -n "$subvol" ]] && parts+=("rootflags=subvol=$subvol")
+    [[ "$root_fstype" == btrfs && -n "$subvol" ]] && parts+=("rootflags=subvol=$subvol")
+  fi
+  if [[ -f /etc/crypttab ]]; then
+    while IFS= read -r line; do
+      [[ "$line" =~ ^[[:space:]]*(#|$) ]] && continue
+      m=$(awk '{print $1}' <<< "$line")
+      s=$(awk '{print $2}' <<< "$line")
+      tok=$(ii_cryptdevice_token "$m" "$s")
+      [[ -n "$tok" ]] && parts+=("$tok")
+    done < /etc/crypttab
+  fi
+  swap=$(grep -E '^\S+\s+none\s+swap' /etc/fstab 2>/dev/null | head -1 || true)
+  if [[ -n "$swap" ]]; then
+    swap_src=$(awk '{print $1}' <<< "$swap")
+    if [[ "$(ii_classify_swap_source "$swap_src")" == file ]]; then
+      off=$(ii_swapfile_resume_offset "$swap_src" "${root_fstype:-}")
+      [[ -n "$root_dev" && -n "$off" ]] && parts+=("resume=$root_dev" "resume_offset=$off") \
+        || log "WARN: swapfile $swap_src — no resume_offset; hibernation disabled"
+    else
+      parts+=("resume=$swap_src")
+    fi
   fi
   mkdir -p /etc/kernel/cmdline.d
   echo "${parts[*]}" > "$CMDLINE_FILE"
@@ -82,15 +141,21 @@ editor  no
 LOADER
 fi
 
-# hibernation: if swap partition exists, default lid to hibernate
-if grep -qE '^\S+\s+none\s+swap' /etc/fstab 2>/dev/null; then
+# hibernation: only default lid to hibernate when resume is actually WIRED.
+# Gating on a bare `none swap` fstab entry (the old test) breaks for a swapfile
+# whose resume_offset could not be computed — the cmdline then has no working
+# resume= and lid-close hibernate cannot come back. Gate on the resume= token
+# that ii-prepare-bootloader (or the fallback above) put on the cmdline instead.
+if grep -qE '(^| )resume=' <<< "$CMDLINE"; then
   mkdir -p /etc/systemd/logind.conf.d
   cat > /etc/systemd/logind.conf.d/hibernate.conf <<'HIB'
 [Login]
 HandleLidSwitch=hibernate
 HandleLidSwitchExternalPower=hibernate
 HIB
-  log "hibernation swap detected — logind set to hibernate on lid close"
+  log "resume= present on cmdline — logind set to hibernate on lid close"
+else
+  log "no resume= on cmdline — leaving logind lid handling at the default (no hibernate)"
 fi
 
 log "done"

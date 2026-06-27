@@ -765,6 +765,59 @@ for h in archiso_pxe_nbd archiso_pxe_http archiso_pxe_nfs; do
     && _v_fail "HOOKS contains '$h' (needs nbd-client not in pacstrap)"
 done
 
+step "swapfile resume + cmdline fallback (INST-02)"
+# A swapfile cannot be resumed from by PATH: the kernel needs resume=<block
+# device> + resume_offset=<physical offset>. ii-prepare-bootloader used to emit
+# `resume=$(awk '{print $1}' <<< swap)` verbatim → `resume=/swapfile`, silently
+# breaking hibernation; the cmdline FALLBACK in ii-finish-systemd-boot dropped
+# LUKS cryptdevice= and resume= entirely; a non-UUID crypttab source produced a
+# malformed `cryptdevice=UUID=/dev/…`. This guards all three on the SOURCE
+# scripts (they run inside the target chroot, not in build/), plus table-tests
+# the pure swap-source classifier extracted from ii-prepare-bootloader.
+_PB="$SCRIPTS/runtime/ii-prepare-bootloader"
+_FB="$SCRIPTS/runtime/ii-finish-systemd-boot"
+if [[ ! -f "$_PB" || ! -f "$_FB" ]]; then
+  _v_fail "ii-prepare-bootloader / ii-finish-systemd-boot missing — INST-02 guard can't run"
+else
+  _inst02_ok=1
+  # (a) neither script emits the swapfile field-1 PATH bare as resume=. The old
+  #     line was `resume=$(awk '{print $1}' <<< "$swap")`; classification must
+  #     gate it now. Flag any resume= built directly from the swap field.
+  if grep -E 'resume=\$\(awk .*\$1.*<<< *"?\$swap' "$_PB" "$_FB" | grep -qv '^[^:]*:[[:space:]]*#'; then
+    _v_fail "a bootloader script still emits the swap field-1 verbatim as resume= → a swapfile path breaks resume (INST-02)"; _inst02_ok=0
+  fi
+  # (b) the swapfile branch must compute resume_offset= (filefrag / btrfs).
+  grep -q 'resume_offset=' "$_PB" \
+    || { _v_fail "ii-prepare-bootloader emits no resume_offset= — swapfile hibernation can't resume (INST-02)"; _inst02_ok=0; }
+  grep -qE 'filefrag|map-swapfile' "$_PB" \
+    || { _v_fail "ii-prepare-bootloader computes no swapfile offset (filefrag/btrfs) (INST-02)"; _inst02_ok=0; }
+  # (c) the cmdline fallback in ii-finish-systemd-boot must carry LUKS + resume.
+  grep -q 'cryptdevice=' "$_FB" \
+    || { _v_fail "ii-finish-systemd-boot cmdline fallback drops LUKS cryptdevice= → a LUKS fallback entry can't unlock (INST-02)"; _inst02_ok=0; }
+  grep -qE '(^|[^_])resume=' "$_FB" \
+    || { _v_fail "ii-finish-systemd-boot cmdline fallback drops resume= → fallback entry can't hibernate-resume (INST-02)"; _inst02_ok=0; }
+  # (d) crypttab source emitted VERBATIM, never re-wrapped as UUID=$stripped.
+  if grep -qE 'cryptdevice=UUID=\$\{?u' "$_PB"; then
+    _v_fail "ii-prepare-bootloader still wraps the crypttab source as UUID=\$u → malformed for a non-UUID source (INST-02)"; _inst02_ok=0
+  fi
+  # (e) table-test the pure classifier extracted from the source (no side effects).
+  if _cls=$(awk '/^ii_classify_swap_source\(\)/{p=1} p{print} p&&/^}/{exit}' "$_PB") && [[ -n "$_cls" ]]; then
+    if ( eval "$_cls"
+         [[ "$(ii_classify_swap_source 'UUID=x')"   == partition ]] &&
+         [[ "$(ii_classify_swap_source '/dev/sda2')" == partition ]] &&
+         [[ "$(ii_classify_swap_source 'LABEL=swap')" == partition ]] &&
+         [[ "$(ii_classify_swap_source '/swapfile')" == file ]] &&
+         [[ "$(ii_classify_swap_source '/var/swapfile')" == file ]] ); then
+      _v_ok "ii_classify_swap_source maps UUID/LABEL/dev→partition, paths→file (INST-02)"
+    else
+      _v_fail "ii_classify_swap_source misclassifies a swap source (INST-02)"; _inst02_ok=0
+    fi
+  else
+    _v_fail "could not extract ii_classify_swap_source from ii-prepare-bootloader (INST-02)"; _inst02_ok=0
+  fi
+  (( _inst02_ok )) && _v_ok "bootloader scripts never emit a swapfile path bare as resume=; fallback carries LUKS+resume (INST-02)"
+fi
+
 step "prebuild [$REPO_NAME] .sig hygiene (BUILD-01)"
 # repo-add rejects a detached signature ("not a package file") and, under
 # set -e, that aborts the whole build. A signing-enabled host (BUILDENV+=sign
