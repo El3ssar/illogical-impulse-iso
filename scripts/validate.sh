@@ -423,6 +423,32 @@ if [[ -f "$POST_F" ]]; then
   else
     _v_fail "welcome execs.lua fence not recorded as a 'lua-block' row in ii-post-install — iictl revert-all can't strip it (static skel fence is unrevertable)"
   fi
+  # REV-02: install-time group memberships must go through the idempotent,
+  # ledger-recording ii_group_add mutator (tagged src=install) — NOT a raw
+  # `usermod -aG` (unledgered → `revert-all --deep` can't peel them; wheel is
+  # load-bearing for the nopasswd sudo drop-in) and NOT a raw `ledger_record
+  # group` (bypasses the mutator's idempotency + only-record-what-we-add
+  # contract). Comments stripped so the code-only lines are what we judge. The
+  # raw `usermod -aG video,input,...` survives ONLY as the dev-checkout fallback
+  # (gated behind a `type ii_group_add` else-branch); the install path must use
+  # ii_group_add. We assert: (a) ii_group_add is invoked, (b) it's tagged
+  # II_GROUP_SRC=install, and (c) no `ledger_record group` raw row remains.
+  _post_nc=$(grep -vE '^[[:space:]]*#' "$POST_F")
+  if grep -q 'ii_group_add' <<<"$_post_nc"; then
+    _v_ok "ii-post-install adds groups via ii_group_add (idempotent, ledgered, revertible)"
+  else
+    _v_fail "ii-post-install does not use ii_group_add for group memberships — raw usermod -aG is unledgered (revert-all --deep can't peel it)"
+  fi
+  if grep -q 'II_GROUP_SRC=install' <<<"$_post_nc"; then
+    _v_ok "ii-post-install tags install-time group rows src=install (II_GROUP_SRC=install → revert-all --deep gates them)"
+  else
+    _v_fail "ii-post-install group adds are not tagged II_GROUP_SRC=install — revert-all --deep can't distinguish them from iictl-time rows"
+  fi
+  if grep -Eq 'ledger_record[[:space:]]+group\b' <<<"$_post_nc"; then
+    _v_fail "ii-post-install records a group via raw ledger_record — route it through ii_group_add (idempotent + only-records-what-it-adds) instead"
+  else
+    _v_ok "ii-post-install records no raw 'ledger_record group' rows (group adds go through ii_group_add)"
+  fi
 fi
 
 step "first-run welcome suppression (skel marker)"

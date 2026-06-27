@@ -91,6 +91,20 @@ _is_install_row() {
   return 1
 }
 
+# _hint_user <hint> — extract the `user=<u>` value from a group row's restore_hint
+# by token scan, echoing just <u>. The hint is `user=<u>` and MAY also carry the
+# reserved `src=install` token (space-separated, order-independent), so a naive
+# `${hint#user=}` would fold the extra token into the username and break
+# gpasswd -d / the plan line. Returns non-zero (echoes nothing) when no `user=`
+# token is present so the caller can treat it as a missing hint.
+_hint_user() {
+  local tok
+  for tok in $1; do
+    [[ "$tok" == user=* ]] && { printf '%s' "${tok#user=}"; return 0; }
+  done
+  return 1
+}
+
 # ── fenced-block user-edit guard ─────────────────────────────────────────────
 # _extract_block_body <file> <name> — print the lines strictly inside the named
 # sentinel fence. Same exact-line fence match as mutator.sh's _ii_lua_strip.
@@ -144,7 +158,7 @@ _plan_line() {
     lua-block)       printf 'strip fenced block "%s" from %s' "$F_hint" "$F_target" ;;
     service)         printf 'disable service %s (was: %s)' "$F_target" "${F_hint:-disabled}" ;;
     service-disable) printf 're-enable service %s' "$F_target" ;;
-    group)           printf 'remove %s from group %s' "${F_hint#user=}" "$F_target" ;;
+    group)           printf 'remove %s from group %s' "$(_hint_user "$F_hint" || printf '?')" "$F_target" ;;
     chsh)            printf 'restore login shell of %s to %s' "$F_target" "$F_hint" ;;
     pkg|pack)        printf 'pacman -Rns %s' "$F_pkgs" ;;
     path|file)       printf 'remove path(s): %s' "$F_owned" ;;
@@ -185,8 +199,9 @@ _revert_row() {
       _sudo systemctl enable "$F_target" >/dev/null 2>&1 && return 0 || return 1
       ;;
     group)
-      local u="${F_hint#user=}"
-      [[ -n "$u" && "$u" != "$F_hint" ]] || { warn "group row missing user= hint — left in place"; return 1; }
+      local u; u="$(_hint_user "$F_hint")" \
+        || { warn "group row missing user= hint — left in place"; return 1; }
+      [[ -n "$u" ]] || { warn "group row missing user= hint — left in place"; return 1; }
       _sudo gpasswd -d "$u" "$F_target" >/dev/null 2>&1 && return 0 || return 1
       ;;
     chsh)
