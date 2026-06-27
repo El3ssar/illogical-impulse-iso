@@ -25,8 +25,15 @@ BASE="$CACHE/base"
 STAMP="$CACHE/base.stamp"
 # Minimal bootable rootfs + iictl's hard deps. Bump the tag when this set (or
 # the staging step below) changes, so the cached base is rebuilt on next run.
-BASE_PKGS=(base git sudo)
-BASE_TAG="v1: ${BASE_PKGS[*]}"
+# diffutils: mutator.sh's ii_lua_block_write/remove call `cmp` for idempotence —
+# it is NOT in `base`, so without it fenced-block writes warn "cmp: command not
+# found" and lose their byte-identical short-circuit. Any iictl behaviour test in
+# the box that touches a custom/*.lua slot needs it, so it belongs in the base.
+# curl: `iictl pack` installs members with pacman; in a non-booted nspawn box
+# pacman's internal libcurl downloader can deadlock, so tests point pacman's
+# XferCommand at the curl CLI — `base` only pulls libcurl, not the binary.
+BASE_PKGS=(base git sudo diffutils curl)
+BASE_TAG="v3: ${BASE_PKGS[*]}"
 
 usage() {
   cat >&2 <<EOF
@@ -110,6 +117,19 @@ _stage "etc/$DISTRO_ID"
 _stage etc/skel
 [[ -f "$BUILD/airootfs/etc/os-release" ]] \
   && install -Dm0644 "$BUILD/airootfs/etc/os-release" "$BASE/etc/os-release"
+
+# A working pacman config + mirrorlist so the box can install on demand — this is
+# what `iictl pack` needs (its whole point). `pacstrap base` does not reliably
+# leave a usable /etc/pacman.conf in the target (it is a backup-array file the
+# host pacman uses for the install, not necessarily written into the root), so a
+# bare box hits "config file /etc/pacman.conf could not be read" on the first
+# `pacman -S{y,i}` — which makes the pack engine misclassify official members as
+# AUR. Seed the host's known-good config + mirrors (only if absent, so a base
+# that already has them is left alone).
+for _pf in /etc/pacman.conf /etc/pacman.d/mirrorlist; do
+  [[ -f "$BASE$_pf" ]] && continue
+  [[ -f "$_pf" ]] && install -Dm0644 "$_pf" "$BASE$_pf"
+done
 ok "runtime layer staged"
 
 # ── 3. boot ephemerally — every write below the base is discarded on exit ────
@@ -118,7 +138,18 @@ ok "runtime layer staged"
 # the first positional. systemd-nspawn stops option parsing at the first
 # non-option, so that stray arg makes it ignore -D and fall back to $PWD as the
 # container dir ("doesn't look like it has an OS tree. Refusing.").
-NS=( systemd-nspawn -q --volatile=overlay -D "$BASE" --hostname="$DISTRO_ID" )
+# --register=no --keep-unit: do NOT register the container with systemd-machined
+# and do NOT create a transient scope unit for it (use whatever unit/scope we are
+# already in). This pairing is the systemd-nspawn-documented way to run when NOT
+# launched from a service manager. On a real systemd host it is harmless — the
+# disposable box needs no machined bookkeeping or its own scope. In a CI
+# container where systemd is NOT PID 1 (e.g. the test-revert.yml
+# `archlinux:base-devel` runner) it is REQUIRED: without it nspawn tries to
+# register + open the host system bus and dies at startup ("Failed to open system
+# bus" / "Failed to retrieve machine ID"), and its /run/systemd/nspawn/propagate
+# teardown trips. Interactive `just nspawn` on a real host is unaffected (it just
+# runs inside the caller's existing session scope instead of a fresh one).
+NS=( systemd-nspawn -q --register=no --keep-unit --volatile=overlay -D "$BASE" --hostname="$DISTRO_ID" )
 if (( $# )); then
   step "one-shot in throwaway $DISTRO_ID: $*   (changes discarded on exit)"
   exec "${NS[@]}" /bin/bash -c "$*"

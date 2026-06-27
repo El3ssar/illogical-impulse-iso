@@ -51,6 +51,11 @@ preview app="":
 nspawn *args:
     ./scripts/nspawn.sh {{ quote(args) }}
 
+# Iron Law round-trip: seed the ledger via the real mutators + pack engine in a
+# throwaway nspawn box, run `iictl revert-all`, assert vanilla returns (needs root)
+test-revert:
+    ./tests/revert-roundtrip.sh
+
 # remove build/
 clean:
     ./scripts/clean.sh

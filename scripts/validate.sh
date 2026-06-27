@@ -607,6 +607,47 @@ else
   fi
 fi
 
+step "reversibility round-trip e2e test (TEST-02)"
+# The static checks above assert the reversibility STRUCTURE; the e2e test
+# (tests/revert-roundtrip.sh + its in-container payload) DEMONSTRATES it — seed
+# the ledger via the real mutators + pack engine in a throwaway `just nspawn`
+# box, run `iictl revert-all`, assert vanilla returns byte-for-byte. This static
+# guard keeps the demonstration itself from silently rotting: both halves must
+# exist, parse, and be wired into a `just` recipe + CI (it needs root + nspawn,
+# so it is NOT run here — `just test-revert` / the test-revert.yml job run it).
+_E2E_DRV="$ROOT/tests/revert-roundtrip.sh"
+_E2E_PAY="$ROOT/tests/revert-roundtrip.in.sh"
+for _e2e in "$_E2E_DRV" "$_E2E_PAY"; do
+  if [[ ! -f "$_e2e" ]]; then
+    _v_fail "reversibility e2e test missing: ${_e2e#"$ROOT"/}"
+  elif bash -n "$_e2e" 2>/dev/null; then
+    _v_ok "${_e2e#"$ROOT"/} present + bash -n clean"
+  else
+    _v_fail "${_e2e#"$ROOT"/} has a syntax error"
+  fi
+done
+# The payload must actually drive the four ledger-kind seams the ticket names
+# (so the demonstration can never quietly shrink to a weaker subset).
+if [[ -f "$_E2E_PAY" ]]; then
+  _e2e_miss=0
+  for _need in ii_service_enable ii_group_add ii_lua_block_write 'iictl pack install' 'revert-all'; do
+    grep -qF -- "$_need" "$_E2E_PAY" || { _v_fail "e2e payload never exercises '$_need'"; _e2e_miss=$((_e2e_miss+1)); }
+  done
+  (( _e2e_miss == 0 )) \
+    && _v_ok "e2e payload seeds all four ledger kinds (service/group/lua-block/pack) + runs revert-all"
+fi
+# Wired into the just surface (so the maintainer + CI can invoke it).
+grep -qE '^test-revert:' "$ROOT/justfile" \
+  && _v_ok "'just test-revert' recipe wires the round-trip into the just surface" \
+  || _v_fail "no 'test-revert' recipe in justfile — the round-trip is not invocable via just"
+# Wired into CI (a dedicated workflow runs it per-PR on a privileged runner).
+if [[ -f "$ROOT/.github/workflows/test-revert.yml" ]] \
+   && grep -q 'test-revert' "$ROOT/.github/workflows/test-revert.yml"; then
+  _v_ok "test-revert.yml CI workflow runs the round-trip per-PR"
+else
+  _v_fail ".github/workflows/test-revert.yml missing or does not invoke the round-trip"
+fi
+
 step "iictl pack engine"
 # Bug-class guards for the online pack installer (#6). Generic +x/shebang/bash -n/
 # #help are already asserted by "iictl.d/ plugin architecture"; these add the

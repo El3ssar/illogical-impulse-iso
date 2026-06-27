@@ -1,0 +1,113 @@
+# test-revert.yml — the Iron Law end-to-end round-trip test (TEST-02, #81).
+#
+# Complements validate.yml (the static ~55-check audit) with a DYNAMIC proof of
+# the project's central promise: seed a few ledger kinds through the real
+# mutators + the real `iictl pack` engine, run `iictl revert-all`, and assert the
+# box is byte-for-byte back to vanilla. See tests/revert-roundtrip.in.sh.
+#
+# Unlike validate.yml this needs a REAL container at runtime: the test boots a
+# throwaway systemd-nspawn box (`just nspawn`, #31), which needs root, pacstrap,
+# and the ability to mount an overlay/tmpfs — hence the privileged Arch
+# container. It does NOT build an ISO (Tier-2 of the test ladder, far cheaper
+# than the release bake), so it is cheap enough to GATE every PR.
+#
+# Running systemd-nspawn inside a GitHub-Actions Docker container (no PID-1
+# systemd) needs a stack of setup, all handled by the steps below + nspawn.sh:
+#   • a machine-id, recursively-private mounts, and a tmpfs /run/systemd so the
+#     box boots and tears down cleanly (nspawn.sh also passes --register=no
+#     --keep-unit);
+#   • the demo pack's members pre-seeded into the base's pacman cache from the
+#     HOST, because `pacman`'s package download is unreliable in the nested
+#     network namespace — with the .pkg files cached the box installs offline.
+# The in-box pacman is also told SigLevel=Never / no ParallelDownloads / a curl
+# XferCommand and has its alpm hooks disabled (the box's gpg-agent + the absent
+# PID-1 systemd would otherwise stall the transaction). With all that the FULL
+# round-trip — including the kind=pack install + `pacman -Rns` inverse — passes,
+# so this job GATES the PR: a broken mutator inverse reds it.
+name: test-revert
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  revert-roundtrip:
+    runs-on: ubuntu-latest
+    # Cap the job so a future environment regression (a genuine nspawn hang)
+    # fails fast instead of burning the default 6h budget. The test passes well
+    # under this on a working runner.
+    timeout-minutes: 20
+    container:
+      image: archlinux:base-devel
+      # systemd-nspawn + pacstrap + --volatile=overlay (tmpfs/overlay mounts)
+      # need a privileged container with /dev access. Without this the nspawn
+      # launch cannot create the container namespace and the test cannot run.
+      options: --privileged
+    steps:
+      - name: Install dependencies (pacstrap, nspawn, rsync, just)
+        run: pacman -Syu --noconfirm git rsync python archiso just arch-install-scripts
+
+      - name: Checkout (with dots submodule)
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory '*'
+
+      - name: Assemble the runtime layer (stages iictl + survive-path libs)
+        run: just prepare
+
+      # systemd is NOT PID 1 in this container, and the base image has no
+      # /etc/machine-id — so systemd-nspawn fails "Failed to retrieve machine
+      # ID". Generate one (systemd-machine-id-setup ships with systemd; no extra
+      # package). Even with nspawn.sh's --register=no, nspawn still creates a
+      # propagate bind-mount under /run/systemd/nspawn/propagate/<machine> and,
+      # at teardown, REFUSES to remove it when /run/systemd is a plain directory
+      # on the container overlay ("Attempted to remove disk file system under
+      # /run/systemd/nspawn/propagate/base, and we can't allow that"). Mounting a
+      # tmpfs at /run/systemd makes that propagate dir live on a real mount nspawn
+      # can cleanly tear down — the standard nspawn-in-Docker remedy.
+      - name: Provision a machine-id + private mounts for systemd-nspawn
+        run: |
+          systemd-machine-id-setup
+          # The GHA service container's mounts are SHARED-propagation; nspawn
+          # sets up its own mount tree (--volatile=overlay + binds) and the
+          # outer process dies during that setup ("Parent died too early") when
+          # propagation isn't private. Make the mount tree recursively private
+          # first (needs --privileged, which this job has).
+          mount --make-rprivate /
+          # tmpfs at /run/systemd so nspawn's propagate bind-mount lives on a
+          # real mount it can cleanly tear down (otherwise it refuses to remove
+          # the propagate dir off the container overlay at teardown).
+          mkdir -p /run/systemd
+          mount -t tmpfs tmpfs /run/systemd
+
+      # Pre-seed the demo pack's members into the nspawn base's pacman cache from
+      # the HOST (whose pacman + network work fine). Inside the nested nspawn box
+      # `pacman -S`'s package retrieval deadlocks in the nested network namespace;
+      # with the .pkg.tar.zst files already in /var/cache/pacman/pkg, the box's
+      # `pacman -S sl cowsay` installs from cache with NO download — so the real
+      # pack engine + the real `pacman -Rns` inverse are exercised offline, with
+      # no nested-netns network dependency. A warmup `just nspawn true` builds the
+      # base first (idempotent; the round-trip reuses it via the base stamp).
+      - name: Warm the nspawn base pacman cache with the demo pack members
+        run: |
+          just nspawn true || true   # build/refresh the cached base rootfs
+          BASE=.nspawn-cache/base
+          if [[ -d "$BASE" ]]; then
+            pacman -Sy --noconfirm
+            pacman -Sw --noconfirm --cachedir "$BASE/var/cache/pacman/pkg" sl cowsay
+            ls -1 "$BASE/var/cache/pacman/pkg"/{sl,cowsay}-*.pkg.tar.* 2>/dev/null || true
+          fi
+
+      # The round-trip seeds via the real mutators + pack engine, runs
+      # `iictl revert-all`, and asserts vanilla returns byte-for-byte. All 19
+      # assertions (service / group / fenced custom/*.lua byte-for-byte / the
+      # kind=pack install + pacman -Rns inverse / ledger drain) pass here, so a
+      # non-zero exit means a real reversibility regression → red PR (the point
+      # of the test). The step timeout is a fail-fast guard for a future
+      # environment hang.
+      - name: Reversibility round-trip (just test-revert)
+        timeout-minutes: 15
+        run: just test-revert
