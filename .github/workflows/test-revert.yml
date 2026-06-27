@@ -9,22 +9,21 @@
 # throwaway systemd-nspawn box (`just nspawn`, #31), which needs root, pacstrap,
 # and the ability to mount an overlay/tmpfs — hence the privileged Arch
 # container. It does NOT build an ISO (Tier-2 of the test ladder, far cheaper
-# than the release bake).
+# than the release bake), so it is cheap enough to GATE every PR.
 #
-# NON-BLOCKING (continue-on-error) — and why. Running systemd-nspawn inside a
-# GitHub-Actions Docker container (no PID-1 systemd) needs a stack of
-# workarounds (machine-id, rprivate mounts, tmpfs /run/systemd, --register=no
-# --keep-unit in nspawn.sh). With those, the box boots and the round-trip runs:
-# every reversibility assertion — service / group / fenced custom/*.lua
-# byte-for-byte / ledger drain — PASSES. The ONLY leg that doesn't complete here
-# is the `iictl pack install`: `pacman`'s package-retrieval/commit deadlocks in
-# the NESTED nspawn-in-Docker network/mount namespace (the db sync works; the
-# package transaction stalls regardless of SigLevel/ParallelDownloads/XferCommand
-# tuning). That is a CI-sandbox limitation, NOT a reversibility bug. So this job
-# is informational on GitHub: it exercises the box and surfaces logs, but does
-# not gate the PR. The AUTHORITATIVE gate is `just test-revert` on a real systemd
-# host (the maintainer's bake host — see the PR "How to test"), where the full
-# round-trip including the pack leg passes.
+# Running systemd-nspawn inside a GitHub-Actions Docker container (no PID-1
+# systemd) needs a stack of setup, all handled by the steps below + nspawn.sh:
+#   • a machine-id, recursively-private mounts, and a tmpfs /run/systemd so the
+#     box boots and tears down cleanly (nspawn.sh also passes --register=no
+#     --keep-unit);
+#   • the demo pack's members pre-seeded into the base's pacman cache from the
+#     HOST, because `pacman`'s package download is unreliable in the nested
+#     network namespace — with the .pkg files cached the box installs offline.
+# The in-box pacman is also told SigLevel=Never / no ParallelDownloads / a curl
+# XferCommand and has its alpm hooks disabled (the box's gpg-agent + the absent
+# PID-1 systemd would otherwise stall the transaction). With all that the FULL
+# round-trip — including the kind=pack install + `pacman -Rns` inverse — passes,
+# so this job GATES the PR: a broken mutator inverse reds it.
 name: test-revert
 
 on:
@@ -34,12 +33,10 @@ on:
 jobs:
   revert-roundtrip:
     runs-on: ubuntu-latest
-    # Informational on GitHub (the nested-nspawn pack leg can't complete here —
-    # see the header); a red/timed-out run must not block the PR. The real gate
-    # is `just test-revert` on a systemd host. NB: continue-on-error swallows a
-    # STEP failure (incl. a step timeout) — NOT a job-level `timeout-minutes`
-    # cancellation, which would still red the job. So the cap lives on the test
-    # STEP below, and that step carries its own continue-on-error.
+    # Cap the job so a future environment regression (a genuine nspawn hang)
+    # fails fast instead of burning the default 6h budget. The test passes well
+    # under this on a working runner.
+    timeout-minutes: 20
     container:
       image: archlinux:base-devel
       # systemd-nspawn + pacstrap + --volatile=overlay (tmpfs/overlay mounts)
@@ -105,12 +102,12 @@ jobs:
           fi
 
       # The round-trip seeds via the real mutators + pack engine, runs
-      # `iictl revert-all`, and asserts vanilla returns byte-for-byte. On a real
-      # systemd host every leg passes; in this nested-nspawn sandbox the pack
-      # leg's pacman transaction stalls (see the header), so the step is
-      # informational here: continue-on-error + a step timeout keep a stall from
-      # reding the PR while still running the box and surfacing the logs.
+      # `iictl revert-all`, and asserts vanilla returns byte-for-byte. All 19
+      # assertions (service / group / fenced custom/*.lua byte-for-byte / the
+      # kind=pack install + pacman -Rns inverse / ledger drain) pass here, so a
+      # non-zero exit means a real reversibility regression → red PR (the point
+      # of the test). The step timeout is a fail-fast guard for a future
+      # environment hang.
       - name: Reversibility round-trip (just test-revert)
-        continue-on-error: true
-        timeout-minutes: 12
+        timeout-minutes: 15
         run: just test-revert
