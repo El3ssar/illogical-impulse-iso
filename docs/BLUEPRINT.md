@@ -226,12 +226,22 @@ no-bespoke-stripping bug-class.
 
 - **Two-tier (`--deep`)** — the default scope undoes *iictl-time* user choices
   (the common case). `--deep` additionally peels *install-time* distro setup
-  recorded by `ii-post-install` (e.g. the `docker` group). A row is install-time
-  iff its `restore_hint` carries the reserved **`src=install`** token (the
-  forward-compatible marker any install-flow recorder appends) **or** it matches
-  a known ii-post-install signature (today: `group docker`, the compat shim for
-  the row that predates the marker — extend the shim as `ii-post-install` grows
-  its reversible setup, or append `src=install` to new install-time rows).
+  recorded by `ii-post-install` (the six baseline group memberships
+  `video input i2c render audio wheel` plus the `docker` group). A row is
+  install-time iff its `restore_hint` carries the reserved **`src=install`**
+  token (the forward-compatible marker any install-flow recorder appends)
+  **or** it matches a known ii-post-install signature (the `group docker` compat
+  shim for legacy ledgers written before the marker — kept so an already-shipped
+  install still gates docker under `--deep`; extend the shim as `ii-post-install`
+  grows its reversible setup, or append `src=install` to new install-time rows).
+  Install-flow group adds opt in via `ii_group_add` (`mutator.sh`) with
+  **`II_GROUP_SRC=install`** in the environment — it appends `src=install` to the
+  `user=<u>` hint (the two tokens are space-separated and order-independent;
+  revert-all extracts `user=` by token scan so they never collide). `wheel` is
+  load-bearing — it makes the baked nopasswd-sudo drop-in effective — so it is
+  deliberately install-tier: a plain `iictl revert-all` leaves it, only `--deep`
+  peels it. Pack post-add hooks call `ii_group_add` *without* `II_GROUP_SRC`, so
+  their memberships are iictl-tier (a plain revert undoes them).
 - **`--dry-run`** prints the ordered plan and makes zero changes (the codepath a
   future Control Center "preview revert" reuses).
 - **Per-feature `--revert`** — a domain plugin reverts just its own ledger rows

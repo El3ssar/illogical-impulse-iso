@@ -14,11 +14,37 @@ mkdir -p "$(dirname "$LOG")"
 # parity with session-offline; the actual install-time row is recorded as the
 # NEW USER further below so it lands in their state dir, not root's.
 [[ -f /usr/local/lib/ii/ledger.sh ]] && source /usr/local/lib/ii/ledger.sh
+# mutator.sh is a survive-path lib too — it gives us the idempotent, ledger-
+# recording ii_group_add primitive (it re-sources ledger.sh harmlessly). Used
+# for the install-time group memberships below so `iictl revert-all --deep` can
+# peel exactly the ones we add.
+[[ -f /usr/local/lib/ii/mutator.sh ]] && source /usr/local/lib/ii/mutator.sh
 type ii_tee_log &>/dev/null && ii_tee_log "$LOG" \
   || { exec 3>&1; exec > >(tee -a "$LOG" >&3); exec 2>&1; }
 
 T()   { echo "[post-install] $*"; }
 try() { local d="$1"; shift; if "$@"; then T "  ok    $d"; else T "  warn  $d (rc=$?)"; fi; }
+
+# ii_group_add_for <home> <user> <group...> — run the sourced ii_group_add
+# mutator (install-tagged) so its ledger row lands in the NEW USER's state dir.
+# ii_group_add is a shell function, so it can't go through `env <fn>`; we run a
+# fresh bash that re-sources mutator.sh with HOME/XDG_STATE_HOME pointed at the
+# user and II_GROUP_SRC=install set (real assignments, not a prefix on `source`).
+# The mutation needs root; afterwards we chown any dirs we just created so the
+# ledger is owned by the new user (revert-all runs as them).
+ii_group_add_for() {
+  local home="$1" user="$2"; shift 2
+  HOME="$home" XDG_STATE_HOME="$home/.local/state" II_GROUP_SRC=install \
+    bash -c 'source /usr/local/lib/ii/mutator.sh; ii_group_add "$@"' _ "$user" "$@"
+  local rc=$?
+  # Fix ownership up the chain we may have created as root (state dir/.local
+  # usually pre-exist from skel, but a reused /home without skel may not).
+  local d="$home/.local" s="$home/.local/state" l="$home/.local/state/illogical-impulse"
+  [[ -d "$l" ]] && chown -R "$user:$user" "$l" 2>/dev/null || true
+  [[ -d "$s" ]] && chown "$user:$user" "$s" 2>/dev/null || true
+  [[ -d "$d" ]] && chown "$user:$user" "$d" 2>/dev/null || true
+  return $rc
+}
 
 T "==== $(date -u +%FT%TZ) ===="
 
@@ -28,7 +54,25 @@ NEW_USER=$(getent passwd 2>/dev/null \
 T "new user: ${NEW_USER:-<unknown>}"
 
 # ── groups ─────────────────────────────────────────────────────────────────
-if [[ -n "$NEW_USER" ]]; then
+# Route the six baseline memberships (video input i2c render audio wheel) through
+# the idempotent ledger-recording ii_group_add mutator (it groupadd -f's each
+# group first, so the old standalone `groupadd -f i2c` is subsumed) instead of a
+# raw `usermod -aG`. ii_group_add records ONLY the memberships it actually adds,
+# tagged src=install (via II_GROUP_SRC) so revert-all's _is_install_row gates them
+# under --deep — a plain `iictl revert-all` leaves them (wheel is load-bearing:
+# it makes the baked nopasswd-sudo drop-in effective), but `--deep` peels them
+# back to the user's pre-existing groups. The mutation needs root, but the ledger
+# row must land in the NEW USER's state dir (revert-all runs as them) — so we
+# point HOME/XDG_STATE_HOME at the user's home and chown the ledger to them after,
+# mirroring the docker block's "record as the new user" intent.
+if [[ -n "$NEW_USER" ]] && type ii_group_add &>/dev/null; then
+  H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
+  if [[ -n "$H" && -d "$H" ]]; then
+    try "ledger group memberships ($NEW_USER)" \
+      ii_group_add_for "$H" "$NEW_USER" video input i2c render audio wheel
+  fi
+elif [[ -n "$NEW_USER" ]]; then
+  # mutator.sh unavailable (dev checkout) — fall back to the raw adds, unledgered.
   try "groupadd i2c"               groupadd -f i2c
   try "usermod -aG ... $NEW_USER"  usermod -aG video,input,i2c,render,audio,wheel "$NEW_USER"
 fi
@@ -137,24 +181,22 @@ NVCONF
 fi
 
 # ── docker (baked): socket activation + group membership ──────────────────
+# The docker group add is install-time distro setup, not vanilla upstream — route
+# it through the same ii_group_add mutator (tagged src=install) so the row is
+# ledgered identically to the baseline groups above and `iictl revert-all --deep`
+# peels it (a plain revert leaves it). Mutate as root, land the ledger in the new
+# user's state dir, then chown — mirroring the baseline-groups block.
 if [[ -e /usr/lib/systemd/system/docker.socket ]]; then
   install -d /etc/systemd/system/sockets.target.wants
   ln -sf /usr/lib/systemd/system/docker.socket /etc/systemd/system/sockets.target.wants/docker.socket
-  [[ -n "$NEW_USER" ]] && getent group docker >/dev/null \
-    && try "docker group" usermod -aG docker "$NEW_USER"
-fi
-
-# ── ledger: record install-time distro setup in the NEW USER's state dir ──
-# The docker group add above is install-time distro setup, not part of vanilla
-# upstream — record it so `iictl revert-all --deep` (#4) can peel it. Recorded
-# AS the new user (env-passing mirrors the ii-ensure-venv block below) so the
-# ledger lands in their ~/.local/state, not root's. Fail-soft via try.
-if [[ -n "$NEW_USER" && -r /usr/local/lib/ii/ledger.sh ]] && getent group docker >/dev/null 2>&1; then
-  H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
-  if [[ -n "$H" && -d "$H" ]]; then
-    try "ledger: docker group" sudo -u "$NEW_USER" env \
-      HOME="$H" XDG_STATE_HOME="$H/.local/state" II_USER="$NEW_USER" \
-      bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record group docker "" "" "user=$II_USER"'
+  if [[ -n "$NEW_USER" ]] && getent group docker >/dev/null 2>&1; then
+    if type ii_group_add &>/dev/null; then
+      H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
+      [[ -n "$H" && -d "$H" ]] \
+        && try "docker group ($NEW_USER)" ii_group_add_for "$H" "$NEW_USER" docker
+    else
+      try "docker group" usermod -aG docker "$NEW_USER"   # dev-checkout fallback
+    fi
   fi
 fi
 
