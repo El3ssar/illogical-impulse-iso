@@ -118,16 +118,18 @@ ok "runtime layer staged"
 # the first positional. systemd-nspawn stops option parsing at the first
 # non-option, so that stray arg makes it ignore -D and fall back to $PWD as the
 # container dir ("doesn't look like it has an OS tree. Refusing.").
-# --register=no: do NOT register the container with systemd-machined. On a real
-# systemd host this just skips the machined bookkeeping (harmless — the
-# disposable box needs none of it). In a CI container where systemd is NOT PID 1
-# (e.g. the test-revert.yml `archlinux:base-devel` runner), registration is what
-# fails: nspawn tries to set up /run/systemd/nspawn/propagate + retrieve a
-# machine-id and dies ("Failed to retrieve machine ID" / "Attempted to remove
-# disk file system under /run/systemd/nspawn/propagate"). Skipping it lets the
-# throwaway box launch with no host systemd. Interactive `just nspawn` is
-# unaffected.
-NS=( systemd-nspawn -q --register=no --volatile=overlay -D "$BASE" --hostname="$DISTRO_ID" )
+# --register=no --keep-unit: do NOT register the container with systemd-machined
+# and do NOT create a transient scope unit for it (use whatever unit/scope we are
+# already in). This pairing is the systemd-nspawn-documented way to run when NOT
+# launched from a service manager. On a real systemd host it is harmless — the
+# disposable box needs no machined bookkeeping or its own scope. In a CI
+# container where systemd is NOT PID 1 (e.g. the test-revert.yml
+# `archlinux:base-devel` runner) it is REQUIRED: without it nspawn tries to
+# register + open the host system bus and dies at startup ("Failed to open system
+# bus" / "Failed to retrieve machine ID"), and its /run/systemd/nspawn/propagate
+# teardown trips. Interactive `just nspawn` on a real host is unaffected (it just
+# runs inside the caller's existing session scope instead of a fresh one).
+NS=( systemd-nspawn -q --register=no --keep-unit --volatile=overlay -D "$BASE" --hostname="$DISTRO_ID" )
 if (( $# )); then
   step "one-shot in throwaway $DISTRO_ID: $*   (changes discarded on exit)"
   exec "${NS[@]}" /bin/bash -c "$*"
