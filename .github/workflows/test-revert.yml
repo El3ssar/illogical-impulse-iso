@@ -40,6 +40,15 @@ jobs:
       - name: Assemble the runtime layer (stages iictl + survive-path libs)
         run: just prepare
 
+      # systemd is NOT PID 1 in this container, and the base image has no
+      # /etc/machine-id — so systemd-nspawn's "Failed to retrieve machine ID".
+      # Generate one (systemd-machine-id-setup ships with systemd; no extra
+      # package). Combined with nspawn.sh's --register=no (which skips the
+      # machined registration + /run/systemd/nspawn/propagate path that needs
+      # host PID-1 systemd), the throwaway container launches headlessly here.
+      - name: Provision a machine-id (systemd-nspawn needs one)
+        run: systemd-machine-id-setup
+
       # The round-trip seeds via the real mutators + pack engine, runs
       # `iictl revert-all`, and asserts vanilla returns byte-for-byte. A broken
       # mutator inverse fails an assertion → non-zero → red job (that is the

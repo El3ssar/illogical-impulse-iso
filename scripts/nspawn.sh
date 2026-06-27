@@ -118,7 +118,16 @@ ok "runtime layer staged"
 # the first positional. systemd-nspawn stops option parsing at the first
 # non-option, so that stray arg makes it ignore -D and fall back to $PWD as the
 # container dir ("doesn't look like it has an OS tree. Refusing.").
-NS=( systemd-nspawn -q --volatile=overlay -D "$BASE" --hostname="$DISTRO_ID" )
+# --register=no: do NOT register the container with systemd-machined. On a real
+# systemd host this just skips the machined bookkeeping (harmless — the
+# disposable box needs none of it). In a CI container where systemd is NOT PID 1
+# (e.g. the test-revert.yml `archlinux:base-devel` runner), registration is what
+# fails: nspawn tries to set up /run/systemd/nspawn/propagate + retrieve a
+# machine-id and dies ("Failed to retrieve machine ID" / "Attempted to remove
+# disk file system under /run/systemd/nspawn/propagate"). Skipping it lets the
+# throwaway box launch with no host systemd. Interactive `just nspawn` is
+# unaffected.
+NS=( systemd-nspawn -q --register=no --volatile=overlay -D "$BASE" --hostname="$DISTRO_ID" )
 if (( $# )); then
   step "one-shot in throwaway $DISTRO_ID: $*   (changes discarded on exit)"
   exec "${NS[@]}" /bin/bash -c "$*"
