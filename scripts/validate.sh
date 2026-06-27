@@ -794,6 +794,59 @@ else
   (( _pb_sig_ok )) && _v_ok "prebuild filters detached .sig from every repo-add/stash glob (BUILD-01)"
 fi
 
+step "archiso customize_airootfs hook guard (BUILD-05)"
+# chroot.sh is staged as /root/customize_airootfs.sh and run by mkarchiso via a
+# mechanism mkarchiso ITSELF warns is deprecated ("Support for it will be removed
+# in a future archiso version"). archiso is pulled UNPINNED from the host. If a
+# host bump drops the hook, the keyring/paru/wheelhouse/liveuser-seed/microcode-
+# stash/sanity-gate bootstrap SILENTLY stops running — the ISO still builds but
+# ships broken. Two halves, mirroring the CI-0x split:
+#   (a) the builder container PINS archiso AND fails its own build if the pinned
+#       mkarchiso no longer runs the hook (containers/builder.Dockerfile).
+#   (b) scripts/mkiso.sh re-checks the *installed* mkarchiso at build time and
+#       dies loudly if the hook reference is gone.
+# Plus: when an installed mkarchiso is on this validate host's PATH (it is on the
+# Arch CI container, but NOT necessarily a contributor laptop), assert the hook
+# directly. Static greps on tracked sources + a best-effort live binary probe.
+_DF="$ROOT/containers/builder.Dockerfile"
+_MKISO="$SCRIPTS/mkiso.sh"
+_b5_ok=1
+# (a) Dockerfile must pin archiso (archiso=… or an ARCHISO_PIN ARG) ...
+if [[ ! -f "$_DF" ]]; then
+  _v_fail "containers/builder.Dockerfile missing — BUILD-05 archiso pin unverifiable"; _b5_ok=0
+else
+  if grep -Eq 'archiso=\$\{?ARCHISO_PIN' "$_DF" || grep -Eq 'ARG[[:space:]]+ARCHISO_PIN=' "$_DF" || grep -Eq 'archiso=[0-9]' "$_DF"; then
+    _v_ok "builder.Dockerfile pins archiso (BUILD-05)"
+  else
+    _v_fail "builder.Dockerfile pulls archiso UNPINNED — a host bump dropping the customize_airootfs.sh hook would silently ship a broken ISO (BUILD-05)"; _b5_ok=0
+  fi
+  # ... and re-assert the hook against the pinned mkarchiso at image-build time.
+  if grep -q 'customize_airootfs' "$_DF"; then
+    _v_ok "builder.Dockerfile re-checks mkarchiso runs customize_airootfs.sh at image build (BUILD-05)"
+  else
+    _v_fail "builder.Dockerfile does not assert the pinned mkarchiso still runs customize_airootfs.sh (BUILD-05)"; _b5_ok=0
+  fi
+fi
+# (b) mkiso.sh must guard the installed mkarchiso before running it.
+if [[ ! -f "$_MKISO" ]]; then
+  _v_fail "scripts/mkiso.sh missing — BUILD-05 runtime guard unverifiable"; _b5_ok=0
+elif grep -q 'customize_airootfs' "$_MKISO"; then
+  _v_ok "mkiso.sh asserts the installed mkarchiso still runs customize_airootfs.sh before building (BUILD-05)"
+else
+  _v_fail "mkiso.sh runs an unpinned mkarchiso without checking it still runs customize_airootfs.sh — a silent hook drop ships a broken ISO (BUILD-05)"; _b5_ok=0
+fi
+# Live probe (best-effort; skipped where mkarchiso isn't installed, e.g. a laptop).
+if command -v mkarchiso >/dev/null 2>&1; then
+  if grep -q 'customize_airootfs\.sh' "$(command -v mkarchiso)" 2>/dev/null; then
+    _v_ok "installed mkarchiso ($(command -v mkarchiso)) runs customize_airootfs.sh (BUILD-05, live probe)"
+  else
+    _v_fail "installed mkarchiso ($(command -v mkarchiso)) NO LONGER references customize_airootfs.sh — the chroot bootstrap would not run (BUILD-05); pin/downgrade archiso or port chroot.sh off the deprecated hook"; _b5_ok=0
+  fi
+else
+  _v_warn "mkarchiso not on PATH — BUILD-05 live hook probe skipped (the Dockerfile pin + mkiso.sh guard still apply; this host can't build an ISO anyway)"
+fi
+(( _b5_ok )) && _v_ok "BUILD-05 archiso/customize_airootfs hook guard intact (pin + image-build assert + mkiso.sh runtime guard)"
+
 step "release.yml idempotent re-release (CI-02)"
 # The GitHub-release version $VER is the build DATE, so a same-day re-run or a
 # workflow_dispatch reuses it — and publish-sf.sh has ALREADY overwritten the
