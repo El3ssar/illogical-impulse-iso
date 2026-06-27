@@ -1,0 +1,49 @@
+# test-revert.yml — the Iron Law end-to-end round-trip test (TEST-02, #81).
+#
+# Complements validate.yml (the static ~55-check audit) with a DYNAMIC proof of
+# the project's central promise: seed a few ledger kinds through the real
+# mutators + the real `iictl pack` engine, run `iictl revert-all`, and assert the
+# box is byte-for-byte back to vanilla. See tests/revert-roundtrip.in.sh.
+#
+# Unlike validate.yml this needs a REAL container at runtime: the test boots a
+# throwaway systemd-nspawn box (`just nspawn`, #31), which needs root, pacstrap,
+# and the ability to mount an overlay/tmpfs — hence the privileged Arch
+# container. It does NOT build an ISO (Tier-2 of the test ladder, far cheaper
+# than the release bake), so it is cheap enough to run per-PR.
+name: test-revert
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  revert-roundtrip:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+      # systemd-nspawn + pacstrap + --volatile=overlay (tmpfs/overlay mounts)
+      # need a privileged container with /dev access. Without this the nspawn
+      # launch cannot create the container namespace and the test cannot run.
+      options: --privileged
+    steps:
+      - name: Install dependencies (pacstrap, nspawn, rsync, just)
+        run: pacman -Syu --noconfirm git rsync python archiso just arch-install-scripts
+
+      - name: Checkout (with dots submodule)
+        uses: actions/checkout@v5
+        with:
+          submodules: recursive
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory '*'
+
+      - name: Assemble the runtime layer (stages iictl + survive-path libs)
+        run: just prepare
+
+      # The round-trip seeds via the real mutators + pack engine, runs
+      # `iictl revert-all`, and asserts vanilla returns byte-for-byte. A broken
+      # mutator inverse fails an assertion → non-zero → red job (that is the
+      # point of the test). The pack member install reaches the public mirrors;
+      # the GitHub container has network, so the pack inverse is exercised too.
+      - name: Reversibility round-trip (just test-revert)
+        run: just test-revert
