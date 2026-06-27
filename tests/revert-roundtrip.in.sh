@@ -169,14 +169,26 @@ chown -R "$TESTUSER":"$TESTUSER" "$USER_HOME/.local" "$USER_HOME/.config" 2>/dev
 # have it). A failure here is reported and fails the test rather than being
 # silently skipped, so an offline run is loud, not a false green.
 PACK_TESTED=skipped
-# Refresh the sync db first: the throwaway base was pacstrapped with a snapshot
-# db, and the pack engine classifies each member official-vs-AUR with
-# `pacman -Si <m>` — a stale/empty db misclassifies the official demo members
-# (sl, cowsay) as AUR and triggers a paru bootstrap that needs base-devel. A
-# plain `pacman -Sy` makes `pacman -Si` resolve them as official so they install
-# via `pacman -S` with no AUR path. (Setup concern only; the engine is unchanged.)
+# Refresh the sync db FIRST. The throwaway --volatile=overlay container starts
+# from the pacstrapped base whose /var/lib/pacman/sync is unpopulated for this
+# session, and the pack engine classifies each member official-vs-AUR with
+# `pacman -Si <m>` (iictl.d/pack): an empty db misclassifies the official demo
+# members (sl, cowsay — both in [extra]) as AUR and triggers a paru bootstrap
+# that needs base-devel (absent in the minimal base). A successful `pacman -Sy`
+# makes `pacman -Si` resolve them as official so they install via `pacman -S`
+# with NO AUR path. (Setup-only; the pack engine itself is unchanged.) We run as
+# root here (the in-container payload is root before any as_user call).
 _info "refreshing pacman sync db so the pack engine classifies members correctly"
-pacman -Sy --noconfirm >/dev/null 2>&1 || warn "pacman -Sy failed (offline?) — pack classification may fall back to AUR"
+if pacman -Sy --noconfirm; then
+  _pass "pacman sync db refreshed (sl/cowsay now classify as official)"
+else
+  _fail "pacman -Sy failed — pack member classification will fall back to AUR"
+fi
+# Sanity: pacstrap imported archlinux-keyring, so signature checks on the [extra]
+# members should pass despite the harmless gpg-agent warnings during pacstrap.
+# If the db somehow predates a keyring rotation, top it up (best-effort, quiet).
+pacman -Sy --noconfirm archlinux-keyring >/dev/null 2>&1 || true
+
 _info "installing pack '$PACK' (real iictl pack engine; needs network)"
 if as_user iictl pack install "$PACK"; then
   PACK_TESTED=engine
