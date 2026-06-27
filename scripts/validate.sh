@@ -609,6 +609,36 @@ else
   else
     _v_ok "pack engine makes no [ii-extra] assumption (installs from public mirrors + AUR)"
   fi
+  # (e) ATOMIC RECORDING (REV-03 / #67). The success path MUST record the
+  # kind=pack row BEFORE running the post-add hook — otherwise a post-add that
+  # exit/die's would leave the just-installed members with no ledger row
+  # (`pack remove` → "not installed", `revert-all` can't undo them). Assert the
+  # FIRST line that records a pack row (a ledger_record pack OR the factored
+  # _record_pack helper) precedes the FIRST _run_hook ... post-add invocation in
+  # cmd_install. Line-number ordering over the comment-stripped code.
+  _pk_rec_ln="$(grep -nE '(ledger_record[[:space:]]+pack|_record_pack)' "$PK" | grep -vE '^[0-9]+:[[:space:]]*#' | head -n1 | cut -d: -f1)"
+  _pk_hook_ln="$(grep -nE '_run_hook[^#]*post-add' "$PK" | grep -vE '^[0-9]+:[[:space:]]*#' | head -n1 | cut -d: -f1)"
+  if [[ -n "$_pk_rec_ln" && -n "$_pk_hook_ln" && "$_pk_rec_ln" -lt "$_pk_hook_ln" ]]; then
+    _v_ok "pack engine records the kind=pack row BEFORE the post-add hook (atomic on hook failure, REV-03)"
+  else
+    _v_fail "pack engine runs the post-add hook before recording the pack row — a die()-ing hook would orphan the install (REV-03/#67)"
+  fi
+  # (f) The AUR-phase failure path must record what landed instead of die()-ing
+  # with the misleading 'nothing recorded' line: after an official `pacman -S`
+  # commits, a later paru failure that aborts BEFORE recording orphans the
+  # official members. Forbid the old misleading message and require a record
+  # call on the failure side (the paru branch must reach a pack-record).
+  if grep -qE 'nothing recorded \(no half state\)' "$PK"; then
+    _v_fail "pack engine still emits 'nothing recorded (no half state)' on a partial-commit failure — official members can be orphaned (REV-03/#67)"
+  else
+    _v_ok "pack engine no longer claims 'no half state' on partial failure (records what landed, REV-03)"
+  fi
+  # (g) post-add hooks are subshell-fenced so a stray exit/die can't abort the
+  # engine before/after the row is recorded. Require the hook source to run in a
+  # ( … ) subshell.
+  grep -qE '\([[:space:]]*source[[:space:]]+"\$hook"[[:space:]]*\)' "$PK" \
+    && _v_ok "pack engine subshell-fences sourced hooks (a hook exit/die can't abort the engine, REV-03)" \
+    || _v_fail "pack engine sources hooks unfenced — a hook that exit/die's aborts the engine before recording (REV-03/#67)"
 fi
 # (e) no pack NAME is a string-prefix of another. `iictl pack remove X` delegates
 # `iictl revert-all pack:X`, whose filter matches a target EXACTLY OR AS A PREFIX
