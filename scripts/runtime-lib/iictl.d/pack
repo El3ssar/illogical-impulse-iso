@@ -119,14 +119,26 @@ _ensure_paru() {
 # already in scope here (ii_service_enable, ii_group_add, ii_lua_block_write …,
 # each ledger-recording with its inverse) and so mkarchiso's +x mode-strip can
 # never disarm them. The fragment sees PACK_NAME and PACK_LIST.
+#
+# REV-03: the hook body is SOURCED inside a SUBSHELL. A hook that calls die()/
+# exit (or trips `set -e`) must NOT abort the engine before the kind=pack row is
+# recorded — otherwise official members would stay installed with no ledger row
+# (`pack remove` → "not installed", `revert-all` cannot undo them). The subshell
+# contains a stray exit; the engine always survives to finish recording. This is
+# safe because every reversible side effect a hook may apply (systemctl enable,
+# usermod, fenced custom/*.lua writes, AND the ledger rows the mutators append)
+# is file-/system-backed and so persists across the subshell boundary — only
+# shell-variable state is lost, which the hook contract never exports back.
 _run_hook() {
   local PACK_NAME="$1" PACK_PHASE="$2"
   local PACK_LIST="$II_OPTDIR/$PACK_NAME.list"
   local hook="$II_OPTDIR/$PACK_NAME.d/$PACK_PHASE"
   [[ -r "$hook" ]] || return 0
   echo "${C_B}>> running '$PACK_NAME' $PACK_PHASE hook${C_0}"
-  # shellcheck source=/dev/null
-  source "$hook" || warn "'$PACK_NAME' $PACK_PHASE hook reported an error"
+  # Subshell-fence: a hook that exit/die's inside ( … ) kills only the subshell,
+  # not the engine. Its disk/system side effects (incl. mutator ledger rows)
+  # still land. shellcheck source=/dev/null
+  ( source "$hook" ) || warn "'$PACK_NAME' $PACK_PHASE hook reported an error (continuing — pack already recorded)"
 }
 
 # ── subcommands ──────────────────────────────────────────────────────────────
@@ -236,39 +248,79 @@ cmd_install() {
   # No controlling terminal (e.g. the welcome card console) → fully non-interactive.
   local CONFIRM=(); [[ -t 0 ]] || CONFIRM=(--noconfirm)
 
-  # Snapshot the installed set so we can record EXACTLY what the transaction adds
-  # (members + the deps they pull) — that resolved set is what `remove` -Rns's.
-  local before after resolved
+  # Snapshot the installed set BEFORE the transaction so we can record EXACTLY
+  # what was added (members + the deps they pull) — that resolved set is what
+  # `remove`/`revert-all` later -Rns's. _resolved_since prints the new packages.
+  local before
   before="$(pacman -Qq | sort)"
+  _resolved_since() {   # echo, space-joined, the packages installed since $before
+    local r; r="$(comm -13 <(printf '%s\n' "$before") <(pacman -Qq | sort) | tr '\n' ' ')"
+    printf '%s' "${r% }"
+  }
 
   echo "${C_B}>> installing pack '$name'${C_0} (${#official[@]} official, ${#aur[@]} AUR)"
+
+  # REV-03 ATOMIC RECORDING. The old flow committed the official `pacman -S`
+  # first and only `ledger_record`ed AFTER a later `paru -S`; if the AUR phase
+  # die()'d, the official members stayed installed with NO ledger row — invisible
+  # to `pack remove` and `revert-all`. Fix: whenever a member install partially
+  # lands, the kind=pack row is recorded for what landed BEFORE we surface the
+  # failure, so removal/revert always finds and undoes exactly what was added.
   if (( ${#official[@]} > 0 )); then
-    _sudo pacman -S --needed "${CONFIRM[@]}" "${official[@]}" \
-      || die "official-repo install failed — nothing recorded (no half state)"
+    if ! _sudo pacman -S --needed "${CONFIRM[@]}" "${official[@]}"; then
+      _record_pack "$name" "$(_resolved_since)" "${members[*]}"
+      die "official-repo install failed — recorded what landed; undo with: iictl pack remove $name"
+    fi
   fi
   if (( ${#aur[@]} > 0 )); then
-    paru -S --needed "${CONFIRM[@]}" "${aur[@]}" \
-      || die "AUR install via paru failed — nothing recorded (no half state)"
+    if ! paru -S --needed "${CONFIRM[@]}" "${aur[@]}"; then
+      # The official phase already committed; record it (+ any AUR member paru
+      # managed to land) so it is not orphaned, THEN surface the real failure.
+      _record_pack "$name" "$(_resolved_since)" "${members[*]}"
+      die "AUR install via paru failed — recorded what landed; undo with: iictl pack remove $name"
+    fi
   fi
 
-  after="$(pacman -Qq | sort)"
-  resolved="$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | tr '\n' ' ')"
-  resolved="${resolved% }"
+  # Both package phases succeeded. Record the kind=pack row NOW — BEFORE post-add
+  # — so a post-add hook that exit/die's (even though _run_hook subshell-fences
+  # it) can never leave the installed members unrecorded.
+  _record_pack "$name" "$(_resolved_since)" "${members[*]}"
 
   # Optional post-add hook (services/groups/fenced custom/*.lua via the shared
-  # mutators — each ledger-records its own inverse). Convention only here.
+  # mutators — each ledger-records its own inverse). Subshell-fenced (_run_hook):
+  # a stray exit/die cannot abort the engine now that the pack row is recorded.
   _run_hook "$name" post-add
 
-  # Record one kind=pack row: target=pack:<name>, packages=<resolved set>. An
-  # empty resolved set (every member already present) is recorded as-is, so
-  # `remove` correctly removes nothing we did not add. revert-all reads column 4.
-  ledger_record pack "pack:$name" "$resolved" "" "members=${members[*]}"
+  # Re-snapshot AFTER post-add: a hook may pull extra packages. Capture any net-new
+  # ones into a SECOND kind=pack row so `revert-all pack:<name>` -Rns's them too
+  # (the old code snapshotted before post-add and lost hook-installed packages).
+  # The first row (recorded above, pre-hook) is guaranteed even if post-add died.
+  local resolved recorded extra
+  resolved="$(_resolved_since)"
+  recorded="$(ledger_query pack "pack:$name" | head -n1 | cut -f4)"   # first row, col 4
+  if [[ "$resolved" != "$recorded" ]]; then
+    extra="$(comm -13 <(printf '%s\n' "$recorded" | tr ' ' '\n' | sort -u) \
+                      <(printf '%s\n' "$resolved" | tr ' ' '\n' | sort -u) | tr '\n' ' ')"
+    extra="${extra% }"
+    [[ -n "${extra// /}" ]] && _record_pack "$name" "$extra" "post-add"
+  fi
 
   if [[ -n "${resolved// /}" ]]; then
     ok "pack '$name' installed (added: $resolved) — reversible via: iictl pack remove $name"
   else
     ok "pack '$name' marked installed — all members were already present (nothing added)"
   fi
+}
+
+# _record_pack <name> <resolved-pkgs> <members-or-tag> — append ONE kind=pack
+# ledger row for this pack (target=pack:<name>, packages=<resolved set>). Factored
+# out (REV-03) so every code path — official-fail, AUR-fail, success, and the
+# post-add top-up — records through the SAME primitive. An empty resolved set
+# (every member already present) is recorded as-is so `remove` correctly removes
+# nothing we did not add; revert-all reads column 4.
+_record_pack() {
+  local name="$1" resolved="$2" tag="$3"
+  ledger_record pack "pack:$name" "$resolved" "" "members=$tag"
 }
 
 cmd_remove() {
