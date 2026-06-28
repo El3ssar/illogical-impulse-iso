@@ -43,6 +43,11 @@ fn iictl_bin() -> String {
 /// Load a domain's spec — from `$IICTL_TUI_SPEC` (a file, for tests) or by
 /// running `iictl <domain> --spec`. Public so the renderer can reload after an
 /// apply to refresh the displayed `current` state.
+///
+/// The override is honored on EVERY call, including `App::apply`'s post-apply
+/// reload — we re-read the env var and re-read the file each time rather than
+/// caching, so a fixture that rewrites `$IICTL_TUI_SPEC` between applies sees the
+/// fresh `current` (the override must not pin the spec to its launch-time state).
 pub fn load_spec(domain: &str) -> R<Spec> {
     let json = if let Ok(path) = env::var("IICTL_TUI_SPEC") {
         std::fs::read_to_string(&path)
@@ -139,5 +144,55 @@ fn main() {
     if let Err(e) = result {
         eprintln!("iictl-tui: {e}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    // Regression for `spec-reload-ignores-tui-spec-override-doc`: a reload via
+    // `load_spec` must RE-READ the `$IICTL_TUI_SPEC` file, so a fixture that
+    // rewrites it between applies sees fresh `current` state (the override must
+    // not pin the spec to its launch-time content). `set_var`/`remove_var` are
+    // process-global, so serialize this test against itself.
+    #[test]
+    fn reload_rereads_tui_spec_override() {
+        let dir = env::temp_dir();
+        let path = dir.join(format!("iictl-tui-reload-{}.json", std::process::id()));
+
+        let write = |current: &str| {
+            let json = format!(
+                r#"{{ "domain": "demo", "controls": [
+                  {{ "id":"a","type":"choice","label":"A","current":"{current}",
+                     "options":[{{"value":"x"}},{{"value":"y"}}],"apply":["demo","set","%v"] }}
+                ] }}"#
+            );
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(json.as_bytes()).unwrap();
+        };
+
+        // edition 2021: env::set_var is safe. Single-threaded test; we set and
+        // clear the var within this test.
+        env::set_var("IICTL_TUI_SPEC", &path);
+
+        write("x");
+        let s1 = load_spec("demo").unwrap();
+        match &s1.controls[0] {
+            Control::Choice { current, .. } => assert_eq!(current, "x"),
+            _ => panic!("expected a choice control"),
+        }
+
+        // simulate state changing on disk between applies — the reload must see it.
+        write("y");
+        let s2 = load_spec("demo").unwrap();
+        match &s2.controls[0] {
+            Control::Choice { current, .. } => assert_eq!(current, "y"),
+            _ => panic!("expected a choice control"),
+        }
+
+        env::remove_var("IICTL_TUI_SPEC");
+        let _ = std::fs::remove_file(&path);
     }
 }

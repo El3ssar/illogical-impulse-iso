@@ -221,8 +221,15 @@ impl App {
 
     /// Build the picker rows for control `idx`. For a list control with no inline
     /// `options` but a `candidates` argv, fetch the candidate set for `source`.
+    ///
+    /// `idx` may be stale after a reload shrank `self.spec.controls`, so we index
+    /// via `.get()` and return an empty set (rather than panicking) when it is now
+    /// out of bounds.
     fn build_items(&self, idx: usize, source: usize, term: &mut Term) -> R<Vec<PickItem>> {
-        match &self.spec.controls[idx] {
+        let Some(ctrl) = self.spec.controls.get(idx) else {
+            return Ok(vec![]);
+        };
+        match ctrl {
             Control::Choice {
                 current, options, ..
             } => Ok(options
@@ -276,9 +283,10 @@ impl App {
             _ => return Ok(()),
         };
         // clone the source names so no borrow of self.spec is held across the
-        // later `self.status` / `self.mode` mutations.
-        let sources: Vec<String> = match &self.spec.controls[idx] {
-            Control::List { sources, .. } => sources.clone(),
+        // later `self.status` / `self.mode` mutations. `idx` may be stale after a
+        // reload shrank the controls, so index via `.get()`.
+        let sources: Vec<String> = match self.spec.controls.get(idx) {
+            Some(Control::List { sources, .. }) => sources.clone(),
             _ => return Ok(()),
         };
         if sources.len() < 2 {
@@ -315,7 +323,13 @@ impl App {
             (*idx, item.value.clone(), item.marked)
         };
 
-        match self.spec.controls[idx].clone() {
+        // `idx` may be stale after a reload shrank the controls; bail to Browse
+        // instead of indexing out of bounds.
+        let Some(ctrl) = self.spec.controls.get(idx).cloned() else {
+            self.mode = Mode::Browse;
+            return Ok(());
+        };
+        match ctrl {
             Control::Choice { apply, .. } => {
                 self.apply(term, &subst(&apply, &value, None))?;
                 self.mode = Mode::Browse;
@@ -378,12 +392,31 @@ impl App {
         })?;
         term.clear()?;
         self.status = format!("applied: iictl {}", argv.join(" "));
-        // Reload the spec so `current` reflects what just changed.
+        // Reload the spec so `current` reflects what just changed. The reload goes
+        // through `crate::load_spec`, which re-reads `$IICTL_TUI_SPEC` when set —
+        // so a fixture that rewrites that file between applies shows fresh state
+        // (rather than the stale spec we were launched with).
         match crate::load_spec(&self.domain) {
             Ok(s) => self.spec = s,
             Err(e) => self.status = format!("applied, but reload failed: {e}"),
         }
+        // The reload can shrink `controls` (e.g. removing the last installed pack):
+        // clamp the selection and drop any picker now pointing past the end so no
+        // later `controls[idx]` indexes out of bounds.
+        self.clamp_indices();
         Ok(())
+    }
+
+    /// Keep `self.sel` and any open picker in range after the spec was reloaded
+    /// (a reload can shrink `self.spec.controls`). Idempotent and cheap.
+    fn clamp_indices(&mut self) {
+        let n = self.spec.controls.len();
+        self.sel = clamp_sel(self.sel, n);
+        if let Mode::Picker { idx, .. } = &self.mode {
+            if *idx >= n {
+                self.mode = Mode::Browse;
+            }
+        }
     }
 
     // ── rendering ─────────────────────────────────────────────────────────
@@ -475,9 +508,13 @@ impl App {
             Mode::Picker { idx, source, .. } => (*idx, *source),
             _ => return,
         };
-        let label = self.spec.controls[idx].label().to_string();
-        let is_list = matches!(self.spec.controls[idx], Control::List { .. });
-        let source_hint = match &self.spec.controls[idx] {
+        // `idx` can be stale after a reload shrank the controls — guard the index.
+        let Some(ctrl) = self.spec.controls.get(idx) else {
+            return;
+        };
+        let label = ctrl.label().to_string();
+        let is_list = matches!(ctrl, Control::List { .. });
+        let source_hint = match ctrl {
             Control::List { sources, .. } if sources.len() > 1 => {
                 format!("  [source: {} — Tab]", sources[source])
             }
@@ -558,6 +595,17 @@ fn control_summary(ctrl: &Control) -> String {
     }
 }
 
+/// Clamp a selection index into `[0, len)`. `len == 0` collapses to 0 (an empty
+/// controls list selects nothing; callers guard the empty case before indexing).
+/// Used after a spec reload that can shrink the controls list.
+fn clamp_sel(sel: usize, len: usize) -> usize {
+    if len == 0 {
+        0
+    } else {
+        sel.min(len - 1)
+    }
+}
+
 fn move_list(state: &mut ListState, len: usize, delta: i32) {
     if len == 0 {
         return;
@@ -622,4 +670,29 @@ fn suspend<F: FnOnce()>(term: &mut Term, body: F) -> R<()> {
         EnableMouseCapture
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression for `unchecked-idx-after-reload`: a reload that SHRINKS the
+    // controls list must leave the selection in range, never past the end.
+    #[test]
+    fn clamp_sel_after_shrink_stays_in_range() {
+        // selection was on the 5th control; the spec reloaded down to 2 controls.
+        assert_eq!(clamp_sel(4, 2), 1);
+        // boundary: selection exactly at the old last index, list halved.
+        assert_eq!(clamp_sel(3, 2), 1);
+        // an empty controls list collapses to 0 (callers guard before indexing).
+        assert_eq!(clamp_sel(4, 0), 0);
+    }
+
+    #[test]
+    fn clamp_sel_in_range_is_identity() {
+        assert_eq!(clamp_sel(0, 3), 0);
+        assert_eq!(clamp_sel(2, 3), 2);
+        // already at the last valid index — unchanged.
+        assert_eq!(clamp_sel(2, 3), 2);
+    }
 }
