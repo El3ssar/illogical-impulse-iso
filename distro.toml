@@ -34,7 +34,10 @@ name = "ii-extra"
 path = "/var/cache/ii-extra-repo"
 
 [build]
-# Canonical containerized build image (phase 4 — not wired yet).
+# Documented name of the containerized build image (phase 4, shipped). The
+# `just image`/`just docked` recipes hardcode this same tag in the justfile;
+# no pipeline script reads this key — it is documentation, not wiring. Keep it
+# in sync with the justfile if the tag ever changes.
 container_image = "ii-builder:latest"
 
 [release]

@@ -1530,6 +1530,28 @@ step "additive/reversibility lint"
 # gates the build).
 lint_additive || true
 
+step "docs drift guard (DOC-01)"
+# Non-fatal (WARN) sentinels: the doc-drift sweep (DOC-01) corrected two stale
+# claims that had crept into four+ docs — a fixed "~55 checks" validate count
+# (this script now has ~150) and "phases 4–5 … pending" (the builder container,
+# just docked, and release CI all shipped). Warn — never fail — if either string
+# reappears, so a future edit re-introducing the drift is surfaced loudly without
+# blocking the build. Operates on the tracked source docs, not build/.
+_dd_docs=("$ROOT/CLAUDE.md" "$ROOT/README.md" "$ROOT/docs/BLUEPRINT.md" "$ROOT/docs/GUIDE.md" "$ROOT/distro.toml")
+_dd_hits=0
+for _dd in "${_dd_docs[@]}"; do
+  [[ -f "$_dd" ]] || continue
+  if grep -qiE '~?55[ -](check|assertion)' "$_dd"; then
+    _v_warn "$(basename "$_dd"): stale '~55 checks' validate count — update to the real count (DOC-01/DD-03)"
+    _dd_hits=$((_dd_hits+1))
+  fi
+  if grep -qiE 'phases?[ ]*4[–-]?5?.*(pending|not wired)|phase 4 — not wired|phases 4–5.*pending' "$_dd"; then
+    _v_warn "$(basename "$_dd"): stale 'phases 4–5 … pending/not wired' claim — phases 4–5 shipped (DOC-01/DD-01)"
+    _dd_hits=$((_dd_hits+1))
+  fi
+done
+(( _dd_hits == 0 )) && _v_ok "no '~55 checks' / 'phases 4–5 … pending' drift sentinels in docs (DOC-01)"
+
 step "summary"
 printf '   pass %s%d%s    warn %s%d%s    fail %s%d%s\n\n' \
   "$C_G" $PASS "$C_0" "$C_Y" $WARNS "$C_0" "$C_R" $FAIL "$C_0" >&2

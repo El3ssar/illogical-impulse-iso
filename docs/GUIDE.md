@@ -230,7 +230,8 @@ versions for everything vendored.**
 ```sh
 just build              # public distro → out/*.iso
 just build <profile>     # + personal profile layer
-just validate           # ~55 static checks on the assembled profile (no root)
+just docked [profile]   # the same full build inside the pinned builder container
+just validate           # ~150 static checks on the assembled profile (no root)
 just vm                 # boot the ISO in QEMU
 just vm --disk          # + attach a 40G test disk → run a full install
 just vm --installed     # boot the installed test system (no ISO)

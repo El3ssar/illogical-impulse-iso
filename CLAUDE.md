@@ -5,18 +5,22 @@ Hyprland/Quickshell rice with a branded Calamares installer. Identifies as its
 own distro (`ID=illogical-impulse`, `ID_LIKE=arch`), not plain Arch + dotfiles.
 
 Read this first; the full target design + phase plan is [docs/BLUEPRINT.md](docs/BLUEPRINT.md).
-Current state: **phases 1–3 done** (modular pipeline; batteries-included
-installer; iictl + welcome card — cheatsheet dropped, upstream has one).
-Phases 4–5 (container build, CI) are pending.
+Current state: **phases 1–5 done** (modular pipeline; batteries-included
+installer; iictl + welcome card — cheatsheet dropped, upstream has one;
+pinned builder container + `just docked`; release CI). The release workflow
+(`.github/workflows/release.yml`) runs a **daily cron**: it gates on
+`update.sh --check`, **auto-bumps the dots pin and pushes it to `main`** after a
+successful release, then builds (`just docked`) → smokes → rsyncs the ISO to
+SourceForge (`SF_SSH_KEY` secret) → cuts a GitHub release.
 
 Phase 2 model (revised — no selection screen): the distro ships **batteries
 included**. Every default is baked via `packages/goodies.list`; nothing is
 asked at install time. The one hardware-conditional piece is NVIDIA: a tiny
 flat pacman repo at `/usr/share/illogical-impulse/nvidia` (officials + dep
 closure by `chroot.sh`, AUR 580xx legacy staged by `prebuild.sh`) rides in
-the squashfs; `ii-post-install` reads `/sys/bus/pci`, matches NVIDIA's
-classifies by PCI device id (≥0x1E00 → open, 0x1300–0x1DFF → 580xx legacy,
-older → nouveau; supported-gpus.json no longer exists in any package),
+the squashfs; `ii-post-install` reads `/sys/bus/pci`, matches NVIDIA's vendor
+id, then classifies by PCI device id (≥0x1E00 → open, 0x1300–0x1DFF → 580xx
+legacy, older → nouveau; supported-gpus.json no longer exists in any package),
 installs the right variant offline or nothing, then deletes the stash. Rule: mkiso.sh (root) never writes into
 build/ — user-level staging belongs in prebuild.sh.
 
@@ -58,13 +62,14 @@ scripts/
 │                              # 45-optional-packs 50-calamares 60-boot 70-assets
 ├── prebuild.sh                # AUR/local pkgs → /var/cache/ii-extra-repo
 ├── mkiso.sh                   # mkarchiso wrapper (self-sudo)
-├── validate.sh                # static audit (~55 checks)
+├── validate.sh                # static audit (~150 checks)
 ├── update.sh                  # dots submodule bump (+ --check policy gate)
 ├── vm.sh                      # QEMU/OVMF boot of out/*.iso
 ├── chroot.sh                  # → /root/customize_airootfs.sh in mkarchiso
 ├── runtime/                   # → airootfs /usr/local/bin
 │   ├── ii-session             # live greetd command (purged on install)
 │   ├── ii-launch-installer    # live Calamares wrapper (purged)
+│   ├── ii-live-welcome        # live "Install to disk" notification (purged)
 │   ├── ii-ensure-venv         # venv from offline wheelhouse
 │   ├── ii-build-wheelhouse    # chroot-only wheelhouse builder
 │   ├── ii-prepare-bootloader  # Calamares: kernels + microcode + initramfs

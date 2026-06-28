@@ -16,9 +16,9 @@ the machine itself.
 | Distribution model | **Batteries included, zero questions.** Every default is baked (`packages/goodies.list`). No install-time software selection — that machinery was built (netinstall + on-ISO repo + bind mounts), hit Calamares integration friction, and was deliberately removed. |
 | NVIDIA | The one thing that can't be baked (nvidia-utils blacklists nouveau → breaks non-NVIDIA machines). Hardware auto-detect at install from an on-ISO stash repo; classification by PCI device id (`≥0x1E00` Turing+ → open, `0x1300–0x1DFF` → 580xx legacy, older → nouveau). `supported-gpus.json` no longer exists in any package — do not reintroduce a dependency on it. |
 | Installer | Calamares, branded. With selection gone, its remaining job (partitioning/LUKS/users/unpack/bootloader) is exactly what it's best at. A Quickshell-native installer is the long-term dream, not current work. |
-| Upstream tracking | Pinned submodule. Bump policy = knobs in `[upstream]` of distro.toml, enforced by `update.sh --check` (the future CI cron calls the same gate). |
-| Build env | Native Arch host today; pinned builder container is phase 4. archiso releng baseline comes from the **installed archiso package** (no vendored copy). |
-| CI | `validate.yml` runs `just prepare && just validate` per push/PR. Release automation (build + QEMU smoke + publish) is phase 5; ISO hosting target is SourceForge (GitHub caps release assets at 2 GiB). |
+| Upstream tracking | Pinned submodule. Bump policy = knobs in `[upstream]` of distro.toml, enforced by `update.sh --check` (the `release.yml` daily cron calls the same gate). |
+| Build env | Native Arch host, or the pinned builder container via `just docked` (`containers/builder.Dockerfile`). archiso releng baseline comes from the **installed archiso package** (no vendored copy). |
+| CI | `validate.yml` runs `just prepare && just validate` per push/PR. `release.yml` automates the release (daily cron → auto-bump pin → `just docked` build → QEMU smoke → publish); ISO hosting target is SourceForge (`SF_SSH_KEY` secret; GitHub caps release assets at 2 GiB). |
 | Versioning | ISO version = build date (`YYYY.MM.DD`); release stamp at `/etc/illogical-impulse/release` records dots commit + profile. |
 
 **Phase status:** 1 (pipeline) ✅ · 2 (installer, revised model) ✅ ·
@@ -48,11 +48,11 @@ scripts/
 ├── lib/common.sh    shared env — paths, tget(), step/ok/warn/info/die, _wipe
 ├── lib/toml-get     python3-tomllib reader: toml-get FILE dotted.key
 ├── prepare.sh       runs prepare.d/NN-*.sh in order (sourced, shared env)
-├── prepare.d/       10-releng 20-airootfs 30-skel 40-packages 50-calamares
-│                    60-boot 70-assets
+├── prepare.d/       10-releng 20-airootfs 30-skel 40-packages
+│                    45-optional-packs 50-calamares 60-boot 70-assets
 ├── prebuild.sh      AUR/local PKGBUILDs → /var/cache/ii-extra-repo + staging
 ├── mkiso.sh         mkarchiso wrapper (self-sudo)
-├── validate.sh      static audit (~55 checks)
+├── validate.sh      static audit (~150 checks)
 ├── update.sh        submodule bump + --check policy gate
 ├── vm.sh            QEMU: live / --disk / --installed / --fresh-disk
 ├── clean.sh         build/ (--hard: + out/ + workdir)
@@ -81,7 +81,7 @@ upstream/illogical-impulse   the dots — read-only submodule
    that pattern in new scripts.
 5. **Every fixed bug becomes a validate check** (and, if it bit hard, an
    entry in CLAUDE.md §"Historic bugs"). validate.sh is the project's
-   immune system: ~55 checks, each encoding a real failure mode.
+   immune system: ~150 checks, each encoding a real failure mode.
 6. **Flat pacman repos** — db and `.pkg.tar.*` share one directory; pacman
    fetches `$Server/$filename`. Filter `.sig` files out of `repo-add`.
 7. Runtime/installed artifacts use the `ii-`/`ii_` prefix.
@@ -391,14 +391,14 @@ final gate + live-helper purge) → umount`.
 `instances:` mapping in settings.conf or Calamares silently loads the no-op
 `shellprocess.conf`. validate checks this; don't remove the check.
 
-### docked builds (phase 4)
+### docked builds
 
 `containers/builder.Dockerfile` is the canonical environment; `just docked`
 runs prepare → validate → prebuild (as the `builder` user, uid-remapped to
 the host user so build/ stays host-owned — iron rule 2 holds inside docker
 too) → mkiso (root), with the AUR cache persisted in the `ii-extra-cache`
 docker volume. `--privileged` is required (mkarchiso needs loop devices).
-The phase-5 release CI uses this same image.
+The release CI (`release.yml`) uses this same image.
 
 ## 5. The justfile
 
@@ -406,7 +406,7 @@ Recipes are deliberately one-liners delegating to scripts — CI calls the
 same surface, so behavior can't fork between local and automated builds.
 Adding a recipe: script first (sourcing common.sh), recipe second, README
 table third. Current surface: `setup prepare prebuild build validate
-update vm clean nuke assets`.
+update vm smoke preview nspawn test-revert clean nuke assets image docked`.
 
 ## 6. Validation & testing
 
@@ -427,8 +427,8 @@ update vm clean nuke assets`.
   (`[user]` block, build-host git identity, baked email). The other three
   Pillar-6 checks (fence, `iictl.d` hygiene, `ii-verify` survival) already live
   inline in their own `validate.sh` steps — see the file header for the map.
-- `just vm [--disk|--installed|--fresh-disk]` — the manual gate today, the
-  CI smoke test of phase 5.
+- `just vm [--disk|--installed|--fresh-disk]` — the manual boot gate; `just
+  smoke` is the headless QEMU colour-probe the release CI runs.
 - `.github/workflows/validate.yml` — prepare+validate in an
   `archlinux:base-devel` container on push/PR.
 
@@ -448,13 +448,14 @@ SourceForge (frs.sourceforge.net, SF_SSH_KEY secret, project
 illogical-impulse-iso) → GitHub release with notes + checksums.
 workflow_dispatch forces a release from the current pin.
 
-## 8. Easy extensions (designed-for, not yet built)
+## 8. Easy extensions (designed-for)
 
-- **Distro-level fetch.list** — the profile fetch mechanism
-  (30-skel.sh) generalizes trivially: read an `overlay/skel-distro.fetch`
-  list with the same `<dest> <url> <rev>` format before the profile layer.
+- **Distro-level fetch.list** — *shipped*: `30-skel.sh` reads an
+  `overlay/skel-distro.fetch` list (same `<dest> <url> <rev>` format as the
+  profile `fetch.list`) and layers it before the profile, for distro-owned
+  pinned vendoring.
 - **More editions** — a second profile is just a directory; nothing else
-  to wire.
+  to wire (not yet built).
 
 ## 9. Bug archaeology
 
