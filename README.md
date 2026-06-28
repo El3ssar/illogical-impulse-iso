@@ -58,6 +58,41 @@ and ships `SHA256SUMS` for verification. All builds are also browsable
 sha256sum -c SHA256SUMS   # with the ISO in the same directory
 ```
 
+## Secure Boot
+
+> [!IMPORTANT]
+> **Disable Secure Boot before booting the live ISO or installing.**
+
+Illogical Impulse ISO does **not** support UEFI Secure Boot yet. The live
+media and the installed system both ship **unsigned** EFI binaries: the live
+boot uses archiso's stock loader, and the installer writes a plain
+[systemd-boot](https://wiki.archlinux.org/title/systemd-boot) setup with no key
+enrollment (`scripts/runtime/ii-finish-systemd-boot`). On a machine with Secure
+Boot **enabled**, firmware will reject these unsigned binaries and refuse to
+boot.
+
+**What to do:** turn Secure Boot **off** in your firmware/BIOS setup before
+booting the USB stick, and leave it off after installing.
+
+- Enter firmware setup at power-on (commonly <kbd>Del</kbd>, <kbd>F2</kbd>,
+  <kbd>F10</kbd>, or <kbd>Esc</kbd> — check your vendor's prompt).
+- Find **Secure Boot** (usually under *Security* or *Boot*) and set it to
+  **Disabled**.
+- Save and exit, then boot the ISO.
+
+Secure Boot enrollment (signing the loader and kernels via `sbctl`, or shipping
+a `shim`-based chain) is **not yet integrated**, and SB-enabled installs are
+**untested** — see [Known issues](#known-issues) below. Adding it is a planned
+future step; until then, Secure Boot must stay disabled.
+
+## Known issues
+
+- **Secure Boot is unsupported.** The live ISO and installed system ship
+  **unsigned** EFI binaries; Secure Boot must be **disabled** to boot or install
+  (see [Secure Boot](#secure-boot) above). `sbctl`/`shim` key enrollment is not
+  yet integrated and SB-enabled installs are untested. Tracking: integrate
+  signing in `ii-finish-systemd-boot` + an SB-enabled smoke variant.
+
 ## Build your own
 
 Requirements: an Arch host with `archiso just rsync python base-devel git`.
