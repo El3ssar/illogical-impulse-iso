@@ -325,6 +325,14 @@ Step map (current):
   against the sync db (`pacman -Si`); AUR names accumulate in
   `.pkg-resolve/aur-prebuild.list`. Writes `/root/nvidia-{official,aur}.txt`
   manifests for the stash. Optional `overlay/aur-pkgbuilds` staged.
+  **Precondition (BUILD-06):** the official-vs-AUR split trusts the *host*
+  pacman sync db. `docked`/CI runs `pacman -Sy`; bare local builds may not, and
+  an empty/stale db makes every official name miss `-Si` and get silently
+  misrouted to the AUR/prebuild path. So the step opens with `_assert_sync_db`,
+  which `die`s loudly (telling you to `sudo pacman -Sy`) when any official
+  repo's `*.db` is missing/empty or older than `II_SYNCDB_MAX_AGE_DAYS` (default
+  14; `[ii-extra]` is excluded — it is built locally, never `-Sy`'d). `validate.sh`
+  guards that this assertion exists and precedes the first `pacman -Si`.
 - **45-optional-packs** — stages `packages/optional/*.list` (+ `*.meta` and
   `<pack>.d/post-add|post-remove` hook fragments) as **text** into
   `/usr/share/illogical-impulse/optional/`. Only the few-KB lists ride in the

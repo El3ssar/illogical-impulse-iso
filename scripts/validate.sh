@@ -1350,6 +1350,41 @@ shopt -u nullglob
   && _v_ok "$_host_n host-side script(s) syntax-checked" \
   || _v_fail "no host-side scripts/*.sh found — SCRIPTS path wrong?"
 
+step "host pacman sync-db guard (BUILD-06)"
+# 40-packages classifies every name official-vs-AUR with `pacman -Si` against the
+# HOST sync db; an empty/stale db (common on bare local builds, not docked/CI)
+# silently misroutes EVERY official package to the AUR/prebuild path. The step
+# must assert a populated, recent sync db BEFORE any classification and `die`
+# loudly if absent. Guard the guard: it must (a) define & invoke the assertion
+# before the first `pacman -Si`, and (b) point the maintainer at `pacman -Sy`.
+PKGSTEP="$SCRIPTS/prepare.d/40-packages.sh"
+if [[ ! -f "$PKGSTEP" ]]; then
+  _v_fail "40-packages.sh missing — BUILD-06 sync-db guard can't be verified"
+else
+  _b06_code="$(grep -vE '^[[:space:]]*#' "$PKGSTEP")"
+  # (a) the assertion is defined and actually invoked.
+  if grep -q '_assert_sync_db()' <<<"$_b06_code" \
+     && grep -qE '^[[:space:]]*_assert_sync_db[[:space:]]*$' <<<"$_b06_code"; then
+    _v_ok "40-packages defines and invokes _assert_sync_db (BUILD-06)"
+  else
+    _v_fail "40-packages does not invoke _assert_sync_db — official-vs-AUR classification has no sync-db precondition (BUILD-06)"
+  fi
+  # (b) the guard runs BEFORE the first `pacman -Si` classification call.
+  _b06_assert_ln="$(grep -nE '^[[:space:]]*_assert_sync_db[[:space:]]*$' <<<"$_b06_code" | head -1 | cut -d: -f1)"
+  _b06_si_ln="$(grep -nE 'pacman -Si ' <<<"$_b06_code" | head -1 | cut -d: -f1)"
+  if [[ -n "$_b06_assert_ln" && -n "$_b06_si_ln" ]] && (( _b06_assert_ln < _b06_si_ln )); then
+    _v_ok "sync-db assertion precedes the first 'pacman -Si' classification (BUILD-06)"
+  else
+    _v_fail "sync-db assertion does not precede 'pacman -Si' classification — packages could be misrouted before the guard runs (BUILD-06)"
+  fi
+  # (c) the failure path points the maintainer at the remedy (`pacman -Sy`) and dies.
+  if grep -q 'pacman -Sy' <<<"$_b06_code" && grep -q 'die ' <<<"$_b06_code"; then
+    _v_ok "sync-db guard fails loudly via die() and names 'pacman -Sy' as the remedy (BUILD-06)"
+  else
+    _v_fail "sync-db guard does not die() with a 'pacman -Sy' remedy — failure would be silent or unhelpful (BUILD-06)"
+  fi
+fi
+
 step "additive/reversibility lint"
 # Pillar 6 (the four structural checks): skel-upstream precondition + skel-shadow
 # collision, packages/optional/*.list validity (no double-bake), and the PII
