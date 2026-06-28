@@ -1464,6 +1464,91 @@ for sc in "$AIROOTFS/usr/local/bin/"ii-session \
   bash -n "$sc" 2>/dev/null && _v_ok "$(basename "$sc")" || _v_fail "$(basename "$sc") syntax error"
 done
 
+step "nvidia PCI-id classifier (HW-01)"
+# The open/legacy/nouveau classifier lives in a PURE lib (nvidia-classify.sh,
+# sourced by ii-post-install) precisely so it can be unit-tested here in
+# isolation — a boundary regression must fail CI, not silently break driver
+# install for a whole GPU generation. We source the STAGED airootfs copy (the
+# one the ISO actually ships) and run it against a table of known
+# (device-id → expected-variant) cases that pin every band boundary:
+#   Kepler/Maxwell  0x1300  (legacy floor)   |  Pascal/Volta/Turing 0x1E00 (open floor)
+# Flip a boundary id's expectation (or move a *_FLOOR in nvidia-classify.sh) and
+# this step goes red. To extend: update the lib constants AND a row here together.
+NVCLASSIFY="$AIROOTFS/usr/local/lib/ii/nvidia-classify.sh"
+if [[ ! -f "$NVCLASSIFY" ]]; then
+  _v_fail "nvidia-classify.sh missing from airootfs — HW-01 classifier untestable"
+else
+  # id<TAB>expected — boundary-dense across Kepler→Maxwell (0x1300) and
+  # Pascal/Volta→Turing (0x1E00). Hex forms mixed (0x / bare / upper) on purpose.
+  _nv_table='
+0x1180	nouveau
+0x12ba	nouveau
+0x12FF	nouveau
+0x1300	legacy
+0x1380	legacy
+0x13c2	legacy
+0x1b80	legacy
+0x1d81	legacy
+0x1DFF	legacy
+0x1E00	open
+0x1e04	open
+0x1f02	open
+0x2204	open
+0x2684	open
+'
+  # Run the table inside a clean subshell so sourcing the lib can't leak into
+  # validate's own namespace; fail the whole step on the FIRST mismatch and
+  # report it (id, got, expected) so a boundary regression is unambiguous.
+  _nv_report="$(
+    # shellcheck disable=SC1090
+    source "$NVCLASSIFY" || { echo "SOURCE_FAIL"; exit 0; }
+    type ii_nvidia_classify &>/dev/null || { echo "NO_FN"; exit 0; }
+    _bad=0 _n=0
+    while IFS=$'\t' read -r _id _want; do
+      [[ -n "$_id" ]] || continue
+      _n=$((_n+1))
+      _got="$(ii_nvidia_classify "$_id")"
+      if [[ "$_got" != "$_want" ]]; then
+        echo "MISMATCH $_id got=$_got want=$_want"
+        _bad=$((_bad+1))
+      fi
+    done <<< "$_nv_table"
+    # Also assert the multi-GPU fold precedence: legacy beats open beats nouveau.
+    _fold="$(ii_nvidia_fold 0x1180 0x1E00 0x1380)"   # has a legacy → must be legacy
+    [[ "$_fold" == legacy ]] || { echo "FOLD_BAD got=$_fold want=legacy"; _bad=$((_bad+1)); }
+    _fold2="$(ii_nvidia_fold 0x1180 0x2204)"          # open + nouveau → open
+    [[ "$_fold2" == open ]] || { echo "FOLD_BAD2 got=$_fold2 want=open"; _bad=$((_bad+1)); }
+    _fold3="$(ii_nvidia_fold 0x1180 0x12ff)"          # all sub-Maxwell → nouveau
+    [[ "$_fold3" == nouveau ]] || { echo "FOLD_BAD3 got=$_fold3 want=nouveau"; _bad=$((_bad+1)); }
+    echo "TOTAL $_n BAD $_bad"
+  )"
+  if grep -q 'SOURCE_FAIL' <<<"$_nv_report"; then
+    _v_fail "nvidia-classify.sh failed to source — HW-01 classifier broken"
+  elif grep -q 'NO_FN' <<<"$_nv_report"; then
+    _v_fail "nvidia-classify.sh defines no ii_nvidia_classify — HW-01 classifier missing"
+  elif grep -qE 'MISMATCH|FOLD_BAD' <<<"$_nv_report"; then
+    while IFS= read -r _line; do
+      [[ "$_line" == MISMATCH* || "$_line" == FOLD_BAD* ]] && _v_fail "HW-01 classifier: $_line"
+    done <<<"$_nv_report"
+  else
+    _nv_n="$(sed -n 's/.*TOTAL \([0-9]*\) BAD.*/\1/p' <<<"$_nv_report")"
+    _v_ok "nvidia classifier passes ${_nv_n:-?} boundary cases + 3 fold-precedence cases (HW-01)"
+  fi
+fi
+
+# ii-post-install must actually consult the shared classifier (not re-inline a
+# divergent copy as the primary path) — guards against the extraction silently
+# regressing back to an untested inline loop.
+IIPI="$AIROOTFS/usr/local/bin/ii-post-install"
+if [[ -f "$IIPI" ]]; then
+  if grep -q 'ii_nvidia_fold\|ii_nvidia_classify' "$IIPI" \
+     && grep -q 'nvidia-classify.sh' "$IIPI"; then
+    _v_ok "ii-post-install sources + uses the pure nvidia classifier (HW-01)"
+  else
+    _v_fail "ii-post-install does not use the shared nvidia classifier — HW-01 extraction regressed"
+  fi
+fi
+
 step "host-side pipeline scripts syntax (IMMUNE-02)"
 # The check above only parses the *staged* airootfs runtime scripts. The
 # host-side pipeline that drives the UNATTENDED release — prebuild, mkiso,

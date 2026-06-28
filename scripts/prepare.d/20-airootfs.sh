@@ -13,6 +13,11 @@ install -d "$BUILD/airootfs/usr/local/bin" \
 install -Dm 0755 "$SCRIPTS/runtime/"* "$BUILD/airootfs/usr/local/bin/"
 install -Dm 0644 "$SCRIPTS/runtime-lib/session-offline.sh" \
                  "$BUILD/airootfs/usr/local/lib/ii/session-offline.sh"
+# nvidia-classify.sh — pure install-time PCI-id → driver-variant classifier
+# (HW-01). Sourced by ii-post-install; stateless function lib, safe to leave on
+# disk (no side effects), unit-tested by validate.sh's HW-01 table.
+install -Dm 0644 "$SCRIPTS/runtime-lib/nvidia-classify.sh" \
+                 "$BUILD/airootfs/usr/local/lib/ii/nvidia-classify.sh"
 # iictl framework: shared header + ledger + mutator (sourced libs, 0644) and the
 # iictl.d/ drop-in subcommands (executable, 0755). These ride the survive-path —
 # ii-verify purges /usr/local/lib/ii by named file, keeping iictl.d/ + ledger.sh
