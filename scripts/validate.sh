@@ -1328,6 +1328,28 @@ for sc in "$AIROOTFS/usr/local/bin/"ii-session \
   bash -n "$sc" 2>/dev/null && _v_ok "$(basename "$sc")" || _v_fail "$(basename "$sc") syntax error"
 done
 
+step "host-side pipeline scripts syntax (IMMUNE-02)"
+# The check above only parses the *staged* airootfs runtime scripts. The
+# host-side pipeline that drives the UNATTENDED release — prebuild, mkiso,
+# publish-sf, smoke, vm, update, nspawn, and every prepare.d/* fragment — was
+# never syntax-checked, so a typo could survive review and break a cron release
+# only at run time. These exist statically (no build needed), so bash -n them
+# straight from the source tree. prepare.d/* are *sourced* fragments (no
+# shebang by design — see "Conventions"); we only assert they parse.
+_host_n=0
+shopt -s nullglob
+for _hs in "$SCRIPTS"/*.sh "$SCRIPTS"/prepare.d/*.sh; do
+  _host_n=$((_host_n+1))
+  _hrel="${_hs#"$ROOT"/}"
+  bash -n "$_hs" 2>/dev/null \
+    && _v_ok "$_hrel" \
+    || _v_fail "$_hrel syntax error"
+done
+shopt -u nullglob
+(( _host_n > 0 )) \
+  && _v_ok "$_host_n host-side script(s) syntax-checked" \
+  || _v_fail "no host-side scripts/*.sh found — SCRIPTS path wrong?"
+
 step "additive/reversibility lint"
 # Pillar 6 (the four structural checks): skel-upstream precondition + skel-shadow
 # collision, packages/optional/*.list validity (no double-bake), and the PII
