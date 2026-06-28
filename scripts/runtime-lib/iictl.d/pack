@@ -135,10 +135,22 @@ _run_hook() {
   local hook="$II_OPTDIR/$PACK_NAME.d/$PACK_PHASE"
   [[ -r "$hook" ]] || return 0
   echo "${C_B}>> running '$PACK_NAME' $PACK_PHASE hook${C_0}"
+  # REV-04: stamp the pack tag onto every side-effect row the post-add hook
+  # records through the shared mutators (service/group/chsh/lua-block). The
+  # mutators copy II_PACK_TAG into the ledger row's packages column; revert-all's
+  # `pack:<name>` filter then sweeps those rows WITH the pack's package row, so a
+  # `iictl pack remove <name>` leaves no orphaned side-effect rows behind (they
+  # used to linger forever, keyed on the unit/group/file rather than the pack).
+  # Only the add phase records new side effects; the post-remove hook UNDOES them
+  # (and revert-all prunes the rows), so it carries no tag.
+  local II_PACK_TAG=""
+  [[ "$PACK_PHASE" == post-add ]] && II_PACK_TAG="pack:$PACK_NAME"
+  export II_PACK_TAG
   # Subshell-fence: a hook that exit/die's inside ( … ) kills only the subshell,
   # not the engine. Its disk/system side effects (incl. mutator ledger rows)
   # still land. shellcheck source=/dev/null
   ( source "$hook" ) || warn "'$PACK_NAME' $PACK_PHASE hook reported an error (continuing — pack already recorded)"
+  unset II_PACK_TAG
 }
 
 # ── subcommands ──────────────────────────────────────────────────────────────

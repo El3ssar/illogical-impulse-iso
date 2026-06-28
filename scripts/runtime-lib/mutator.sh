@@ -54,6 +54,25 @@ II_FENCE_CLOSE='-- <<< illogical-impulse '
 # die — it is sourced standalone in tests and by ii-post-install).
 _ii_mut_err() { printf 'ii-mutator: %s\n' "$*" >&2; }
 
+# ── pack-tagging the side-effect rows (REV-04) ───────────────────────────────
+# A pack's post-add hook applies side effects (service enable / group add /
+# fenced lua write) through these mutators. Those rows are keyed by the affected
+# OBJECT (the unit/group/file), NOT by `pack:<name>`, so `iictl revert-all
+# pack:<name>` — which `iictl pack remove` execs, filtering on the pack: tag —
+# never matched them and they LINGERED in the ledger forever (a later global
+# revert-all then re-attempted an already-undone inverse).
+#
+# Fix: the pack engine exports II_PACK_TAG="pack:<name>" around the post-add
+# hook; every side-effect mutator stamps that tag into the otherwise-unused
+# `packages` ledger column (column 4). revert-all's per-feature filter then
+# sweeps a tagged row when its `pack:<name>` filter matches the column, so a
+# pack's side effects are pruned WITH the pack — additive (the tag is empty
+# outside a pack post-add, so plain iictl-time mutations are unchanged) and
+# leaving every inverse logic untouched (restore_hint is never overloaded). The
+# `packages` column is unused for these kinds (only pkg/pack rows read it), so
+# stamping the tag there can never confuse the package-removal inverse.
+_ii_pack_tag() { printf '%s' "${II_PACK_TAG:-}"; }
+
 # ── services ─────────────────────────────────────────────────────────────────
 # ii_service_enable <unit> — enable a unit idempotently, recording the prior
 # enabled-state so revert can restore it. `systemctl enable` only writes the
@@ -63,7 +82,7 @@ ii_service_enable() {
   local prior; prior="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
   [[ "$prior" == "enabled" ]] && return 0   # already enabled → nothing to do/record
   systemctl enable "$unit" >/dev/null 2>&1 || { _ii_mut_err "enable $unit failed"; return 1; }
-  ledger_record service "$unit" "" "" "${prior:-disabled}"
+  ledger_record service "$unit" "$(_ii_pack_tag)" "" "${prior:-disabled}"
 }
 
 # ii_service_disable <unit> — disable a unit idempotently, recording the prior
@@ -73,7 +92,7 @@ ii_service_disable() {
   local prior; prior="$(systemctl is-enabled "$unit" 2>/dev/null || true)"
   [[ "$prior" == "disabled" || "$prior" == "masked" ]] && return 0
   systemctl disable "$unit" >/dev/null 2>&1 || { _ii_mut_err "disable $unit failed"; return 1; }
-  ledger_record service-disable "$unit" "" "" "${prior:-enabled}"
+  ledger_record service-disable "$unit" "$(_ii_pack_tag)" "" "${prior:-enabled}"
 }
 
 # ── groups ───────────────────────────────────────────────────────────────────
@@ -107,7 +126,7 @@ ii_group_add() {
     groupadd -f "$g" 2>/dev/null || true
     _ii_in_group "$user" "$g" && continue   # already a member → not ours to revert
     if usermod -aG "$g" "$user" 2>/dev/null || gpasswd -a "$user" "$g" >/dev/null 2>&1; then
-      ledger_record group "$g" "" "" "$hint"
+      ledger_record group "$g" "$(_ii_pack_tag)" "" "$hint"
     else
       _ii_mut_err "group add $g for $user failed"; rc=1
     fi
@@ -159,7 +178,7 @@ ii_lua_block_write() {
   # owned_paths is comma-joined → comma-escape the path so one containing a comma
   # survives the round trip (REV-05). The target column is single-valued and
   # carries the raw path for human-readable plan lines.
-  ledger_record lua-block "$file" "" "$(ledger_escape_path "$file")" "$name"
+  ledger_record lua-block "$file" "$(_ii_pack_tag)" "$(ledger_escape_path "$file")" "$name"
 }
 
 # ii_lua_block_remove <file> <name> — strip exactly the named fenced region.
@@ -188,7 +207,7 @@ ii_chsh() {
   local prior; prior="$(getent passwd "$user" 2>/dev/null | cut -d: -f7)"
   [[ "$prior" == "$shell" ]] && return 0   # already the login shell
   chsh -s "$shell" "$user" >/dev/null 2>&1 || { _ii_mut_err "chsh $user → $shell failed"; return 1; }
-  ledger_record chsh "$user" "" "" "${prior:-/bin/bash}"
+  ledger_record chsh "$user" "$(_ii_pack_tag)" "" "${prior:-/bin/bash}"
 }
 
 # ── conflict gate ────────────────────────────────────────────────────────────

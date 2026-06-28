@@ -192,6 +192,24 @@ Don't "simplify" these away — each cost real debugging time:
   `$ILLOGICAL_IMPULSE_VIRTUAL_ENV` from upstream's hypr `env.lua`). A static
   `kitty-theme.conf` in `overlay/skel-distro` covers the gap before it runs.
   Don't "fix" the seed away — without it the upstream welcome reappears.
+- **Pack removal `-Rns`-ing the recorded set aborts on a shared dep; pack
+  side-effect rows linger** → a pack's recorded set is members + the deps they
+  pulled; if another installed pack still needs one of those deps, a blind
+  `pacman -Rns $set` aborts the WHOLE (atomic) transaction and the user saw only
+  a generic "failed" (stderr swallowed). `revert-all`'s `pkg|pack` inverse now
+  routes through `_revert_pkgset`: it drops already-gone members, filters to the
+  SAFELY-removable subset (skips any dep still "Required By" an installed package
+  outside the set — leaving a shared dep installed for the pack that needs it),
+  and SURFACES pacman's stderr on failure. Separately, a pack's `post-add` hook
+  records side-effect rows (service/group/chsh/lua-block) keyed on the affected
+  OBJECT, not on `pack:<name>`, so `iictl revert-all pack:<name>` never matched
+  them and they lingered forever. The pack engine now exports
+  `II_PACK_TAG=pack:<name>` around the post-add hook; the mutators stamp that tag
+  into the row's otherwise-unused `packages` column (column 4 — never read for
+  non-package kinds, so the package-removal inverse is unaffected), and
+  `revert-all`'s per-feature filter (`_row_in_filter`) sweeps a tagged row with
+  the pack. `validate.sh` guards both halves (REV-04). Don't drop the tag or the
+  removable-subset filter — a shared-dep pack remove must succeed, not abort.
 - **`welcomeStyleCalamares: false`** hides `productWelcome` — keep `true` in
   `branding.desc`.
 - **prebuild wiping cache before makepkg succeeds** → empty cache on
