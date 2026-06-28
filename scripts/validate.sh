@@ -768,6 +768,66 @@ if [[ -d "$_PKDIR" ]]; then
   fi
 fi
 
+step "pack removal robustness — shared deps + side-effect sweep (REV-04)"
+# REV-04: two real failure modes in `iictl pack remove`.
+#   (a) The recorded set is members + the deps they pulled. The old revert-all
+#       ran one `pacman -Rns --noconfirm $set >/dev/null 2>&1`: if any recorded
+#       dep is STILL required by another installed pack, pacman aborts the WHOLE
+#       (atomic) transaction and the user saw only a generic "failed" (stderr
+#       swallowed). The pkg/pack inverse must filter to the SAFELY-removable
+#       subset (skip a dep an outsider still needs) and SURFACE pacman's stderr
+#       on failure.
+#   (b) A pack's post-add hook records side-effect rows (service/group/chsh/
+#       lua-block) keyed on the affected OBJECT, not on `pack:<name>`, so
+#       `iictl revert-all pack:<name>` never matched them → they LINGERED in the
+#       ledger forever. The pack engine stamps the pack tag into those rows and
+#       revert-all's filter sweeps them with the pack.
+# Comments are stripped first so this section's prose can't satisfy a grep.
+MUT="$AIROOTFS/usr/local/lib/ii/mutator.sh"
+if [[ ! -f "$RA" ]]; then
+  : # revert-all absence already failed above
+else
+  # (a) the pkg/pack inverse no longer does a bare blind `pacman -Rns $set` with
+  #     swallowed stderr — it routes through a removable-subset filter that
+  #     surfaces pacman's error. Require the dedicated helper AND that the inverse
+  #     no longer pipes pacman -Rns straight to /dev/null 2>&1.
+  if grep -qE '_revert_pkgset' <<<"$_ra_code"; then
+    _v_ok "revert-all routes pack removal through a shared-dep-aware _revert_pkgset (no atomic abort on a shared dep, REV-04)"
+  else
+    _v_fail "revert-all has no _revert_pkgset — a recorded dep still required by another pack aborts the whole -Rns transaction (REV-04)"
+  fi
+  if grep -qE 'pacman -Rns[^|]*2>&1[[:space:]]*>/dev/null' <<<"$_ra_code"; then
+    _v_ok "revert-all captures pacman -Rns stderr (the real failure reason is surfaced, not swallowed) (REV-04)"
+  else
+    _v_fail "revert-all does not capture pacman -Rns stderr — a removal failure stays a generic 'failed' (REV-04)"
+  fi
+  # the removable-subset filter must consult installed reverse-deps ('Required By').
+  grep -q 'Required By' <<<"$_ra_code" \
+    && _v_ok "revert-all filters to packages not required by an outsider (Required By gate) (REV-04)" \
+    || _v_fail "revert-all never inspects 'Required By' — it cannot skip a still-needed shared dep (REV-04)"
+  # (b) the per-feature filter must ALSO match pack-tagged side-effect rows, else
+  #     a pack's service/group/lua rows linger after `iictl pack remove`.
+  grep -q '_row_in_filter' <<<"$_ra_code" \
+    && _v_ok "revert-all's feature filter sweeps pack-tagged side-effect rows via _row_in_filter (REV-04)" \
+    || _v_fail "revert-all's feature filter matches only F_target — pack-tagged side-effect rows are never swept (REV-04)"
+fi
+if [[ ! -f "$MUT" ]]; then
+  _v_fail "mutator.sh not staged — pack side-effect rows cannot carry the pack tag (REV-04)"
+elif [[ ! -f "$PK" ]]; then
+  : # pack engine absence already failed above
+else
+  _mut_code="$(grep -vE '^[[:space:]]*#' "$MUT")"
+  _pk_code2="$(grep -vE '^[[:space:]]*#' "$PK")"
+  # the pack engine exports II_PACK_TAG around the post-add hook…
+  grep -q 'II_PACK_TAG' <<<"$_pk_code2" \
+    && _v_ok "pack engine exports II_PACK_TAG around the post-add hook (side effects carry the pack tag) (REV-04)" \
+    || _v_fail "pack engine never sets II_PACK_TAG — post-add side effects record no pack tag and linger after remove (REV-04)"
+  # …and the mutators stamp that tag onto the side-effect ledger rows.
+  grep -q 'II_PACK_TAG\|_ii_pack_tag' <<<"$_mut_code" \
+    && _v_ok "mutators stamp the pack tag (II_PACK_TAG) onto recorded side-effect rows (REV-04)" \
+    || _v_fail "mutators ignore II_PACK_TAG — pack side-effect rows are not pack-tagged and revert-all can't sweep them (REV-04)"
+fi
+
 step "iictl-tui chooser contract (#47)"
 # Bug-class guards for the ratatui renderer (iictl-tui) + the iictl chooser
 # contract it renders. The engine stays bash; this is the interactive front-end.

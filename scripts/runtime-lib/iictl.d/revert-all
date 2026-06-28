@@ -72,6 +72,25 @@ _split_tsv() {
   F_hint="$line"
 }
 
+# ── per-feature filter matching (REV-04) ─────────────────────────────────────
+# _row_in_filter — true if the current F_* row is in scope for FILTER. A row
+# matches on its `target` (exact or prefix — the load-bearing `pack:` family
+# selector). REV-04: a pack's post-add hook records side-effect rows (service/
+# group/chsh/lua-block) keyed on the affected OBJECT, not on `pack:<name>`, so
+# they would never match `iictl revert-all pack:<name>` and linger forever. The
+# pack engine stamps the pack tag into those rows' `packages` column (column 4 —
+# unused for non-package kinds), so a tagged side-effect row ALSO matches when
+# the filter hits that tag. pkg/pack rows are EXCLUDED from tag-matching: their
+# `packages` column is the resolved package set, never a filter tag.
+_row_in_filter() {
+  [[ "$F_target" == "$FILTER" || "$F_target" == "$FILTER"* ]] && return 0
+  case "$F_kind" in
+    pkg|pack) return 1 ;;
+    *) [[ -n "$F_pkgs" && ( "$F_pkgs" == "$FILTER" || "$F_pkgs" == "$FILTER"* ) ]] && return 0 ;;
+  esac
+  return 1
+}
+
 # ── install-time classification (the two-tier gate) ──────────────────────────
 # _is_install_row — true if the current F_* row is install-time distro setup
 # (peeled only with --deep), false if it is an iictl-time user choice (the
@@ -149,6 +168,66 @@ _block_user_edited() {
 # non-interactive on a real install. The fenced-block + path inverses are
 # user-owned and need no sudo.
 _sudo() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
+
+# ── package-set removal (REV-04) ─────────────────────────────────────────────
+# _revert_pkgset <space-separated recorded set> — remove exactly what a pack
+# added, offline-safe and SHARED-DEP-AWARE.
+#
+# The recorded set is members + the deps they pulled. The old code ran a single
+# `pacman -Rns --noconfirm $set >/dev/null 2>&1`: if any recorded dep is STILL
+# required by another installed package (e.g. a second pack that shares it),
+# pacman refuses the WHOLE transaction (atomic) and the user saw only a generic
+# "failed" — stderr was swallowed (REV-04 `pack-remove-aborts-on-shared-dep`).
+#
+# Fix in two layers:
+#   1. Skip packages already gone (a no-longer-installed recorded member is not
+#      an error — drop it from the target so its absence can't fail the txn).
+#   2. Pre-filter to the SAFELY-REMOVABLE subset: drop any candidate still
+#      required by an installed package OUTSIDE the candidate set (`pacman -Rns`
+#      would reap orphaned deps itself, but it ABORTS rather than skip a target
+#      that a non-target needs — so we must not hand it such a target). A shared
+#      dep is thus simply left installed for the pack that still needs it.
+# Then `-Rns` the remaining set; on failure, SURFACE pacman's stderr (no longer
+# swallowed) so the user sees the real reason. Returns 0 on success / empty set.
+_revert_pkgset() {
+  local recorded="$1" p
+  # 1. recorded → currently-installed candidates (drop already-removed members).
+  local cand=()
+  for p in $recorded; do
+    [[ -n "$p" ]] || continue
+    pacman -Qq "$p" >/dev/null 2>&1 && cand+=("$p")
+  done
+  (( ${#cand[@]} > 0 )) || return 0   # nothing installed from the set → done
+
+  # membership set of candidates for the "required by an OUTSIDER" test.
+  local -A in_set=()
+  for p in "${cand[@]}"; do in_set["$p"]=1; done
+
+  # 2. keep only candidates not required by an installed package outside the set.
+  #    `pacman -Qi` "Required By" lists installed reverse-deps ("None" = safe).
+  local remove=() rdep req keep
+  for p in "${cand[@]}"; do
+    req="$(pacman -Qi "$p" 2>/dev/null | awk -F': ' '/^Required By/{print $2}')"
+    keep=1
+    if [[ -n "$req" && "$req" != None ]]; then
+      for rdep in $req; do
+        [[ "$rdep" == None ]] && continue
+        # an outside requirer (not itself slated for removal) → keep this dep.
+        [[ -n "${in_set[$rdep]:-}" ]] || { keep=0; break; }
+      done
+    fi
+    (( keep )) && remove+=("$p")
+  done
+  (( ${#remove[@]} > 0 )) || return 0   # everything still needed elsewhere → keep all
+
+  # 3. remove the safe subset; surface pacman's stderr on failure (REV-04).
+  local err
+  if err="$(_sudo pacman -Rns --noconfirm "${remove[@]}" 2>&1 >/dev/null)"; then
+    return 0
+  fi
+  [[ -n "$err" ]] && warn "pacman -Rns failed: $err"
+  return 1
+}
 
 # ── plan rendering ───────────────────────────────────────────────────────────
 # _plan_line — one human-readable line describing the inverse of the current
@@ -231,8 +310,7 @@ _revert_row() {
       ;;
     pkg|pack)           # offline-safe: removal needs no network or [ii-extra]
       [[ -n "$F_pkgs" ]] || return 0
-      # shellcheck disable=SC2086 # word-split the space-separated resolved set
-      _sudo pacman -Rns --noconfirm $F_pkgs >/dev/null 2>&1 && return 0 || return 1
+      _revert_pkgset "$F_pkgs"; return $?
       ;;
     path|file)
       # owned_paths is comma-joined of comma-ESCAPED tokens (ledger.sh) → split
@@ -355,8 +433,9 @@ for (( j=${#DATA_IDX[@]}-1; j>=0; j-- )); do
   _split_tsv "${RAW[$ri]}"
 
   # per-feature filter: leave non-matching rows untouched (and in the ledger).
+  # _row_in_filter also sweeps pack-tagged side-effect rows (REV-04).
   if [[ -n "$FILTER" ]]; then
-    [[ "$F_target" == "$FILTER" || "$F_target" == "$FILTER"* ]] || continue
+    _row_in_filter || continue
   fi
 
   # two-tier gate: install-time rows are out of scope unless --deep.
