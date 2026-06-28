@@ -36,9 +36,18 @@ update *args:
 vm *args:
     ./scripts/vm.sh {{args}}
 
-# headless boot test of the newest ISO (used by the release CI)
+# headless smoke of the newest ISO (used by the release CI).
+#   just smoke               live-ISO boot probe (scripts/smoke.sh)
+#   just smoke --installed   unattended install → boot the installed disk (TEST-01)
+# `--installed` routes to the heavier install smoke; everything else is the live probe.
 smoke *args:
-    ./scripts/smoke.sh {{args}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [[ " {{args}} " == *" --installed "* ]]; then
+        exec ./scripts/install-smoke.sh {{args}}
+    else
+        exec ./scripts/smoke.sh {{args}}
+    fi
 
 # live-preview a standalone Quickshell app (no build); `just preview` lists them
 preview app="":
