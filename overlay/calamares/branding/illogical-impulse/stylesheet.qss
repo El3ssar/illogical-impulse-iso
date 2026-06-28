@@ -46,4 +46,4 @@ windowPlacement: "center"
 windowExpanding: false
 welcomeExpandingLogo: false
 
-welcomeStyleCalamares: false
+welcomeStyleCalamares: true

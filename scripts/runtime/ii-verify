@@ -177,7 +177,7 @@ if [[ -d /sys/firmware/efi && -d /boot/efi ]]; then
   shopt -s nullglob
   count=0
   for entry in "$ESP"/loader/entries/*.conf "$ESP"/EFI/*/loader/entries/*.conf; do
-    ((count++))
+    count=$((count + 1))
     grep -qE '^(linux|efi)' "$entry" && grep -q '^options .*root=' "$entry" \
       && pass "loader entry $(basename "$entry") ok" \
       || fail "loader entry $(basename "$entry") missing linux/efi or root="
