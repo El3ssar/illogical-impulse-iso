@@ -5,18 +5,22 @@ Hyprland/Quickshell rice with a branded Calamares installer. Identifies as its
 own distro (`ID=illogical-impulse`, `ID_LIKE=arch`), not plain Arch + dotfiles.
 
 Read this first; the full target design + phase plan is [docs/BLUEPRINT.md](docs/BLUEPRINT.md).
-Current state: **phases 1–3 done** (modular pipeline; batteries-included
-installer; iictl + welcome card — cheatsheet dropped, upstream has one).
-Phases 4–5 (container build, CI) are pending.
+Current state: **phases 1–5 done** (modular pipeline; batteries-included
+installer; iictl + welcome card — cheatsheet dropped, upstream has one;
+pinned builder container + `just docked`; release CI). The release workflow
+(`.github/workflows/release.yml`) runs a **daily cron**: it gates on
+`update.sh --check`, **auto-bumps the dots pin and pushes it to `main`** after a
+successful release, then builds (`just docked`) → smokes → rsyncs the ISO to
+SourceForge (`SF_SSH_KEY` secret) → cuts a GitHub release.
 
 Phase 2 model (revised — no selection screen): the distro ships **batteries
 included**. Every default is baked via `packages/goodies.list`; nothing is
 asked at install time. The one hardware-conditional piece is NVIDIA: a tiny
 flat pacman repo at `/usr/share/illogical-impulse/nvidia` (officials + dep
 closure by `chroot.sh`, AUR 580xx legacy staged by `prebuild.sh`) rides in
-the squashfs; `ii-post-install` reads `/sys/bus/pci`, matches NVIDIA's
-classifies by PCI device id (≥0x1E00 → open, 0x1300–0x1DFF → 580xx legacy,
-older → nouveau; supported-gpus.json no longer exists in any package),
+the squashfs; `ii-post-install` reads `/sys/bus/pci`, matches NVIDIA's vendor
+id, then classifies by PCI device id (≥0x1E00 → open, 0x1300–0x1DFF → 580xx
+legacy, older → nouveau; supported-gpus.json no longer exists in any package),
 installs the right variant offline or nothing, then deletes the stash. Rule: mkiso.sh (root) never writes into
 build/ — user-level staging belongs in prebuild.sh.
 
@@ -58,13 +62,14 @@ scripts/
 │                              # 45-optional-packs 50-calamares 60-boot 70-assets
 ├── prebuild.sh                # AUR/local pkgs → /var/cache/ii-extra-repo
 ├── mkiso.sh                   # mkarchiso wrapper (self-sudo)
-├── validate.sh                # static audit (~55 checks)
+├── validate.sh                # static audit (~150 checks)
 ├── update.sh                  # dots submodule bump (+ --check policy gate)
 ├── vm.sh                      # QEMU/OVMF boot of out/*.iso
 ├── chroot.sh                  # → /root/customize_airootfs.sh in mkarchiso
 ├── runtime/                   # → airootfs /usr/local/bin
 │   ├── ii-session             # live greetd command (purged on install)
 │   ├── ii-launch-installer    # live Calamares wrapper (purged)
+│   ├── ii-live-welcome        # live "Install to disk" notification (purged)
 │   ├── ii-ensure-venv         # venv from offline wheelhouse
 │   ├── ii-build-wheelhouse    # chroot-only wheelhouse builder
 │   ├── ii-prepare-bootloader  # Calamares: kernels + microcode + initramfs
@@ -192,6 +197,24 @@ Don't "simplify" these away — each cost real debugging time:
   `$ILLOGICAL_IMPULSE_VIRTUAL_ENV` from upstream's hypr `env.lua`). A static
   `kitty-theme.conf` in `overlay/skel-distro` covers the gap before it runs.
   Don't "fix" the seed away — without it the upstream welcome reappears.
+- **Pack removal `-Rns`-ing the recorded set aborts on a shared dep; pack
+  side-effect rows linger** → a pack's recorded set is members + the deps they
+  pulled; if another installed pack still needs one of those deps, a blind
+  `pacman -Rns $set` aborts the WHOLE (atomic) transaction and the user saw only
+  a generic "failed" (stderr swallowed). `revert-all`'s `pkg|pack` inverse now
+  routes through `_revert_pkgset`: it drops already-gone members, filters to the
+  SAFELY-removable subset (skips any dep still "Required By" an installed package
+  outside the set — leaving a shared dep installed for the pack that needs it),
+  and SURFACES pacman's stderr on failure. Separately, a pack's `post-add` hook
+  records side-effect rows (service/group/chsh/lua-block) keyed on the affected
+  OBJECT, not on `pack:<name>`, so `iictl revert-all pack:<name>` never matched
+  them and they lingered forever. The pack engine now exports
+  `II_PACK_TAG=pack:<name>` around the post-add hook; the mutators stamp that tag
+  into the row's otherwise-unused `packages` column (column 4 — never read for
+  non-package kinds, so the package-removal inverse is unaffected), and
+  `revert-all`'s per-feature filter (`_row_in_filter`) sweeps a tagged row with
+  the pack. `validate.sh` guards both halves (REV-04). Don't drop the tag or the
+  removable-subset filter — a shared-dep pack remove must succeed, not abort.
 - **`welcomeStyleCalamares: false`** hides `productWelcome` — keep `true` in
   `branding.desc`.
 - **prebuild wiping cache before makepkg succeeds** → empty cache on
@@ -246,6 +269,18 @@ Don't "simplify" these away — each cost real debugging time:
   the graphical probe" message when `/dev/kvm` is unavailable (set
   `SMOKE_ALLOW_TCG=1` to force the slow TCG path with eyes open) rather than
   hanging. `validate.sh` guards both halves (CI-03).
+
+## 6a. Known limitations (documented stances, not yet implemented)
+
+- **Secure Boot is unsupported — disable it to boot/install.** Neither the live
+  media nor `ii-finish-systemd-boot` signs or enrolls anything: the installed
+  system gets a plain unsigned systemd-boot setup, and `smoke.sh` boots with SB
+  off. On an SB-enabled machine firmware rejects the unsigned binaries.
+  The documented stance (README → "Secure Boot" + "Known issues") is: **turn
+  Secure Boot off** before booting the ISO and leave it off. `sbctl`/`shim`
+  enrollment in `ii-finish-systemd-boot` plus an SB-enabled smoke variant is a
+  planned future step (issue #83 / HW-02); SB-enabled installs are currently
+  untested. Don't claim SB support until that lands.
 
 ## 7. Debug paths
 

@@ -16,6 +16,49 @@
 RESOLVE="$BUILD/.pkg-resolve"
 PKGLIST="$BUILD/packages.x86_64"
 
+# Precondition: classification below routes every name official-vs-AUR with
+# `pacman -Si` against the HOST sync db (also resolve-deps.py upstream). An
+# empty/stale db (common on a fresh local checkout — `docked`/CI control it,
+# bare local builds don't) makes EVERY official package miss `-Si` and get
+# silently misrouted to the AUR/prebuild path: a broken, slow, or failed build
+# with no obvious cause. Assert a populated, recent sync db up front and fail
+# LOUDLY (telling the maintainer to run `pacman -Sy`) rather than misroute.
+# Days a sync db may age before we refuse to trust it; override for odd hosts.
+II_SYNCDB_MAX_AGE_DAYS="${II_SYNCDB_MAX_AGE_DAYS:-14}"
+_assert_sync_db() {
+  step "verify host pacman sync db (official-vs-AUR classification precondition)"
+  local dbpath repo db newest=0 mtime now stale_days
+  dbpath="$(pacman-conf DBPath 2>/dev/null || echo /var/lib/pacman/)"
+  dbpath="${dbpath%/}/sync"
+  # Every configured repo EXCEPT our own [ii-extra] (it is built locally, never
+  # `pacman -Sy`'d, and its absence/age says nothing about the official db).
+  # `pacman-conf --repo-list` is the source of truth; if unavailable, fall back
+  # to the on-disk *.db names (still excluding ii-extra).
+  local -a repos=()
+  if command -v pacman-conf >/dev/null; then
+    mapfile -t repos < <(pacman-conf --repo-list 2>/dev/null | grep -vx 'ii-extra' || true)
+  else
+    mapfile -t repos < <(find "$dbpath" -maxdepth 1 -name '*.db' -printf '%f\n' 2>/dev/null \
+                           | sed 's/\.db$//' | grep -vx 'ii-extra' || true)
+  fi
+  (( ${#repos[@]} > 0 )) || die "no official pacman repos found on this host — cannot classify packages. Run: sudo pacman -Sy (and check /etc/pacman.conf)"
+  now="$(date +%s)"
+  for repo in "${repos[@]}"; do
+    db="$dbpath/$repo.db"
+    if [[ ! -s "$db" ]]; then
+      die "empty/missing host sync db for [$repo] ($db). Official packages would be misrouted to the AUR. Run: sudo pacman -Sy"
+    fi
+    mtime="$(stat -c %Y "$db" 2>/dev/null || echo 0)"
+    (( mtime > newest )) && newest="$mtime"
+  done
+  stale_days=$(( (now - newest) / 86400 ))
+  if (( newest == 0 || stale_days > II_SYNCDB_MAX_AGE_DAYS )); then
+    die "host pacman sync db is stale (${stale_days}d old, max ${II_SYNCDB_MAX_AGE_DAYS}d) — classification may misroute renamed/dropped packages. Run: sudo pacman -Sy (or raise II_SYNCDB_MAX_AGE_DAYS)"
+  fi
+  ok "${#repos[@]} official sync db(s) present, newest ${stale_days}d old (≤ ${II_SYNCDB_MAX_AGE_DAYS}d)"
+}
+_assert_sync_db
+
 step "resolve upstream PKGBUILD depends"
 install -d "$RESOLVE"
 python3 "$TOOLS/resolve-deps.py" "$DOTS" "$RESOLVE" >&2

@@ -56,6 +56,8 @@ case "${1:-}" in
   *)
     command -v "$TUI_BIN" >/dev/null 2>&1 \
       || die "$TUI_BIN not found — the renderer ships as a baked package; on a dev checkout run 'just build', then retry"
-    exec "$TUI_BIN" "$1"
+    # Forward ALL args, not just $1 — so flag forms like `iictl tweak --validate
+    # <domain>` reach the renderer instead of being silently dropped.
+    exec "$TUI_BIN" "$@"
     ;;
 esac

@@ -30,6 +30,11 @@
 #       well-formed #meta:) and no member is ALSO baked into packages.x86_64.
 #   (6) PII guard: no baked dev-default carries a [user] block, the build host's
 #       git identity, or (for dev defaults) an email-shaped token.
+#   (7) pack-hook hygiene (IMMUNE-03): every packages/optional/<pack>.d/
+#       {post-add,post-remove} fragment is `bash -n`-clean, and a post-add that
+#       applies a reversible side effect via a mutator has a post-remove that
+#       calls the symmetric inverse — so `iictl pack remove` undoes exactly what
+#       `iictl pack install` did, not just a global `revert-all`.
 #
 # Entry point: lint_additive  (called from a validate.sh step).
 
@@ -219,6 +224,90 @@ _lint_optional_lists() {
   return 0
 }
 
+# ── Check 7 — pack post-add/post-remove hook hygiene (IMMUNE-03) ────────────
+# Pack hooks (packages/optional/<pack>.d/{post-add,post-remove}) are bash
+# FRAGMENTS the engine SOURCES (iictl.d/pack:_run_hook), never executes — so a
+# syntax error never trips `bash -n` at +x time and a missing symmetric inverse
+# never surfaces until a user runs `iictl pack remove` and the side effect lingers
+# (Iron Law violation: not reversible). Audit the repo source of truth
+# (packages/optional/*.d/) statically so a broken or asymmetric hook fails the
+# build, not the user's machine.
+#
+# Symmetry model: a post-add that applies a reversible side effect through a
+# mutator (mutator.sh) MUST have a post-remove that calls the matching inverse,
+# so `iictl pack remove <pack>` (which runs post-remove BEFORE removing the
+# recorded package set) undoes exactly what post-add added — without leaning on a
+# global `iictl revert-all`. The inverse map mirrors mutator.sh + revert-all's
+# own inverses (revert-all uses the raw `gpasswd -d`/`chsh` for group/shell, as
+# there is no ii_group_remove mutator). ii_conflicts_check is a pure gate that
+# records nothing and applies no side effect → it needs no inverse.
+_lint_pack_hooks() {
+  local optdir="$PACKAGES/optional"
+  [[ -d "$optdir" ]] || { _v_ok "pack hooks: no packages/optional/ — nothing to lint"; return 0; }
+
+  # side-effecting mutator → extended-regex of acceptable inverse tokens the
+  # symmetric post-remove may use (the inverse mutator OR the raw op revert-all
+  # itself runs). Pure gates (ii_conflicts_check) are intentionally absent.
+  local -A _inverse=(
+    [ii_service_enable]='ii_service_disable|systemctl[[:space:]]+disable'
+    [ii_service_disable]='ii_service_enable|systemctl[[:space:]]+enable'
+    [ii_group_add]='gpasswd[[:space:]]+-d|ii_group_remove'
+    [ii_chsh]='ii_chsh|chsh'
+    [ii_lua_block_write]='ii_lua_block_remove'
+  )
+
+  local hookdirs=()
+  shopt -s nullglob
+  hookdirs=("$optdir"/*.d)
+  shopt -u nullglob
+  if (( ${#hookdirs[@]} == 0 )); then
+    _v_ok "pack hooks: no <pack>.d/ hook dirs staged yet — nothing to lint"
+    return 0
+  fi
+
+  local bad=0 checked=0 hd pack add rm phase hook mut
+  for hd in "${hookdirs[@]}"; do
+    pack="$(basename "${hd%.d}")"
+    add="$hd/post-add"
+    rm="$hd/post-remove"
+
+    # (a) bash -n every present fragment. A missing fragment is fine (both are
+    # optional); a present one that won't parse is a hard fail.
+    for phase in post-add post-remove; do
+      hook="$hd/$phase"
+      [[ -f "$hook" ]] || continue
+      checked=$((checked+1))
+      if ! bash -n "$hook" 2>/dev/null; then
+        _v_fail "pack hooks: $pack.d/$phase has a bash syntax error (sourced fragment — would break 'iictl pack' at runtime)"
+        bad=$((bad+1))
+      fi
+    done
+
+    # (b) symmetry: for each side-effecting mutator the post-add invokes, the
+    # post-remove must call the matching inverse. Comment lines are stripped so
+    # a mutator named only in a comment neither demands nor satisfies an inverse.
+    [[ -f "$add" ]] || continue
+    local add_code rm_code
+    add_code="$(grep -vE '^[[:space:]]*#' "$add" 2>/dev/null)"
+    rm_code="$([[ -f "$rm" ]] && grep -vE '^[[:space:]]*#' "$rm" 2>/dev/null || true)"
+    for mut in "${!_inverse[@]}"; do
+      # word-boundary match so ii_service_enable does not also hit a longer name
+      grep -qE "(^|[^A-Za-z0-9_])$mut([^A-Za-z0-9_]|\$)" <<<"$add_code" || continue
+      if [[ ! -f "$rm" ]]; then
+        _v_fail "pack hooks: $pack.d/post-add calls $mut but there is NO post-remove — side effect would survive 'iictl pack remove' (not reversible)"
+        bad=$((bad+1)); continue
+      fi
+      if ! grep -qE "${_inverse[$mut]}" <<<"$rm_code"; then
+        _v_fail "pack hooks: $pack.d/post-add calls $mut but post-remove has no matching inverse (${_inverse[$mut]//[[:space:]]+/ }) — 'iictl pack remove' would not undo it"
+        bad=$((bad+1))
+      fi
+    done
+  done
+
+  (( bad == 0 )) && _v_ok "pack hooks: $checked fragment(s) bash -n clean, post-add side effects have symmetric post-remove inverses (${#hookdirs[@]} hook dir(s))"
+  return 0
+}
+
 # ── Check 6 — PII guard ────────────────────────────────────────────────────
 _lint_pii() {
   local bad=0 file rel
@@ -279,6 +368,7 @@ _lint_pii() {
 lint_additive() {
   _lint_skel_shadow
   _lint_optional_lists
+  _lint_pack_hooks
   _lint_pii
   return 0
 }

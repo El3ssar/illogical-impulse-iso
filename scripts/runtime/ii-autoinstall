@@ -1,0 +1,152 @@
+#!/usr/bin/env bash
+# ii-autoinstall — LIVE-ISO-ONLY unattended Calamares driver for the install
+# smoke (TEST-01, #80). Triggered ONLY when the kernel cmdline carries the
+# `ii_autoinstall` marker (the install-smoke harness appends it); a normal live
+# or `ii_install` boot never runs this. It overlays an unattended Calamares
+# config carried on a labelled vfat "seed" disk over /etc/calamares, runs
+# Calamares headlessly to completion, stamps the result back onto the seed
+# disk's writable result partition, and powers the VM off so the host driver can
+# inspect the outcome and boot the installed disk.
+#
+# Additive & reversible: this is a live-only helper. It is excluded from the
+# installed system by unpackfs (it lives only on the live squashfs) and is
+# explicitly purged by ii-verify alongside the other ISO-only helpers, so it
+# never reaches an installed user. It mutates nothing on the live ISO beyond a
+# throwaway copy of /etc/calamares inside the live tmpfs.
+#
+# Seed disk contract (the host install-smoke.sh builds it):
+#   * partition/disk labelled II_SEED, vfat, containing:
+#       calamares/                 — an unattended Calamares config tree
+#                                    (settings.conf + modules/*) to overlay onto
+#                                    /etc/calamares before the run
+#       (optional) cmdline-extra   — reserved; unused today
+#   * a second labelled vfat partition/disk II_RESULT (writable) where this
+#     script writes:
+#       result        — "OK" iff Calamares exited 0 AND ii-verify passed, else "FAIL: <reason>"
+#       calamares.log — a copy of the Calamares session log
+#       ii-verify.log — a copy of the target's /var/log/ii-verify.log (best effort)
+#
+# The host treats a missing/!=OK result as a failed install. This script never
+# exits non-zero in a way that would leave the VM running: every path ends in a
+# poweroff so the harness's wall-clock guard is a backstop, not the norm.
+
+set -u
+
+LOG=/var/log/ii-autoinstall.log
+mkdir -p "$(dirname "$LOG")"
+exec > >(tee -a "$LOG") 2>&1
+
+say() { echo "[ii-autoinstall] $*"; }
+
+# Best-effort: write the final verdict to the result disk, then power off. Always
+# the last thing we do — a bare `poweroff` on any early-exit path too.
+SEED_MNT=""
+RESULT_MNT=""
+RESULT_TEXT="FAIL: ii-autoinstall did not reach a verdict"
+
+finish() {
+  say "verdict: $RESULT_TEXT"
+  if [[ -n "$RESULT_MNT" && -d "$RESULT_MNT" ]]; then
+    printf '%s\n' "$RESULT_TEXT" > "$RESULT_MNT/result" 2>/dev/null || true
+    cp -f "$LOG" "$RESULT_MNT/ii-autoinstall.log" 2>/dev/null || true
+    # Pull the Calamares + target ii-verify logs back for host-side debugging.
+    cp -f /root/.cache/Calamares/Calamares/session.log "$RESULT_MNT/calamares.log" 2>/dev/null \
+      || cp -f "$HOME/.cache/Calamares/Calamares/session.log" "$RESULT_MNT/calamares.log" 2>/dev/null || true
+    cp -f /tmp/calamares.run.log "$RESULT_MNT/calamares-run.log" 2>/dev/null || true
+    sync
+  fi
+  # Unmount cleanly so the host sees a consistent filesystem.
+  [[ -n "$RESULT_MNT" ]] && umount "$RESULT_MNT" 2>/dev/null || true
+  [[ -n "$SEED_MNT"   ]] && umount "$SEED_MNT"   2>/dev/null || true
+  sync
+  say "powering off"
+  systemctl poweroff --no-block 2>/dev/null || poweroff -f 2>/dev/null || \
+    { echo o > /proc/sysrq-trigger 2>/dev/null; }
+  exit 0
+}
+trap finish EXIT
+
+require_root() {
+  if [[ "${EUID:-$(id -u)}" -ne 0 ]]; then
+    # Re-exec under sudo (the live wheel user has NOPASSWD); forward HOME so the
+    # Calamares session log lookup in finish() still resolves.
+    say "re-exec under sudo for root-only install steps"
+    exec sudo --preserve-env=HOME "$0" "$@"
+  fi
+}
+
+say "==== $(date -u +%FT%TZ) — unattended install smoke begins ===="
+require_root "$@"
+
+# ── locate + mount the seed (config) and result (writable) disks ────────────
+# Wait briefly for udev to settle the by-label symlinks (the disks are attached
+# at boot, but the link can lag the session start).
+seed_dev=""; result_dev=""
+for _i in $(seq 1 30); do
+  seed_dev=$(readlink -f /dev/disk/by-label/II_SEED 2>/dev/null || true)
+  result_dev=$(readlink -f /dev/disk/by-label/II_RESULT 2>/dev/null || true)
+  [[ -b "$seed_dev" && -b "$result_dev" ]] && break
+  sleep 1
+done
+[[ -b "$seed_dev" ]]   || { RESULT_TEXT="FAIL: II_SEED seed disk not found"; exit 0; }
+[[ -b "$result_dev" ]] || { RESULT_TEXT="FAIL: II_RESULT disk not found"; exit 0; }
+say "seed=$seed_dev result=$result_dev"
+
+SEED_MNT=$(mktemp -d); RESULT_MNT=$(mktemp -d)
+mount -o ro "$seed_dev" "$SEED_MNT"      || { RESULT_TEXT="FAIL: cannot mount seed disk"; exit 0; }
+mount      "$result_dev" "$RESULT_MNT"   || { RESULT_TEXT="FAIL: cannot mount result disk"; exit 0; }
+
+[[ -d "$SEED_MNT/calamares" ]] || { RESULT_TEXT="FAIL: seed disk has no calamares/ config tree"; exit 0; }
+
+# ── overlay the unattended Calamares config over the live /etc/calamares ─────
+# We copy the live config first (so any module the unattended tree omits keeps
+# its baked default), then lay the unattended overrides on top. This lives in
+# the live tmpfs and is gone on the next boot — nothing persists.
+CONF=/tmp/calamares-autoinstall
+rm -rf "$CONF"; mkdir -p "$CONF"
+cp -a /etc/calamares/. "$CONF/" 2>/dev/null || true
+cp -a "$SEED_MNT/calamares/." "$CONF/"
+say "unattended Calamares config staged at $CONF"
+say "settings.conf sequence:"; sed -n '/^sequence:/,/^[a-z]/p' "$CONF/settings.conf" | sed 's/^/    /'
+
+# ── run Calamares headlessly ────────────────────────────────────────────────
+# Calamares is a Qt app; the live boot already has a Wayland/X session up
+# (greetd → Hyprland) so a display is available. Forward the session env the way
+# ii-launch-installer does. We run with the offscreen platform as a fallback so
+# the install proceeds even if the compositor isn't reachable from this context.
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u liveuser 2>/dev/null || echo 0)}"
+LIVE_WL=$(ls "$XDG_RUNTIME_DIR"/wayland-* 2>/dev/null | head -1 || true)
+if [[ -n "$LIVE_WL" ]]; then
+  export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-$(basename "$LIVE_WL")}"
+  export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}"
+else
+  export QT_QPA_PLATFORM=offscreen
+fi
+say "running calamares (QT_QPA_PLATFORM=$QT_QPA_PLATFORM)"
+
+# -d: debug/verbose, no splash. Calamares reads its config from -X (or the
+# default search path); we point it at our overlaid tree explicitly.
+set +e
+calamares -d -X "$CONF" >/tmp/calamares.run.log 2>&1
+cala_rc=$?
+set -e 2>/dev/null || true
+say "calamares exited rc=$cala_rc"
+tail -n 40 /tmp/calamares.run.log | sed 's/^/    cala| /'
+
+if (( cala_rc != 0 )); then
+  RESULT_TEXT="FAIL: calamares exited $cala_rc (see calamares-run.log)"
+  exit 0
+fi
+
+# ── confirm the install gate (ii-verify) passed ─────────────────────────────
+# ii-verify runs as a Calamares shellprocess@verify-install step and exits
+# non-zero to ABORT the install on a broken target — so a clean Calamares exit
+# already implies ii-verify passed. Surface its log explicitly for the record.
+# The target may already be unmounted; copy whatever log we can still reach.
+for vl in /var/log/ii-verify.log /tmp/calamares-*/ii-verify.log; do
+  [[ -f "$vl" ]] && cp -f "$vl" "$RESULT_MNT/ii-verify.log" 2>/dev/null && break
+done
+
+RESULT_TEXT="OK"
+say "install complete — Calamares + ii-verify green"
+exit 0

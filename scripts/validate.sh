@@ -16,11 +16,11 @@ _v_warn() { warn "$*"; WARNS=$((WARNS+1)); warns+=("$*"); }
 _v_fail() { printf '   %sFAIL%s %s\n' "$C_R" "$C_0" "$*" >&2
             FAIL=$((FAIL+1)); fails+=("$*"); }
 
-# Pillar-6 reversibility lint — the four structural checks not already inline
-# below (skel-shadow collision, optional-list validity, PII guard, and the
-# skel-upstream precondition). Sourced here, invoked as its own step further
-# down; reuses the _v_* tallies above. Checks 2/3/5 of Pillar 6 already live
-# inline in their own steps (see tools/lint-additive.sh header for the map).
+# Pillar-6 reversibility lint — the structural checks not already inline below
+# (skel-shadow collision, optional-list validity, pack-hook hygiene, PII guard,
+# and the skel-upstream precondition). Sourced here, invoked as its own step
+# further down; reuses the _v_* tallies above. Checks 2/3/5 of Pillar 6 already
+# live inline in their own steps (see tools/lint-additive.sh header for the map).
 # shellcheck source=../tools/lint-additive.sh
 source "$TOOLS/lint-additive.sh"
 
@@ -751,7 +751,18 @@ fi
 # 'lang-go' and prune its row — silent over-removal. The catalog is closed
 # (repo-controlled), so forbid the collision at build time (Iron Rule bug-class).
 _PKDIR="$AIROOTFS/usr/share/illogical-impulse/optional"
-if [[ -d "$_PKDIR" ]]; then
+# IMMUNE-03: FAIL (not silently skip) when the staged catalog is missing while a
+# source catalog exists — a silent skip would false-pass a build whose
+# 45-optional-packs.sh staging broke, shipping an unaudited (possibly colliding)
+# pack catalog. Only an empty SOURCE catalog (no packs authored at all) is a
+# legitimate no-op.
+if [[ ! -d "$_PKDIR" ]]; then
+  if [[ -d "$PACKAGES/optional" ]] && compgen -G "$PACKAGES/optional/*.list" >/dev/null; then
+    _v_fail "optional pack catalog not staged ($_PKDIR) though packages/optional/ has lists — prefix-collision check SKIPPED (would false-pass); run 'just prepare' (45-optional-packs.sh)"
+  else
+    _v_ok "optional pack catalog: none authored (packages/optional/ empty) — prefix-collision check is a no-op"
+  fi
+else
   _pk_names=()
   shopt -s nullglob
   for _pl in "$_PKDIR"/*.list; do _pk_names+=("$(basename "${_pl%.list}")"); done
@@ -766,6 +777,66 @@ if [[ -d "$_PKDIR" ]]; then
   if (( ${#_pk_names[@]} > 0 && _pk_collide == 0 )); then
     _v_ok "optional pack names are prefix-collision-free (${#_pk_names[@]} pack(s)) — per-pack revert stays exact"
   fi
+fi
+
+step "pack removal robustness — shared deps + side-effect sweep (REV-04)"
+# REV-04: two real failure modes in `iictl pack remove`.
+#   (a) The recorded set is members + the deps they pulled. The old revert-all
+#       ran one `pacman -Rns --noconfirm $set >/dev/null 2>&1`: if any recorded
+#       dep is STILL required by another installed pack, pacman aborts the WHOLE
+#       (atomic) transaction and the user saw only a generic "failed" (stderr
+#       swallowed). The pkg/pack inverse must filter to the SAFELY-removable
+#       subset (skip a dep an outsider still needs) and SURFACE pacman's stderr
+#       on failure.
+#   (b) A pack's post-add hook records side-effect rows (service/group/chsh/
+#       lua-block) keyed on the affected OBJECT, not on `pack:<name>`, so
+#       `iictl revert-all pack:<name>` never matched them → they LINGERED in the
+#       ledger forever. The pack engine stamps the pack tag into those rows and
+#       revert-all's filter sweeps them with the pack.
+# Comments are stripped first so this section's prose can't satisfy a grep.
+MUT="$AIROOTFS/usr/local/lib/ii/mutator.sh"
+if [[ ! -f "$RA" ]]; then
+  : # revert-all absence already failed above
+else
+  # (a) the pkg/pack inverse no longer does a bare blind `pacman -Rns $set` with
+  #     swallowed stderr — it routes through a removable-subset filter that
+  #     surfaces pacman's error. Require the dedicated helper AND that the inverse
+  #     no longer pipes pacman -Rns straight to /dev/null 2>&1.
+  if grep -qE '_revert_pkgset' <<<"$_ra_code"; then
+    _v_ok "revert-all routes pack removal through a shared-dep-aware _revert_pkgset (no atomic abort on a shared dep, REV-04)"
+  else
+    _v_fail "revert-all has no _revert_pkgset — a recorded dep still required by another pack aborts the whole -Rns transaction (REV-04)"
+  fi
+  if grep -qE 'pacman -Rns[^|]*2>&1[[:space:]]*>/dev/null' <<<"$_ra_code"; then
+    _v_ok "revert-all captures pacman -Rns stderr (the real failure reason is surfaced, not swallowed) (REV-04)"
+  else
+    _v_fail "revert-all does not capture pacman -Rns stderr — a removal failure stays a generic 'failed' (REV-04)"
+  fi
+  # the removable-subset filter must consult installed reverse-deps ('Required By').
+  grep -q 'Required By' <<<"$_ra_code" \
+    && _v_ok "revert-all filters to packages not required by an outsider (Required By gate) (REV-04)" \
+    || _v_fail "revert-all never inspects 'Required By' — it cannot skip a still-needed shared dep (REV-04)"
+  # (b) the per-feature filter must ALSO match pack-tagged side-effect rows, else
+  #     a pack's service/group/lua rows linger after `iictl pack remove`.
+  grep -q '_row_in_filter' <<<"$_ra_code" \
+    && _v_ok "revert-all's feature filter sweeps pack-tagged side-effect rows via _row_in_filter (REV-04)" \
+    || _v_fail "revert-all's feature filter matches only F_target — pack-tagged side-effect rows are never swept (REV-04)"
+fi
+if [[ ! -f "$MUT" ]]; then
+  _v_fail "mutator.sh not staged — pack side-effect rows cannot carry the pack tag (REV-04)"
+elif [[ ! -f "$PK" ]]; then
+  : # pack engine absence already failed above
+else
+  _mut_code="$(grep -vE '^[[:space:]]*#' "$MUT")"
+  _pk_code2="$(grep -vE '^[[:space:]]*#' "$PK")"
+  # the pack engine exports II_PACK_TAG around the post-add hook…
+  grep -q 'II_PACK_TAG' <<<"$_pk_code2" \
+    && _v_ok "pack engine exports II_PACK_TAG around the post-add hook (side effects carry the pack tag) (REV-04)" \
+    || _v_fail "pack engine never sets II_PACK_TAG — post-add side effects record no pack tag and linger after remove (REV-04)"
+  # …and the mutators stamp that tag onto the side-effect ledger rows.
+  grep -q 'II_PACK_TAG\|_ii_pack_tag' <<<"$_mut_code" \
+    && _v_ok "mutators stamp the pack tag (II_PACK_TAG) onto recorded side-effect rows (REV-04)" \
+    || _v_fail "mutators ignore II_PACK_TAG — pack side-effect rows are not pack-tagged and revert-all can't sweep them (REV-04)"
 fi
 
 step "iictl-tui chooser contract (#47)"
@@ -1241,6 +1312,71 @@ else
   _v_fail "release.yml runs the smoke test without enabling /dev/kvm access — the graphical boot probe hangs under TCG on the standard runner (CI-03)"
 fi
 
+step "unattended install→boot smoke wiring (TEST-01)"
+# TEST-01 adds an unattended install smoke (install-smoke.sh, `just smoke
+# --installed`): autologin live → headless Calamares from a scripted seed →
+# boot the installed disk → re-probe a graphical session (Calamares' own
+# shellprocess@verify-install ii-verify gate must have passed, or the install
+# aborts). It rides a live-only seam — a dedicated `ii_autoinstall` boot entry
+# read by the live-only execs.lua hook, driving the live-only ii-autoinstall
+# helper. All of that is purged on install (ii-verify) and never reaches an
+# installed user. This check asserts each link of that chain is wired, so a
+# later edit can't silently sever the install smoke. Static greps.
+_ISMOKE="$ROOT/scripts/install-smoke.sh"
+if [[ ! -f "$_ISMOKE" ]]; then
+  _v_fail "scripts/install-smoke.sh missing — the unattended install smoke (TEST-01) is gone"
+else
+  # (a) same CI-03 KVM fast-fail stance as smoke.sh — no silent TCG hang.
+  if grep -q 'die "KVM required for the install smoke' "$_ISMOKE" && grep -q '/dev/kvm' "$_ISMOKE"; then
+    _v_ok "install-smoke.sh fails fast on missing /dev/kvm (CI-03 stance) (TEST-01)"
+  else
+    _v_fail "install-smoke.sh does not fail fast on missing /dev/kvm — a KVM-less run hangs to its timeout (TEST-01/CI-03)"
+  fi
+  # (b) it must assert the install verdict AND re-probe the installed boot.
+  grep -q 'II_RESULT' "$_ISMOKE" && grep -q 'distinct colors' "$_ISMOKE" \
+    && _v_ok "install-smoke.sh asserts an install verdict + re-probes the installed graphical session (TEST-01)" \
+    || _v_fail "install-smoke.sh must read the install verdict (II_RESULT) and probe the installed boot's framebuffer (TEST-01)"
+fi
+# (c) `just smoke --installed` must route to the install smoke, leaving the
+#     live smoke (bare `just smoke`) untouched.
+if grep -qE 'install-smoke\.sh' "$ROOT/justfile" && grep -q 'smoke.sh' "$ROOT/justfile"; then
+  _v_ok "justfile routes 'just smoke --installed' to install-smoke.sh, keeps the live smoke (TEST-01)"
+else
+  _v_fail "justfile does not route '--installed' to install-smoke.sh (or dropped the live smoke) (TEST-01)"
+fi
+# (d) the live-only trigger chain: dedicated boot entry → execs.lua hook → helper.
+_AI_ENTRY="$OVERLAY/efiboot/loader/entries/05-illogical-impulse-autoinstall.conf"
+if [[ -f "$_AI_ENTRY" ]] && grep -q 'ii_autoinstall' "$_AI_ENTRY"; then
+  _v_ok "dedicated 'Unattended install' boot entry carries ii_autoinstall (TEST-01)"
+else
+  _v_fail "missing/empty ii_autoinstall boot entry (overlay/efiboot/.../05-*autoinstall.conf) — the smoke can't reach the unattended path (TEST-01)"
+fi
+_AI_EXECS="$AIROOTFS/etc/skel-live/.config/hypr/custom/execs.lua"
+[[ -f "$_AI_EXECS" ]] || _AI_EXECS="$OVERLAY/skel-live/.config/hypr/custom/execs.lua"
+if [[ -f "$_AI_EXECS" ]] && grep -q 'ii_autoinstall' "$_AI_EXECS" && grep -q 'ii-autoinstall' "$_AI_EXECS"; then
+  _v_ok "live execs.lua recognizes ii_autoinstall → runs ii-autoinstall (TEST-01)"
+else
+  _v_fail "live execs.lua does not branch on ii_autoinstall to run ii-autoinstall (TEST-01)"
+fi
+_AI_HELPER="$AIROOTFS/usr/local/bin/ii-autoinstall"
+[[ -f "$_AI_HELPER" ]] || _AI_HELPER="$ROOT/scripts/runtime/ii-autoinstall"
+if [[ -f "$_AI_HELPER" ]]; then
+  bash -n "$_AI_HELPER" 2>/dev/null \
+    && _v_ok "ii-autoinstall live helper present and syntactically valid (TEST-01)" \
+    || _v_fail "ii-autoinstall has a syntax error (TEST-01)"
+else
+  _v_fail "ii-autoinstall live helper missing (scripts/runtime/ii-autoinstall) (TEST-01)"
+fi
+# (e) ii-autoinstall MUST be purged on install (live-only; Iron Law) — it is in
+#     ii-verify's named-file purge loop alongside the other ISO-only helpers.
+_IV="$AIROOTFS/usr/local/bin/ii-verify"
+[[ -f "$_IV" ]] || _IV="$ROOT/scripts/runtime/ii-verify"
+if [[ -f "$_IV" ]] && grep -q 'ii-autoinstall' "$_IV"; then
+  _v_ok "ii-verify purges ii-autoinstall from the installed system (live-only) (TEST-01)"
+else
+  _v_fail "ii-verify does not purge ii-autoinstall — a live-only install helper would leak onto the installed system (TEST-01/Iron Law)"
+fi
+
 step "list files end with a trailing newline (BUILD-04)"
 # The prepare-time list readers are now newline-agnostic
 # (`while read … || [[ -n "$line" ]]`, scripts/prepare.d/30-skel.sh +
@@ -1413,12 +1549,93 @@ if [[ -f "$IIPI" ]]; then
   fi
 fi
 
+step "host-side pipeline scripts syntax (IMMUNE-02)"
+# The check above only parses the *staged* airootfs runtime scripts. The
+# host-side pipeline that drives the UNATTENDED release — prebuild, mkiso,
+# publish-sf, smoke, vm, update, nspawn, and every prepare.d/* fragment — was
+# never syntax-checked, so a typo could survive review and break a cron release
+# only at run time. These exist statically (no build needed), so bash -n them
+# straight from the source tree. prepare.d/* are *sourced* fragments (no
+# shebang by design — see "Conventions"); we only assert they parse.
+_host_n=0
+shopt -s nullglob
+for _hs in "$SCRIPTS"/*.sh "$SCRIPTS"/prepare.d/*.sh; do
+  _host_n=$((_host_n+1))
+  _hrel="${_hs#"$ROOT"/}"
+  bash -n "$_hs" 2>/dev/null \
+    && _v_ok "$_hrel" \
+    || _v_fail "$_hrel syntax error"
+done
+shopt -u nullglob
+(( _host_n > 0 )) \
+  && _v_ok "$_host_n host-side script(s) syntax-checked" \
+  || _v_fail "no host-side scripts/*.sh found — SCRIPTS path wrong?"
+
+step "host pacman sync-db guard (BUILD-06)"
+# 40-packages classifies every name official-vs-AUR with `pacman -Si` against the
+# HOST sync db; an empty/stale db (common on bare local builds, not docked/CI)
+# silently misroutes EVERY official package to the AUR/prebuild path. The step
+# must assert a populated, recent sync db BEFORE any classification and `die`
+# loudly if absent. Guard the guard: it must (a) define & invoke the assertion
+# before the first `pacman -Si`, and (b) point the maintainer at `pacman -Sy`.
+PKGSTEP="$SCRIPTS/prepare.d/40-packages.sh"
+if [[ ! -f "$PKGSTEP" ]]; then
+  _v_fail "40-packages.sh missing — BUILD-06 sync-db guard can't be verified"
+else
+  _b06_code="$(grep -vE '^[[:space:]]*#' "$PKGSTEP")"
+  # (a) the assertion is defined and actually invoked.
+  if grep -q '_assert_sync_db()' <<<"$_b06_code" \
+     && grep -qE '^[[:space:]]*_assert_sync_db[[:space:]]*$' <<<"$_b06_code"; then
+    _v_ok "40-packages defines and invokes _assert_sync_db (BUILD-06)"
+  else
+    _v_fail "40-packages does not invoke _assert_sync_db — official-vs-AUR classification has no sync-db precondition (BUILD-06)"
+  fi
+  # (b) the guard runs BEFORE the first `pacman -Si` classification call.
+  _b06_assert_ln="$(grep -nE '^[[:space:]]*_assert_sync_db[[:space:]]*$' <<<"$_b06_code" | head -1 | cut -d: -f1)"
+  _b06_si_ln="$(grep -nE 'pacman -Si ' <<<"$_b06_code" | head -1 | cut -d: -f1)"
+  if [[ -n "$_b06_assert_ln" && -n "$_b06_si_ln" ]] && (( _b06_assert_ln < _b06_si_ln )); then
+    _v_ok "sync-db assertion precedes the first 'pacman -Si' classification (BUILD-06)"
+  else
+    _v_fail "sync-db assertion does not precede 'pacman -Si' classification — packages could be misrouted before the guard runs (BUILD-06)"
+  fi
+  # (c) the failure path points the maintainer at the remedy (`pacman -Sy`) and dies.
+  if grep -q 'pacman -Sy' <<<"$_b06_code" && grep -q 'die ' <<<"$_b06_code"; then
+    _v_ok "sync-db guard fails loudly via die() and names 'pacman -Sy' as the remedy (BUILD-06)"
+  else
+    _v_fail "sync-db guard does not die() with a 'pacman -Sy' remedy — failure would be silent or unhelpful (BUILD-06)"
+  fi
+fi
+
 step "additive/reversibility lint"
-# Pillar 6 (the four structural checks): skel-upstream precondition + skel-shadow
-# collision, packages/optional/*.list validity (no double-bake), and the PII
-# guard. '|| true' so an unexpected non-zero can't abort before the summary
-# (the FAIL tally, not lint_additive's return code, is what gates the build).
+# Pillar 6 (the structural checks): skel-upstream precondition + skel-shadow
+# collision, packages/optional/*.list validity (no double-bake), pack
+# post-add/post-remove hook hygiene (bash -n + mutator inverse symmetry,
+# IMMUNE-03), and the PII guard. '|| true' so an unexpected non-zero can't abort
+# before the summary (the FAIL tally, not lint_additive's return code, is what
+# gates the build).
 lint_additive || true
+
+step "docs drift guard (DOC-01)"
+# Non-fatal (WARN) sentinels: the doc-drift sweep (DOC-01) corrected two stale
+# claims that had crept into four+ docs — a fixed "~55 checks" validate count
+# (this script now has ~150) and "phases 4–5 … pending" (the builder container,
+# just docked, and release CI all shipped). Warn — never fail — if either string
+# reappears, so a future edit re-introducing the drift is surfaced loudly without
+# blocking the build. Operates on the tracked source docs, not build/.
+_dd_docs=("$ROOT/CLAUDE.md" "$ROOT/README.md" "$ROOT/docs/BLUEPRINT.md" "$ROOT/docs/GUIDE.md" "$ROOT/distro.toml")
+_dd_hits=0
+for _dd in "${_dd_docs[@]}"; do
+  [[ -f "$_dd" ]] || continue
+  if grep -qiE '~?55[ -](check|assertion)' "$_dd"; then
+    _v_warn "$(basename "$_dd"): stale '~55 checks' validate count — update to the real count (DOC-01/DD-03)"
+    _dd_hits=$((_dd_hits+1))
+  fi
+  if grep -qiE 'phases?[ ]*4[–-]?5?.*(pending|not wired)|phase 4 — not wired|phases 4–5.*pending' "$_dd"; then
+    _v_warn "$(basename "$_dd"): stale 'phases 4–5 … pending/not wired' claim — phases 4–5 shipped (DOC-01/DD-01)"
+    _dd_hits=$((_dd_hits+1))
+  fi
+done
+(( _dd_hits == 0 )) && _v_ok "no '~55 checks' / 'phases 4–5 … pending' drift sentinels in docs (DOC-01)"
 
 step "summary"
 printf '   pass %s%d%s    warn %s%d%s    fail %s%d%s\n\n' \
