@@ -73,7 +73,7 @@ just vm           # boot it in QEMU  (--disk to test a full install, needs quemu
 |---|---|
 | `just build [profile]` | full pipeline → `out/*.iso` |
 | `just prepare` / `just prebuild` | assemble profile / build AUR packages |
-| `just validate` | ~55-check static audit, no root needed |
+| `just validate` | ~150-check static audit, no root needed |
 | `just update` | bump the dots pin (`--check` = policy dry-run) |
 | `just vm [--disk\|--installed]` | QEMU: live ISO / install test / installed system |
 | `just preview [app]` | live-preview a standalone Quickshell app (no build); no arg lists them |
