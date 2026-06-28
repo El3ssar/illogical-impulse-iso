@@ -247,6 +247,18 @@ Don't "simplify" these away — each cost real debugging time:
   `SMOKE_ALLOW_TCG=1` to force the slow TCG path with eyes open) rather than
   hanging. `validate.sh` guards both halves (CI-03).
 
+## 6a. Known limitations (documented stances, not yet implemented)
+
+- **Secure Boot is unsupported — disable it to boot/install.** Neither the live
+  media nor `ii-finish-systemd-boot` signs or enrolls anything: the installed
+  system gets a plain unsigned systemd-boot setup, and `smoke.sh` boots with SB
+  off. On an SB-enabled machine firmware rejects the unsigned binaries.
+  The documented stance (README → "Secure Boot" + "Known issues") is: **turn
+  Secure Boot off** before booting the ISO and leave it off. `sbctl`/`shim`
+  enrollment in `ii-finish-systemd-boot` plus an SB-enabled smoke variant is a
+  planned future step (issue #83 / HW-02); SB-enabled installs are currently
+  untested. Don't claim SB support until that lands.
+
 ## 7. Debug paths
 
 ```
