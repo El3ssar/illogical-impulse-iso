@@ -1450,7 +1450,129 @@ else
   fi
 fi
 
+step "historic-bug / Iron-Law coverage (IMMUNE-01)"
+# Cluster of small guards for documented historic bug-classes + Iron-Law
+# invariants that previously had NO validate.sh check, so a regression shipped
+# green. One focused check per item; mirrors the NVSTASH/cups grep patterns.
+
+# (1) welcomeStyleCalamares — must be `true` in branding.desc; `false` hides
+#     productWelcome (the welcome.png hero). The stylesheet.qss formerly carried
+#     an INERT wrong `welcomeStyleCalamares: false` (it is a branding key, no-op
+#     in a .qss) — a misleading drift now pinned to match branding.desc.
+_BRAND_DIR="$AIROOTFS/etc/calamares/branding/illogical-impulse"
+_BDESC="$_BRAND_DIR/branding.desc"
+if [[ -f "$_BDESC" ]] && grep -qE '^[[:space:]]*welcomeStyleCalamares:[[:space:]]*true[[:space:]]*$' "$_BDESC"; then
+  _v_ok "branding.desc welcomeStyleCalamares: true (productWelcome shown)"
+else
+  _v_fail "branding.desc welcomeStyleCalamares is not 'true' — productWelcome (welcome.png) is hidden"
+fi
+_BQSS="$_BRAND_DIR/stylesheet.qss"
+if [[ -f "$_BQSS" ]] && grep -qE '^[[:space:]]*welcomeStyleCalamares:[[:space:]]*false' "$_BQSS"; then
+  _v_fail "stylesheet.qss still carries the inert wrong 'welcomeStyleCalamares: false' — match branding.desc (true) so the value never misleads"
+else
+  _v_ok "stylesheet.qss has no inert wrong welcomeStyleCalamares: false"
+fi
+
+# (2) services-systemd module schema is `units:`, NOT `services:`/`targets:`.
+#     The wrong keys make Calamares silently drop every entry (no service
+#     enabled). Strip comments first so the conf's own schema-note prose can
+#     neither satisfy nor trip the grep.
+_SSYS="$AIROOTFS/etc/calamares/modules/services-systemd.conf"
+if [[ ! -f "$_SSYS" ]]; then
+  _v_fail "services-systemd.conf missing from staged airootfs"
+else
+  _ssys_code="$(grep -vE '^[[:space:]]*#' "$_SSYS")"
+  if grep -qE '^[[:space:]]*units:' <<<"$_ssys_code"; then
+    _v_ok "services-systemd.conf uses the 'units:' schema"
+  else
+    _v_fail "services-systemd.conf lacks 'units:' — Calamares silently drops every entry (no service enabled)"
+  fi
+  if grep -qE '^[[:space:]]*(services|targets):' <<<"$_ssys_code"; then
+    _v_fail "services-systemd.conf uses the wrong 'services:'/'targets:' keys — Calamares ignores them; convert to 'units:'"
+  else
+    _v_ok "services-systemd.conf has no wrong services:/targets: keys"
+  fi
+fi
+
+# (3) ii-post-install MUST remove the live gnupg tmpfs mount unit. If it
+#     survives, the tmpfs hides the real on-disk keyring and pacman signature
+#     verification fails on the installed system.
+_POSTI="$AIROOTFS/usr/local/bin/ii-post-install"
+if [[ -f "$_POSTI" ]] && grep -q 'etc-pacman.d-gnupg.mount' "$_POSTI"; then
+  _v_ok "ii-post-install removes the live gnupg tmpfs mount (keyring survives)"
+else
+  _v_fail "ii-post-install no longer removes etc-pacman.d-gnupg.mount — the live tmpfs would hide the installed keyring"
+fi
+
+# (4) installer purge is DATA-DRIVEN from installer.list. 40-packages.sh stages
+#     the baked installer-only names to installer-purge.list; ii-post-install
+#     reads that file (not a hardcoded `calamares kpmcore`), so a third
+#     installer.list entry can't leak onto the installed target. Guard both
+#     halves: the staged list exists + covers installer.list, and
+#     ii-post-install consumes it.
+_IPURGE_STAGED="$AIROOTFS/usr/share/illogical-impulse/installer-purge.list"
+_ILIST="$PACKAGES/installer.list"
+if [[ ! -f "$_IPURGE_STAGED" ]]; then
+  _v_fail "installer-purge.list not staged — ii-post-install's purge isn't data-driven from installer.list"
+elif [[ -f "$_ILIST" ]]; then
+  _ip_miss=0
+  while IFS= read -r _ipkg; do
+    _ipkg="${_ipkg%%#*}"; _ipkg="${_ipkg//[[:space:]]/}"
+    [[ -n "$_ipkg" ]] || continue
+    grep -qxF "$_ipkg" "$_IPURGE_STAGED" || { _v_fail "installer.list pkg '$_ipkg' missing from staged installer-purge.list — it would leak onto the target"; _ip_miss=$((_ip_miss + 1)); }
+  done < "$_ILIST"
+  (( _ip_miss == 0 )) && _v_ok "installer-purge.list covers every installer.list pkg (purge data-driven)"
+fi
+if [[ -f "$_POSTI" ]] && grep -q 'installer-purge.list' "$_POSTI"; then
+  _v_ok "ii-post-install reads installer-purge.list (purge stays in lockstep with installer.list)"
+else
+  _v_fail "ii-post-install does not read installer-purge.list — the purge is hardcoded and can drift from installer.list"
+fi
+
+# (5) the SECOND hardcoded copy of upstream's firstRunFileContent — the
+#     fail-safe seed in ii-post-install — must stay byte-equal to upstream's
+#     string (the skel seed has its own guard; this literal was unguarded).
+_FRUN_QML="$DOTS/dots/.config/quickshell/ii/services/FirstRunExperience.qml"
+if [[ ! -f "$_POSTI" ]]; then
+  _v_fail "ii-post-install missing — can't guard the fail-safe firstRun literal"
+elif [[ ! -f "$_FRUN_QML" ]]; then
+  _v_warn "upstream FirstRunExperience.qml not found — fail-safe firstRun literal cross-check skipped"
+else
+  _frun_up=$(sed -nE 's/.*firstRunFileContent:[[:space:]]*"([^"]*)".*/\1/p' "$_FRUN_QML")
+  # The literal is `printf "<text>\n" > "$FRUN"` in ii-post-install; pull the
+  # quoted text and drop the trailing \n to compare against upstream's value.
+  _frun_post=$(grep -oE 'printf "[^"]*" > "\$FRUN"' "$_POSTI" | sed -E 's/^printf "//; s/" > "\$FRUN"$//; s/\\n$//')
+  if [[ -z "$_frun_up" ]]; then
+    _v_warn "could not parse firstRunFileContent from FirstRunExperience.qml — fail-safe literal cross-check skipped"
+  elif [[ -z "$_frun_post" ]]; then
+    _v_fail "ii-post-install's fail-safe first_run.txt printf literal not found in the expected form — can't verify it matches upstream"
+  elif [[ "$_frun_post" == "$_frun_up" ]]; then
+    _v_ok "ii-post-install fail-safe firstRun literal matches upstream's firstRunFileContent"
+  else
+    _v_fail "ii-post-install fail-safe firstRun literal drifted from upstream's firstRunFileContent (got '$_frun_post', upstream '$_frun_up')"
+  fi
+fi
+
+# (6) the banned `((var++))` idiom: post-increment of a zero variable returns 1,
+#     so under `set -e` it silently kills the script (cost a real two-kernel
+#     install). Forbid it in the runtime/prepare scripts; use var=$((var + 1)).
+#     Scan the SOURCE trees (not the staged copy) and ignore comments so the
+#     ii-prepare-bootloader "NOT ((copied++))" caution doesn't self-trip.
+_pp_hits=0
+while IFS= read -r _ppfile; do
+  [[ -f "$_ppfile" ]] || continue
+  if grep -vE '^[[:space:]]*#' "$_ppfile" | grep -qE '\(\([[:alnum:]_]+(\+\+|--)\)\)|\(\((\+\+|--)[[:alnum:]_]+\)\)'; then
+    _v_fail "banned post/pre-(in|de)crement '((var++))' in ${_ppfile#"$ROOT"/} — returns 1 on a 0 value and set -e kills the script; use var=\$((var + 1))"
+    _pp_hits=$((_pp_hits + 1))
+  fi
+done < <(find "$SCRIPTS/runtime" "$SCRIPTS/prepare.d" -maxdepth 1 -type f 2>/dev/null)
+(( _pp_hits == 0 )) && _v_ok "no banned '((var++))' idiom in runtime/ + prepare.d/ scripts"
+
 step "runtime + chroot scripts syntax"
+# Every airootfs runtime helper must `bash -n` clean. The loop historically
+# omitted ii-ensure-venv, ii-build-wheelhouse and ii-live-welcome — three real
+# shipped helpers — so a syntax error in any of them passed validate green
+# (IMMUNE-01 syntax-loop-misses-three-scripts). They are now in the list.
 for sc in "$AIROOTFS/usr/local/bin/"ii-session \
           "$AIROOTFS/usr/local/bin/"ii-launch-installer \
           "$AIROOTFS/usr/local/bin/"iictl \
@@ -1458,6 +1580,9 @@ for sc in "$AIROOTFS/usr/local/bin/"ii-session \
           "$AIROOTFS/usr/local/bin/"ii-prepare-bootloader \
           "$AIROOTFS/usr/local/bin/"ii-finish-systemd-boot \
           "$AIROOTFS/usr/local/bin/"ii-verify \
+          "$AIROOTFS/usr/local/bin/"ii-ensure-venv \
+          "$AIROOTFS/usr/local/bin/"ii-build-wheelhouse \
+          "$AIROOTFS/usr/local/bin/"ii-live-welcome \
           "$AIROOTFS/root/"customize_airootfs.sh; do
   [[ -f "$sc" ]] || { _v_fail "missing: $sc"; continue; }
   [[ "$(head -c2 "$sc")" == "#!" ]] || _v_fail "no shebang: $(basename "$sc")"

@@ -174,9 +174,14 @@ Don't "simplify" these away — each cost real debugging time:
 - **unpackfs `sourcefs: "squashfs"`** when the source is a directory →
   crash. Must be `"ext4"`.
 - **Plymouth + universal initramfs** → black screens. Not shipped; opt-in only.
-- **`services-systemd` schema is `units:`**, not `services:/targets:`.
+- **`services-systemd` schema is `units:`**, not `services:/targets:`. The
+  wrong keys make Calamares silently drop every entry (no service enabled);
+  `validate.sh` guards the staged conf (strips comments first so the schema-note
+  prose can't satisfy/trip the grep) — IMMUNE-01.
 - **Live tmpfs gnupg mount surviving install** → broken keyring.
   `ii-post-install` removes the mount unit; the on-disk keyring survives.
+  `validate.sh` guards that ii-post-install still drops
+  `etc-pacman.d-gnupg.mount` — IMMUNE-01.
 - **Color pregen in chroot races `applycolor.sh`** → we don't pregen; the
   first-boot wallpaper switch (`switchwall.sh`) generates colours in a real
   Hyprland session. We **suppress upstream's FirstRunExperience** (its welcome
@@ -216,7 +221,9 @@ Don't "simplify" these away — each cost real debugging time:
   the pack. `validate.sh` guards both halves (REV-04). Don't drop the tag or the
   removable-subset filter — a shared-dep pack remove must succeed, not abort.
 - **`welcomeStyleCalamares: false`** hides `productWelcome` — keep `true` in
-  `branding.desc`.
+  `branding.desc`. `validate.sh` guards the staged value is `true` AND that the
+  sibling `stylesheet.qss` carries no inert wrong `false` copy (it is a branding
+  key, a no-op in a `.qss`, but a misleading drift) — IMMUNE-01.
 - **prebuild wiping cache before makepkg succeeds** → empty cache on
   failure. The wipe lives INSIDE `_build` after success.
 - **Detached `.sig` fed to `repo-add`** → on a signing-enabled host
@@ -269,6 +276,32 @@ Don't "simplify" these away — each cost real debugging time:
   the graphical probe" message when `/dev/kvm` is unavailable (set
   `SMOKE_ALLOW_TCG=1` to force the slow TCG path with eyes open) rather than
   hanging. `validate.sh` guards both halves (CI-03).
+- **Installer purge hardcoded, decoupled from `installer.list`** → the live-only
+  installer set (calamares, kpmcore…) is BAKED via `packages/installer.list` and
+  PURGED from the target by `ii-post-install`. A hardcoded `calamares kpmcore` in
+  the purge would leak any *third* `installer.list` entry onto every installed
+  system. `40-packages.sh` now stages the parsed installer names into the
+  squashfs at `/usr/share/illogical-impulse/installer-purge.list`;
+  `ii-post-install` reads that file (removing it after), falling back to the
+  baked-in default only if it is missing. `validate.sh` guards both halves — the
+  staged list covers every `installer.list` pkg AND ii-post-install consumes it
+  (IMMUNE-01).
+- **Second hardcoded copy of upstream's `firstRunFileContent`** → besides the
+  skel seed (its own guard), `ii-post-install` carries a *fail-safe* `printf
+  "<text>\n" > "$FRUN"` literal for the rare case skel didn't seed the marker.
+  If upstream retexts the string, that literal silently writes foreign content
+  into upstream's STATE path. `validate.sh` cross-checks the printf literal
+  against upstream's `FirstRunExperience.qml` `firstRunFileContent` — IMMUNE-01.
+- **Runtime syntax loop missed three shipped helpers** → `validate.sh`'s
+  `bash -n` loop omitted `ii-ensure-venv`, `ii-build-wheelhouse`,
+  `ii-live-welcome`, so a syntax error in any of them shipped green. All three
+  are now in the loop — IMMUNE-01.
+- **`((var++))` under `set -e`** → post-increment of a zero variable returns 1,
+  so `set -e` silently kills the script (cost a real two-kernel install; see the
+  `NOT ((copied++))` caution in `ii-prepare-bootloader`). The idiom is now banned
+  by a `validate.sh` lint over `scripts/runtime/` + `scripts/prepare.d/` (use
+  `var=$((var + 1))`); the two stale occurrences (`60-boot.sh`, `ii-verify`) were
+  converted — IMMUNE-01.
 
 ## 6a. Known limitations (documented stances, not yet implemented)
 

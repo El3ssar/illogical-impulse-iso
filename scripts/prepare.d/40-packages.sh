@@ -126,6 +126,24 @@ if [[ -n "$PROFILE" ]]; then
 fi
 ok "manifests merged"
 
+# ── data-drive the installer purge from installer.list ─────────────────────
+# ii-post-install removes the installer infrastructure (calamares, kpmcore…)
+# from the installed system. That removal MUST stay in lockstep with what we
+# BAKED as installer-only via installer.list — a hardcoded `calamares kpmcore`
+# in ii-post-install would leak any third installer.list entry onto every
+# installed target. Stage the parsed package names into the squashfs as TEXT at
+# /usr/share/illogical-impulse/installer-purge.list; ii-post-install reads it
+# (and removes it after the purge), falling back to the baked-in default only if
+# the file is missing. validate.sh guards that ii-post-install consumes this
+# file rather than a hardcoded list.
+if [[ -f "$PACKAGES/installer.list" ]]; then
+  _IPURGE="$BUILD/airootfs/usr/share/illogical-impulse/installer-purge.list"
+  install -d "$(dirname "$_IPURGE")"
+  grep -Ev '^\s*(#|$)' "$PACKAGES/installer.list" | sed -E 's/\s*#.*$//; s/\s+//g' \
+    | awk 'NF && !seen[$0]++' > "$_IPURGE"
+  ok "installer purge list staged ($(grep -c . "$_IPURGE") pkg(s) → installer-purge.list)"
+fi
+
 step "NVIDIA driver manifest (hardware-detected at install — NOT baked)"
 # Blindly baking nvidia-utils would blacklist nouveau and break non-NVIDIA
 # machines. chroot.sh stashes these as a tiny on-ISO repo; ii-post-install

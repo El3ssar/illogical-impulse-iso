@@ -86,7 +86,7 @@ _pd_application="$(tget distro.application)"
 # Every key in file_permissions[] must exist in airootfs/, else mkarchiso aborts.
 _pd_dangling=0
 while IFS= read -r p; do
-  [[ -e "$BUILD/airootfs$p" ]] || { warn "dangling file_permissions[]: $p"; ((_pd_dangling++)) || :; }
+  [[ -e "$BUILD/airootfs$p" ]] || { warn "dangling file_permissions[]: $p"; _pd_dangling=$((_pd_dangling + 1)); }
 done < <(grep '^  \[' "$BUILD/profiledef.sh" | sed -E 's/^  \["?([^"]*)"?\]=.*/\1/')
 (( _pd_dangling == 0 )) || die "$_pd_dangling dangling file_permissions paths — fix prepare.d/60-boot.sh"
 ok "regenerated ($ISO_VERSION)"

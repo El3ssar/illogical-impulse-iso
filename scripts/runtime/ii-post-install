@@ -120,9 +120,24 @@ try "drop live tty2 root autologin" bash -c '
 '
 
 # ── remove Calamares + chroot build deps from the installed system ────────
+# The installer package set is DATA-DRIVEN from installer.list: 40-packages.sh
+# stages the same names we baked as installer-only into the squashfs at
+# /usr/share/illogical-impulse/installer-purge.list, so this purge can never
+# drift from what was baked (a third installer.list entry can't leak onto the
+# target). The hardcoded `calamares kpmcore` is only a fail-safe default if the
+# staged list is missing. We remove the list after consuming it.
 T "removing Calamares + ISO build deps from installed system"
-pacman -Rns --noconfirm calamares kpmcore 2>/dev/null \
-  || pacman -Rdd --noconfirm calamares kpmcore 2>/dev/null || true
+IPURGE_LIST=/usr/share/illogical-impulse/installer-purge.list
+if [[ -s "$IPURGE_LIST" ]]; then
+  mapfile -t _installer_pkgs < <(grep -Ev '^\s*(#|$)' "$IPURGE_LIST")
+else
+  _installer_pkgs=(calamares kpmcore)
+fi
+if (( ${#_installer_pkgs[@]} > 0 )); then
+  pacman -Rns --noconfirm "${_installer_pkgs[@]}" 2>/dev/null \
+    || pacman -Rdd --noconfirm "${_installer_pkgs[@]}" 2>/dev/null || true
+fi
+rm -f "$IPURGE_LIST"
 rm -rf /etc/calamares /usr/share/calamares
 rm -f /usr/share/applications/{calamares,calamares-launch-oem,install-illogical-impulse}.desktop \
       /usr/local/share/applications/calamares.desktop \
