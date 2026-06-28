@@ -226,7 +226,8 @@ T "pass ${#PASS[@]}  fix ${#FIX[@]}  fail ${#FAIL[@]}"
 if (( ${#FAIL[@]} == 0 )); then
   T "purging ISO-only helpers from /usr/local/bin"
   for b in ii-post-install ii-prepare-bootloader ii-finish-systemd-boot ii-verify \
-           ii-build-wheelhouse ii-ensure-venv ii-session ii-launch-installer ii-live-welcome; do
+           ii-build-wheelhouse ii-ensure-venv ii-session ii-launch-installer ii-live-welcome \
+           ii-autoinstall; do
     rm -f "/usr/local/bin/$b"
   done
   # Purge ISO-only lib helpers by NAME — keep iictl.d/ and ledger.sh, which the

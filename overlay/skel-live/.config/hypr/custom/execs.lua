@@ -5,6 +5,11 @@
 -- the installed system's first user never sees it.
 --
 -- Behaviour:
+--   * Kernel cmdline contains `ii_autoinstall` (the install-smoke harness,
+--     TEST-01) → run the UNATTENDED Calamares driver (ii-autoinstall): it
+--     overlays a scripted config from the seed disk, installs headlessly, and
+--     powers the VM off. Live-only; checked first so the smoke never falls
+--     through to the interactive installer.
 --   * Kernel cmdline contains `ii_install` (the "Install Illogical
 --     Impulse" boot entry) → wait for the rice to settle, auto-launch
 --     Calamares.
@@ -24,9 +29,14 @@ hl.on("hyprland.start", function()
     end
 
     local cmdline = read_file("/proc/cmdline")
+    local autoinstall = cmdline:match("ii_autoinstall") ~= nil
     local install_only = cmdline:match("ii_install") ~= nil
 
-    if install_only then
+    if autoinstall then
+        -- Unattended install smoke (TEST-01): drive Calamares from a scripted
+        -- seed config, then power off. Same ~4s settle as the interactive path.
+        hl.exec_cmd("sleep 4 && /usr/local/bin/ii-autoinstall")
+    elseif install_only then
         -- Give the rice (Quickshell, polkit agent, ydotool) ~4s to come
         -- up so Calamares' Qt window has its dependencies in place.
         hl.exec_cmd("sleep 4 && /usr/local/bin/ii-launch-installer")

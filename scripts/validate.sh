@@ -1241,6 +1241,71 @@ else
   _v_fail "release.yml runs the smoke test without enabling /dev/kvm access — the graphical boot probe hangs under TCG on the standard runner (CI-03)"
 fi
 
+step "unattended install→boot smoke wiring (TEST-01)"
+# TEST-01 adds an unattended install smoke (install-smoke.sh, `just smoke
+# --installed`): autologin live → headless Calamares from a scripted seed →
+# boot the installed disk → re-probe a graphical session (Calamares' own
+# shellprocess@verify-install ii-verify gate must have passed, or the install
+# aborts). It rides a live-only seam — a dedicated `ii_autoinstall` boot entry
+# read by the live-only execs.lua hook, driving the live-only ii-autoinstall
+# helper. All of that is purged on install (ii-verify) and never reaches an
+# installed user. This check asserts each link of that chain is wired, so a
+# later edit can't silently sever the install smoke. Static greps.
+_ISMOKE="$ROOT/scripts/install-smoke.sh"
+if [[ ! -f "$_ISMOKE" ]]; then
+  _v_fail "scripts/install-smoke.sh missing — the unattended install smoke (TEST-01) is gone"
+else
+  # (a) same CI-03 KVM fast-fail stance as smoke.sh — no silent TCG hang.
+  if grep -q 'die "KVM required for the install smoke' "$_ISMOKE" && grep -q '/dev/kvm' "$_ISMOKE"; then
+    _v_ok "install-smoke.sh fails fast on missing /dev/kvm (CI-03 stance) (TEST-01)"
+  else
+    _v_fail "install-smoke.sh does not fail fast on missing /dev/kvm — a KVM-less run hangs to its timeout (TEST-01/CI-03)"
+  fi
+  # (b) it must assert the install verdict AND re-probe the installed boot.
+  grep -q 'II_RESULT' "$_ISMOKE" && grep -q 'distinct colors' "$_ISMOKE" \
+    && _v_ok "install-smoke.sh asserts an install verdict + re-probes the installed graphical session (TEST-01)" \
+    || _v_fail "install-smoke.sh must read the install verdict (II_RESULT) and probe the installed boot's framebuffer (TEST-01)"
+fi
+# (c) `just smoke --installed` must route to the install smoke, leaving the
+#     live smoke (bare `just smoke`) untouched.
+if grep -qE 'install-smoke\.sh' "$ROOT/justfile" && grep -q 'smoke.sh' "$ROOT/justfile"; then
+  _v_ok "justfile routes 'just smoke --installed' to install-smoke.sh, keeps the live smoke (TEST-01)"
+else
+  _v_fail "justfile does not route '--installed' to install-smoke.sh (or dropped the live smoke) (TEST-01)"
+fi
+# (d) the live-only trigger chain: dedicated boot entry → execs.lua hook → helper.
+_AI_ENTRY="$OVERLAY/efiboot/loader/entries/05-illogical-impulse-autoinstall.conf"
+if [[ -f "$_AI_ENTRY" ]] && grep -q 'ii_autoinstall' "$_AI_ENTRY"; then
+  _v_ok "dedicated 'Unattended install' boot entry carries ii_autoinstall (TEST-01)"
+else
+  _v_fail "missing/empty ii_autoinstall boot entry (overlay/efiboot/.../05-*autoinstall.conf) — the smoke can't reach the unattended path (TEST-01)"
+fi
+_AI_EXECS="$AIROOTFS/etc/skel-live/.config/hypr/custom/execs.lua"
+[[ -f "$_AI_EXECS" ]] || _AI_EXECS="$OVERLAY/skel-live/.config/hypr/custom/execs.lua"
+if [[ -f "$_AI_EXECS" ]] && grep -q 'ii_autoinstall' "$_AI_EXECS" && grep -q 'ii-autoinstall' "$_AI_EXECS"; then
+  _v_ok "live execs.lua recognizes ii_autoinstall → runs ii-autoinstall (TEST-01)"
+else
+  _v_fail "live execs.lua does not branch on ii_autoinstall to run ii-autoinstall (TEST-01)"
+fi
+_AI_HELPER="$AIROOTFS/usr/local/bin/ii-autoinstall"
+[[ -f "$_AI_HELPER" ]] || _AI_HELPER="$ROOT/scripts/runtime/ii-autoinstall"
+if [[ -f "$_AI_HELPER" ]]; then
+  bash -n "$_AI_HELPER" 2>/dev/null \
+    && _v_ok "ii-autoinstall live helper present and syntactically valid (TEST-01)" \
+    || _v_fail "ii-autoinstall has a syntax error (TEST-01)"
+else
+  _v_fail "ii-autoinstall live helper missing (scripts/runtime/ii-autoinstall) (TEST-01)"
+fi
+# (e) ii-autoinstall MUST be purged on install (live-only; Iron Law) — it is in
+#     ii-verify's named-file purge loop alongside the other ISO-only helpers.
+_IV="$AIROOTFS/usr/local/bin/ii-verify"
+[[ -f "$_IV" ]] || _IV="$ROOT/scripts/runtime/ii-verify"
+if [[ -f "$_IV" ]] && grep -q 'ii-autoinstall' "$_IV"; then
+  _v_ok "ii-verify purges ii-autoinstall from the installed system (live-only) (TEST-01)"
+else
+  _v_fail "ii-verify does not purge ii-autoinstall — a live-only install helper would leak onto the installed system (TEST-01/Iron Law)"
+fi
+
 step "list files end with a trailing newline (BUILD-04)"
 # The prepare-time list readers are now newline-agnostic
 # (`while read … || [[ -n "$line" ]]`, scripts/prepare.d/30-skel.sh +
