@@ -1,0 +1,380 @@
+#!/usr/bin/env bash
+#help: widget	Quickshell widget framework (list|enable|disable|toggle|autostart|--spec)
+#spec: widget	Desktop widgets
+# widget — the additive Quickshell widget framework (issue #20 / PROPOSAL §8). It
+# generalizes the standalone welcome-card pattern into a substrate every future
+# *genuinely-new* desktop perk rides: a baked, enumerable registry of standalone
+# `qs -p` configs under /usr/share/illogical-impulse/widgets/, per-user enable
+# markers, a single sentinel-fenced autostart block, and one deconflicted leader
+# keybind — all reversible through the ledger. The v1 baked widget is the
+# dev-dashboard (devdash), a surface upstream LACKS. We do NOT rebuild anything
+# upstream already ships (pomodoro/notes/clipboard/colorpicker/command-palette).
+#
+# Subcommands:
+#   list [--json|--names]   enumerate the registry + each widget's enabled/running state
+#   enable  <name>          mark enabled, (re)write the fences, start it now
+#   disable <name>          mark disabled, strip/regen the fences, stop it
+#   toggle  <name>          enable if disabled, else disable
+#   autostart               regenerate the autostart + leader fences from the markers
+#   start [<name>]          launch an enabled widget (no arg → every enabled one;
+#                           the execs.lua autostart hook calls this)
+#   candidates              JSON list of registry widget names (#47 chooser argv)
+#   --spec                  emit the iictl-tui chooser contract (drives `iictl tweak widget`)
+#   doctor                  framework health surface (registry + qs presence)
+#
+# Additive + reversible. The registry + _lib live under the UNOWNED system path
+# /usr/share/illogical-impulse/widgets/ (untouched by ii-verify's
+# /usr/local/lib/ii purge). Per-user enable state is marker files under the same
+# $XDG_STATE_HOME/illogical-impulse/ namespace the welcome card uses. Autostart +
+# the keybind are sentinel-fenced blocks written ONLY through the shared
+# ii_lua_block_write/ii_lua_block_remove mutator (ledger-recorded), into the
+# sanctioned, preserved custom/{execs,keybinds}.lua slots — never an upstream
+# rsync --delete tree, never a quickshell/ii import. Deleting the registry + the
+# markers + the fences (or `iictl revert-all`) returns the desktop to vanilla.
+
+set -u
+
+# Shared header (colors, ok/bad/warn/die, _not_root, RELEASE_FILE, ledger_*) and
+# the mutator library (ii_lua_block_write/ii_lua_block_remove — the ONLY
+# sanctioned writer of a sentinel-fenced custom/*.lua block). Both source
+# ledger.sh themselves; double-source is safe.
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+source "${II_LIB:-/usr/local/lib/ii}/mutator.sh"
+
+# Baked widget registry — a sibling of welcome/ + themes/ under the UNOWNED
+# /usr/share/illogical-impulse/ namespace. Overridable for the no-root unit test.
+II_WIDGET_DIR="${II_WIDGET_DIR:-/usr/share/illogical-impulse/widgets}"
+# Per-user enable markers (same $XDG_STATE_HOME/illogical-impulse/ namespace as
+# the welcome card's welcome_shown marker).
+II_WIDGET_STATE="${II_WIDGET_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/illogical-impulse/widgets}"
+# The sanctioned, preserved custom/*.lua slots we write — ONLY via the mutator.
+II_EXECS_LUA="${II_EXECS_LUA:-$HOME/.config/hypr/custom/execs.lua}"
+II_KEYBINDS_LUA="${II_KEYBINDS_LUA:-$HOME/.config/hypr/custom/keybinds.lua}"
+II_AUTOSTART_FENCE="widgets"
+II_KEYBIND_FENCE="widgets"
+# The leader bind. Upstream binds SUPER+W to the browser (keybinds.lua), so the
+# audit (issue #20: "audit upstream binds before reserving any Super+<key>") lands
+# us on the free, still-mnemonic SUPER+ALT+W. Overridable for tests.
+II_WIDGET_LEADER="${II_WIDGET_LEADER:-SUPER + ALT + W}"
+QS_BIN="${II_QS_BIN:-qs}"
+IICTL_BIN="${II_IICTL_BIN:-/usr/local/bin/iictl}"
+
+# ── registry (ONE enumerable source — a dir scan, never N hardcoded cases) ─────
+# _widgets — every registered widget: a dir under II_WIDGET_DIR with a shell.qml,
+# excluding the shared _lib. #24's widgets fold in by dropping a dir here; nothing
+# in this file changes.
+_widgets() {
+  [[ -d "$II_WIDGET_DIR" ]] || return 0
+  local d name
+  shopt -s nullglob
+  for d in "$II_WIDGET_DIR"/*/; do
+    name="$(basename "$d")"
+    [[ "$name" == "_lib" ]] && continue
+    [[ -f "$d/shell.qml" ]] || continue
+    printf '%s\n' "$name"
+  done
+  shopt -u nullglob
+}
+_is_widget() { local w; for w in $(_widgets); do [[ "$w" == "$1" ]] && return 0; done; return 1; }
+_enabled()   { [[ -e "$II_WIDGET_STATE/$1" ]]; }
+_any_enabled() { local w; for w in $(_widgets); do _enabled "$w" && return 0; done; return 1; }
+
+# _meta <widget> <key> — read a string value from the widget's <name>.json
+# metadata (dependency-free; no jq for our own format). Empty if absent.
+_meta() {
+  local f="$II_WIDGET_DIR/$1/$1.json" key="$2"
+  [[ -f "$f" ]] || return 0
+  sed -nE 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' "$f" 2>/dev/null | head -1
+}
+_label() { local l; l="$(_meta "$1" label)"; printf '%s' "${l:-$1}"; }
+
+# ── process management ─────────────────────────────────────────────────────────
+_pidfile() { printf '%s/%s.pid' "$II_WIDGET_STATE" "$1"; }
+# _running <widget> — true if a qs bound to this widget's unique config path is up.
+_running() {
+  local w="$1" pf pid
+  pf="$(_pidfile "$w")"
+  if [[ -f "$pf" ]]; then
+    pid="$(cat "$pf" 2>/dev/null)"
+    [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && return 0
+  fi
+  pgrep -f -- "-p $II_WIDGET_DIR/$w" >/dev/null 2>&1
+}
+# _start <widget> — launch qs detached on the widget's config dir; record the PID.
+_start() {
+  local w="$1" dir="$II_WIDGET_DIR/$w"
+  command -v "$QS_BIN" >/dev/null 2>&1 \
+    || { warn "quickshell ($QS_BIN) not found — '$w' will start on next login"; return 0; }
+  _running "$w" && return 0
+  mkdir -p "$II_WIDGET_STATE" 2>/dev/null || true
+  setsid "$QS_BIN" -p "$dir" >/dev/null 2>&1 &
+  echo $! > "$(_pidfile "$w")" 2>/dev/null || true
+}
+# _stop <widget> — kill the recorded PID, then sweep any qs on this config path.
+_stop() {
+  local w="$1" pf pid
+  pf="$(_pidfile "$w")"
+  if [[ -f "$pf" ]]; then
+    pid="$(cat "$pf" 2>/dev/null)"
+    [[ -n "$pid" ]] && kill "$pid" 2>/dev/null || true
+    rm -f "$pf" 2>/dev/null || true
+  fi
+  pkill -f -- "-p $II_WIDGET_DIR/$w" 2>/dev/null || true
+}
+_hypr_reload() { command -v hyprctl >/dev/null 2>&1 && hyprctl reload >/dev/null 2>&1 || true; }
+
+# ── fenced custom/*.lua regeneration (mutator-only; ledger-recorded) ───────────
+# _regen_autostart — write (or strip) the execs.lua autostart fence from the
+# enabled markers. ONE constant fenced block whenever ANY widget is enabled (it
+# launches every enabled widget via `iictl widget start`); stripped when none are.
+_regen_autostart() {
+  if ! _any_enabled; then
+    ii_lua_block_remove "$II_EXECS_LUA" "$II_AUTOSTART_FENCE" 2>/dev/null || true
+    return 0
+  fi
+  ii_lua_block_write "$II_EXECS_LUA" "$II_AUTOSTART_FENCE" <<LUA
+-- Quickshell widget autostart (iictl widget). Launches every ENABLED widget on
+-- Hyprland start; the enabled set lives in
+-- ~/.local/state/illogical-impulse/widgets/. Reversible: 'iictl widget disable
+-- <name>' (the last one) or 'iictl revert-all' strips this fenced block, leaving
+-- upstream's empty custom/execs.lua stub.
+hl.on("hyprland.start", function()
+    hl.exec_cmd("$IICTL_BIN widget start")
+end)
+LUA
+}
+
+# _regen_keybind — write (or strip) the keybinds.lua leader fence. Present
+# whenever ANY widget is enabled. Defines a 'ii-widgets' submap entered by the one
+# deconflicted leader bind; inside, a per-REGISTRY-widget key toggles it (so #24's
+# widgets fold in when this is regenerated). Best-effort `hyprctl reload` so a live
+# session picks up the new bind without a relogin.
+_regen_keybind() {
+  if ! _any_enabled; then
+    ii_lua_block_remove "$II_KEYBINDS_LUA" "$II_KEYBIND_FENCE" 2>/dev/null || true
+    _hypr_reload
+    return 0
+  fi
+  local subkeys="" hint="" w key
+  for w in $(_widgets); do
+    key="$(printf '%s' "${w:0:1}" | tr '[:lower:]' '[:upper:]')"
+    subkeys+="    hl.bind(\"$key\", function() hl.dispatch(hl.dsp.exec_cmd(\"$IICTL_BIN widget toggle $w\")); hl.dispatch(hl.dsp.submap(\"reset\")) end)"$'\n'
+    hint+="${hint:+   }$key: $w"
+  done
+  ii_lua_block_write "$II_KEYBINDS_LUA" "$II_KEYBIND_FENCE" <<LUA
+-- Quickshell widget leader (iictl widget). ONE deconflicted top-level bind:
+-- '$II_WIDGET_LEADER' enters the 'ii-widgets' submap; a per-widget key toggles a
+-- widget and exits. (Upstream binds SUPER+W to the browser, so the leader is
+-- SUPER+ALT+W.) Reversible: 'iictl widget disable <name>' (the last one) or
+-- 'iictl revert-all' strips this fenced block, leaving upstream's custom/
+-- keybinds.lua intact.
+hl.define_submap("ii-widgets", function()
+    hl.bind("$II_WIDGET_LEADER", function()
+        local cur = hl.get_current_submap()
+        if cur == "ii-widgets" then
+            hl.dispatch(hl.dsp.submap("reset"))
+        elseif cur == "" then
+            hl.dispatch(hl.dsp.exec_cmd("notify-send 'Widgets' '$hint   Esc: exit' -a 'Illogical Impulse'"))
+            hl.dispatch(hl.dsp.submap("ii-widgets"))
+        end
+    end, { submap_universal = true })
+$subkeys    hl.bind("Escape", function() hl.dispatch(hl.dsp.submap("reset")) end)
+end)
+LUA
+  _hypr_reload
+}
+
+# ── JSON helpers (dependency-free; mirror the theme/plugins plugins) ───────────
+_json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+# _json_array — a JSON array of strings from newline-separated stdin.
+_json_array() {
+  local first=1 line
+  printf '['
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    (( first )) || printf ','
+    first=0
+    printf '"%s"' "$(_json_escape "$line")"
+  done
+  printf ']'
+}
+
+# ── subcommands ────────────────────────────────────────────────────────────────
+cmd_list() {
+  case "${1:-}" in
+    --names) _widgets; return 0 ;;
+    --json)
+      local first=1 w label
+      printf '['
+      for w in $(_widgets); do
+        label="$(_label "$w")"
+        (( first )) || printf ','
+        first=0
+        printf '{"name":"%s","label":"%s","enabled":%s,"running":%s}' \
+          "$(_json_escape "$w")" "$(_json_escape "$label")" \
+          "$(_enabled "$w" && echo true || echo false)" \
+          "$(_running "$w" && echo true || echo false)"
+      done
+      printf ']\n'
+      return 0 ;;
+  esac
+  local widgets=(); mapfile -t widgets < <(_widgets)
+  if (( ${#widgets[@]} == 0 )); then
+    echo "${C_B}iictl widget${C_0}: no widgets registered (none under $II_WIDGET_DIR)"
+    return 0
+  fi
+  echo "${C_B}widgets${C_0} ($II_WIDGET_DIR):"
+  local w label st
+  for w in "${widgets[@]}"; do
+    label="$(_label "$w")"
+    if _enabled "$w"; then
+      st="${C_G}enabled${C_0}"
+      _running "$w" && st="$st ${C_G}(running)${C_0}"
+    else
+      st="disabled"
+    fi
+    printf '  %s%-12s%s %-30s %b\n' "$C_B" "$w" "$C_0" "$label" "$st"
+  done
+  echo
+  echo "enable: ${C_B}iictl widget enable <name>${C_0}   ·   leader: ${C_B}$II_WIDGET_LEADER${C_0}"
+}
+
+cmd_candidates() { _widgets | _json_array; printf '\n'; }
+
+cmd_enable() {
+  _not_root
+  local w="${1:-}"
+  [[ -n "$w" ]] || die "usage: iictl widget enable <name>   (see: iictl widget list)"
+  _is_widget "$w" || die "unknown widget '$w' (see: iictl widget list)"
+  mkdir -p "$II_WIDGET_STATE" 2>/dev/null || true
+  if _enabled "$w"; then
+    ok "widget '$w' already enabled"
+  else
+    : > "$II_WIDGET_STATE/$w" 2>/dev/null || die "could not write the enable marker for '$w'"
+    # Ledger: target=widget:<name> (so `iictl revert-all widget:<name>` matches),
+    # owned_paths=the marker (the path inverse rm's it), restore_hint=the disable
+    # verb. The fences are recorded separately by ii_lua_block_write below.
+    ledger_record path "widget:$w" "$(_ii_pack_tag)" \
+      "$(ledger_escape_path "$II_WIDGET_STATE/$w")" "iictl widget disable $w"
+    ok "widget '$w' enabled"
+  fi
+  _regen_autostart
+  _regen_keybind
+  _start "$w"
+}
+
+cmd_disable() {
+  _not_root
+  local w="${1:-}"
+  [[ -n "$w" ]] || die "usage: iictl widget disable <name>"
+  _is_widget "$w" || warn "'$w' is not a registered widget — clearing any stale state anyway"
+  _stop "$w"
+  rm -f "$II_WIDGET_STATE/$w" 2>/dev/null || true
+  ok "widget '$w' disabled"
+  # Regenerate from the remaining markers: drops this widget from autostart and,
+  # when it was the last one, strips both fences (back to the vanilla stubs). The
+  # lingering marker ledger row is harmless — `iictl revert-all` no-ops the gone
+  # path and prunes the row.
+  _regen_autostart
+  _regen_keybind
+}
+
+cmd_toggle() {
+  _not_root
+  local w="${1:-}"
+  [[ -n "$w" ]] || die "usage: iictl widget toggle <name>"
+  if _enabled "$w"; then cmd_disable "$w"; else cmd_enable "$w"; fi
+}
+
+cmd_start() {
+  _not_root
+  local w="${1:-}"
+  if [[ -n "$w" ]]; then
+    _is_widget "$w" || die "unknown widget '$w'"
+    _enabled "$w" || { warn "widget '$w' is not enabled — not starting"; return 0; }
+    _start "$w"
+    return 0
+  fi
+  # No arg → start every enabled widget (the autostart-hook path).
+  for w in $(_widgets); do _enabled "$w" && _start "$w"; done
+}
+
+cmd_autostart() {
+  _not_root
+  _regen_autostart
+  _regen_keybind
+  ok "autostart + leader regenerated from the enabled markers"
+}
+
+# cmd_spec — emit the #47 chooser contract for `iictl tweak widget`. ONE `list`
+# control: current = enabled widgets, candidates = the registry (via this plugin's
+# own `candidates` verb), apply_add/apply_remove = enable/disable %v. The renderer
+# draws it and applies picks by shelling these argv back through this plugin, so
+# the round-trip drives the TUI with ZERO new mutation paths (the ledger still owns
+# reversibility).
+cmd_spec() {
+  local current
+  current="$(_widgets | while IFS= read -r w; do _enabled "$w" && printf '%s\n' "$w"; done | _json_array)"
+  printf '{"domain":"widget","title":"Desktop widgets","controls":[{"id":"widgets","type":"list","label":"Enabled widgets","current":%s,"candidates":["widget","candidates"],"apply_add":["widget","enable","%%v"],"apply_remove":["widget","disable","%%v"]}]}\n' \
+    "$current"
+}
+
+# cmd_doctor — framework health surface (run by `iictl widget doctor`; additive,
+# deleting the plugin removes it). Never changes the core doctor's exit status.
+cmd_doctor() {
+  echo "${C_B}widget doctor${C_0}"
+  if [[ -d "$II_WIDGET_DIR" ]]; then
+    local n; n="$(_widgets | grep -c .)"
+    ok "registry present ($n widget(s) under $II_WIDGET_DIR)"
+  else
+    warn "no widget registry at $II_WIDGET_DIR (not a full install?)"
+  fi
+  command -v "$QS_BIN" >/dev/null 2>&1 \
+    && ok "quickshell ($QS_BIN) present (widgets can run)" \
+    || warn "quickshell ($QS_BIN) not found — widgets cannot start"
+  local w on=0
+  for w in $(_widgets); do _enabled "$w" && { on=1; _running "$w" \
+    && ok "'$w' enabled + running" || warn "'$w' enabled but not running (start: iictl widget start $w)"; }; done
+  (( on )) || ok "no widgets enabled (vanilla — no fences written)"
+}
+
+cmd_usage() {
+  cat <<EOF
+${C_B}iictl widget${C_0} — additive Quickshell widget framework
+
+A widget is a standalone \`qs -p\` config under $II_WIDGET_DIR (composing the
+shared _lib: Theme + Panel). Enabling one drops a state marker, writes a single
+sentinel-fenced autostart block + the '$II_WIDGET_LEADER' leader keybind (both via
+the shared mutator, ledger-recorded), and launches it. Nothing imports upstream's
+rice shell tree; nothing here duplicates an upstream surface.
+
+usage:
+  iictl widget list [--json|--names]   registry + enabled/running state
+  iictl widget enable  <name>          enable + autostart + start now
+  iictl widget disable <name>          disable + stop + strip/regen fences
+  iictl widget toggle  <name>          enable if disabled, else disable
+  iictl widget autostart               regenerate the fences from the markers
+  iictl widget start [<name>]          launch enabled widget(s) (autostart hook)
+  iictl widget candidates              JSON registry names (chooser argv)
+  iictl widget --spec                  emit the iictl-tui chooser spec
+  iictl widget doctor                  framework health
+
+Interactive picker: ${C_B}iictl tweak widget${C_0} (the shared iictl-tui renderer).
+reversible: 'iictl widget disable <name>' (last one) or 'iictl revert-all' strips
+the fences + removes the markers, returning the desktop to vanilla.
+EOF
+}
+
+case "${1:-help}" in
+  list)             shift; cmd_list       "$@" ;;
+  enable)           shift; cmd_enable     "$@" ;;
+  disable)          shift; cmd_disable    "$@" ;;
+  toggle)           shift; cmd_toggle     "$@" ;;
+  start)            shift; cmd_start      "$@" ;;
+  autostart)        shift; cmd_autostart  "$@" ;;
+  candidates)       shift; cmd_candidates "$@" ;;
+  --spec|spec)      shift; cmd_spec       "$@" ;;
+  doctor)           shift; cmd_doctor     "$@" ;;
+  help|-h|--help)   cmd_usage ;;
+  *)                die "unknown subcommand: $1 (try: iictl widget help)" ;;
+esac

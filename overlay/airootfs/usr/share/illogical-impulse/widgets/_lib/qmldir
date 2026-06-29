@@ -1,0 +1,7 @@
+# Illogical Impulse widget framework — shared library (issue #20).
+# Imported by each standalone widget config via `import "../_lib"`. Exposes the
+# Material You Theme singleton (watches upstream's generated colors.json, READ-
+# ONLY) and the reusable layer-shell Panel base. Nothing here imports upstream's
+# quickshell/ii tree, so the framework survives any upstream rice redesign.
+singleton Theme 1.0 Theme.qml
+Panel 1.0 Panel.qml
