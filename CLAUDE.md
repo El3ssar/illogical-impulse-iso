@@ -148,6 +148,8 @@ build/ out/                    # generated
 | ISO-build chroot logic | `scripts/chroot.sh` |
 | Post-install / bootloader / verify logic | `scripts/runtime/ii-*` |
 | Add an iictl subcommand (drop-in) | `scripts/runtime-lib/iictl.d/<cmd>` (exec; `source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"` + a `#help:` line) → staged to `/usr/local/lib/ii/iictl.d/` |
+| Curated default web apps for `iictl webapp seed` / change the webapp launcher | `overlay/airootfs/usr/share/illogical-impulse/webapps/defaults.list` (`<name>\|<url>[\|icon]`, opt-in) + `scripts/runtime-lib/iictl.d/webapp` (Brave `--app` `.desktop` in unowned `~/.local/share/applications/`; accent rule fenced ONLY into `~/.config/hypr/custom/rules.lua` via `ii_lua_block_write`; fallback icon `webapps/fallback.png`) |
+| Curated app-group installer (picker) | `scripts/runtime-lib/iictl.d/install` — thin picker over `packages/optional/*.list` that delegates to the **online** pack engine (`iictl pack install <group>`; official repos + AUR — never a stash / `[ii-extra]`) |
 | Give a domain an interactive configurator (TUI) | the domain's `iictl.d/<cmd>` emits `--spec` (the 3-control chooser contract: `choice`/`list`/`toggle`; see BLUEPRINT §"iictl chooser contract") + a `#spec:` header; the baked `iictl-tui` (ratatui) renders it via `iictl tweak <domain>`. The renderer mutates nothing — it shells back to the domain's `iictl` verbs, so the ledger still owns reversibility. |
 | Change/extend the `iictl-tui` renderer | `overlay/aur-pkgbuilds/iictl-tui/crate/` (Rust/ratatui; built by prebuild → `[ii-extra]`, baked via `packages/base.list`) |
 | Pipeline step | `scripts/prepare.d/NN-*.sh` |

@@ -1,0 +1,168 @@
+#!/usr/bin/env bash
+#help: install	pick curated app groups and install them online (wraps iictl pack)
+# install — the curated app-group picker (parity with Omarchy's app installer,
+# issue #21 / PROPOSAL §12). It is a THIN front-end over the #6 pack engine: it
+# enumerates the curated group name-lists staged at $II_OPTDIR (the same catalog
+# `iictl pack` reads), lets the user pick one or more, and delegates each pick to
+# `iictl pack install <group>`.
+#
+# It re-implements NOTHING: the online fetch (official repos via pacman, AUR via
+# paru), the conflict gate, the ledger recording, and the offline-safe removal
+# all live in the pack engine. Packs are FETCHED ONLINE on demand — there is no
+# on-disk pack mirror for optional packs (design pivot, PR #42); only the few-KB
+# name-lists ride in the squashfs, and the build-host-only extra repo does not
+# survive install so the engine never assumes it. Because every install flows
+# through the pack engine, every group is ledger-recorded and reversible
+# (`iictl pack remove <group>` / `iictl revert-all pack:<group>`).
+#
+# Purely ADDITIVE: one drop-in beside the iictl core (zero merge surface).
+
+set -u
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+
+# Same catalog the pack engine enumerates — the curated name-lists staged by
+# 45-optional-packs.sh under /usr/share (a sibling of the iictl survive-path,
+# untouched by ii-verify's purge). Overridable for the no-root unit test.
+II_OPTDIR="${II_OPTDIR:-/usr/share/illogical-impulse/optional}"
+
+# _groups — echo every available group name (one per line), from the staged
+# *.list files. Mirrors the pack engine's enumeration.
+_groups() {
+  [[ -d "$II_OPTDIR" ]] || return 0
+  local l
+  shopt -s nullglob
+  for l in "$II_OPTDIR"/*.list; do
+    printf '%s\n' "$(basename "${l%.list}")"
+  done
+  shopt -u nullglob
+}
+
+# _meta_type <group> — the #meta:type token of a group's list (for the picker
+# label). Mirrors the pack engine's #meta reader; empty if none.
+_meta_type() {
+  local f="$II_OPTDIR/$1.list" line rest
+  [[ -f "$f" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" == "#meta:type" || "$line" == "#meta:type "* ]] || continue
+    rest="${line#"#meta:type"}"; printf '%s' "${rest# }"; return 0
+  done < "$f"
+}
+
+# _install_group <group> — delegate to the #6 pack engine's ONLINE install verb.
+# Prefer the dispatcher (`iictl pack install`) so the full engine path runs;
+# fall back to the drop-in directly in a dev checkout where iictl isn't on PATH.
+_install_group() {
+  local g="$1"
+  if command -v iictl >/dev/null 2>&1; then
+    iictl pack install "$g"
+  else
+    local pk="${II_LIB:-/usr/local/lib/ii}/iictl.d/pack"
+    [[ -x "$pk" ]] || die "pack engine not found ($pk) — cannot install '$g'"
+    "$pk" install "$g"
+  fi
+}
+
+# _pick — a plain numbered selection over the available groups. This is the
+# CLI fallback; the rich interactive chooser is the ONE iictl-tui renderer
+# (`iictl tweak pack`) — domain plugins must NOT spawn a second picker
+# (fzf/skim/gum/whiptail/dialog) per the single-picker design ceiling (#47),
+# so we point at the renderer and otherwise read a plain numbered prompt.
+# Echoes the chosen group names, one per line.
+_pick() {
+  local groups=() g
+  mapfile -t groups < <(_groups)
+  (( ${#groups[@]} > 0 )) || return 0
+
+  echo "${C_B}available app groups${C_0} ($II_OPTDIR):" >&2
+  local i=1
+  for g in "${groups[@]}"; do
+    printf '  %2d) %-16s %s\n' "$i" "$g" "$(_meta_type "$g")" >&2
+    i=$((i+1))
+  done
+  if [[ ! -t 0 ]]; then
+    warn "no controlling terminal — pass group name(s) directly: iictl install <group>..." >&2
+    warn "or use the Material-You chooser: iictl tweak pack" >&2
+    return 0
+  fi
+  echo "  (tip: 'iictl tweak pack' opens the Material-You chooser)" >&2
+  printf 'pick number(s) (space-separated, blank to cancel): ' >&2
+  local reply; read -r reply || return 0
+  local n
+  for n in $reply; do
+    [[ "$n" =~ ^[0-9]+$ ]] || continue
+    (( n >= 1 && n <= ${#groups[@]} )) || continue
+    printf '%s\n' "${groups[$((n-1))]}"
+  done
+}
+
+cmd_list() {
+  local groups=() g
+  mapfile -t groups < <(_groups)
+  if (( ${#groups[@]} == 0 )); then
+    echo "${C_B}iictl install${C_0}: no app groups available (none staged at $II_OPTDIR)"
+    return 0
+  fi
+  echo "${C_B}available app groups${C_0} ($II_OPTDIR):"
+  for g in "${groups[@]}"; do
+    printf '  %s%-16s%s %s\n' "$C_B" "$g" "$C_0" "$(_meta_type "$g")"
+  done
+  echo
+  echo "install: ${C_B}iictl install${C_0} (picker) or ${C_B}iictl install <group>...${C_0}"
+}
+
+cmd_usage() {
+  cat <<EOF
+${C_B}iictl install${C_0} — pick curated app groups and install them online
+
+A thin picker over the curated optional groups (packages/optional/*.list, staged
+at $II_OPTDIR). It delegates each pick to the #6 pack engine's ONLINE install
+(\`iictl pack install <group>\`) — official repos via pacman, AUR via paru. Only
+the few-KB name-lists ride in the image; members are fetched online on demand
+(PR #42 — no on-disk pack mirror). Every group is ledger-recorded and reversible.
+
+usage:
+  iictl install                 numbered picker (or 'iictl tweak pack' for the TUI)
+  iictl install <group>...      install one or more groups non-interactively
+  iictl install --list, -l      list available groups (no install)
+
+remove a group:  iictl pack remove <group>   (or iictl revert-all pack:<group>)
+EOF
+}
+
+# ── dispatch ───────────────────────────────────────────────────────────────────
+case "${1:-}" in
+  -l|--list|list) cmd_list ;;
+  -h|--help|help) cmd_usage ;;
+  '')
+    # No args → interactive picker, then install each chosen group.
+    _not_root
+    mapfile -t _picks < <(_pick)
+    if (( ${#_picks[@]} == 0 )); then
+      echo "${C_B}iictl install${C_0}: nothing selected"
+      exit 0
+    fi
+    _rc=0
+    for _g in "${_picks[@]}"; do
+      [[ -n "$_g" ]] || continue
+      _install_group "$_g" || _rc=1
+    done
+    exit "$_rc"
+    ;;
+  -*)
+    die "unknown option: $1 (try: iictl install --help)"
+    ;;
+  *)
+    # Non-interactive form: explicit group name(s).
+    _not_root
+    _rc=0
+    for _g in "$@"; do
+      [[ -n "$_g" ]] || continue
+      if [[ ! -f "$II_OPTDIR/$_g.list" ]]; then
+        warn "unknown group '$_g' (see: iictl install --list)"; _rc=1; continue
+      fi
+      _install_group "$_g" || _rc=1
+    done
+    exit "$_rc"
+    ;;
+esac
