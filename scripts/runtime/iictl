@@ -184,6 +184,15 @@ cmd_doctor() {
   free=$(df --output=avail -BG / | tail -1 | tr -dc '0-9')
   (( free >= 5 )) && ok "root fs: ${free}G free" || { warn "root fs low: ${free}G free"; }
 
+  # Theming-domain health (additive): the theme plugin owns the accent-override
+  # warning + switchwall.sh soft-check. Delegate to it ONLY if the drop-in is
+  # present — deleting the plugin removes the surface cleanly (the core never
+  # hardcodes theme logic). Run as a sub-invocation so its ok/warn/bad render
+  # inline; its non-fatal warnings do not change the core doctor's exit status.
+  if [[ -x "$IICTL_D/theme" ]]; then
+    "$IICTL_D/theme" doctor || true
+  fi
+
   echo
   if (( fails == 0 )); then echo "${C_G}all good${C_0}"; else echo "${C_R}$fails problem(s)${C_0}"; exit 1; fi
 }

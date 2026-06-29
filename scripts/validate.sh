@@ -607,6 +607,127 @@ else
   fi
 fi
 
+step "iictl theme flavor engine + §9 reversibility seam (THEME-01)"
+# THEME-01: the theming domain (#16) drives upstream's Material You pipeline
+# rather than forking it, and bakes static themed defaults only into UNOWNED
+# paths. Four bug-class guards, each a real reversibility/Iron-Law trap:
+#   (a) NO overlay/skel-distro file may land in an upstream rsync --delete dir —
+#       it would be silently WIPED on the next `iictl update`, so it is never a
+#       reliable default and (worse) masks the real upstream file until then.
+#   (b) NO distro file may ship/edit matugen's config.toml or add a distro
+#       `[templates.*]` block: ~/.config/matugen is rsync --delete'd, so any
+#       template we add there vanishes on update — the colour pipeline must be
+#       driven via switchwall.sh's public flags, not by patching matugen config.
+#   (c) every baked flavor seed (themes/*.conf) must parse and declare a valid
+#       #RRGGBB seed — a seedless flavor would `die` at `set` time on a user.
+#   (d) the theme plugin must DRIVE switchwall.sh (no forked colour logic) and
+#       the revert engine must know the theme-accent inverse (--color clear), or
+#       `iictl revert-all` could not restore the empty, never-set accent.
+_SKD="$OVERLAY/skel-distro"
+# (a) sync-deleted dirs (mirrors 30-skel.sh's `rsync -a --delete` set + the
+# broader read-only seam from the Iron Law). A skel-distro file under any of
+# these is wiped on update — refuse it.
+_th_sync_deleted=(
+  ".config/quickshell" ".config/matugen" ".config/fontconfig"
+  ".config/hypr/hyprland" ".config/hypr/hyprlock" ".config/zshrc.d"
+)
+if [[ -d "$_SKD" ]]; then
+  _th_leak=0
+  for _sd in "${_th_sync_deleted[@]}"; do
+    if [[ -e "$_SKD/$_sd" ]]; then
+      _v_fail "skel-distro ships files under '$_sd' — an upstream rsync --delete path; they are WIPED on 'iictl update' (THEME-01a)"
+      _th_leak=$((_th_leak+1))
+    fi
+  done
+  # fish is --delete EXCEPT conf.d (the sanctioned ii-*.fish seam) — flag any
+  # skel-distro fish file that is NOT under conf.d.
+  if [[ -d "$_SKD/.config/fish" ]]; then
+    while IFS= read -r _ff; do
+      [[ "$_ff" == *"/.config/fish/conf.d/"* ]] && continue
+      _v_fail "skel-distro fish file outside conf.d ('${_ff#"$_SKD"/}') — fish/ is rsync --delete'd except conf.d (THEME-01a)"
+      _th_leak=$((_th_leak+1))
+    done < <(find "$_SKD/.config/fish" -type f 2>/dev/null)
+  fi
+  (( _th_leak == 0 )) && _v_ok "no skel-distro file lands in an upstream rsync --delete dir (THEME-01a)"
+else
+  _v_warn "overlay/skel-distro missing — THEME-01a skipped"
+fi
+# (b) we must NOT ship/edit matugen config or add a distro [templates.*] block
+# (anywhere in overlay/ — airootfs or skel). Upstream owns matugen entirely.
+_th_matugen=0
+while IFS= read -r _mf; do
+  _v_fail "distro ships/edits a matugen config.toml ('${_mf#"$OVERLAY"/}') — ~/.config/matugen is rsync --delete'd; drive colours via switchwall.sh, never matugen config (THEME-01b)"
+  _th_matugen=$((_th_matugen+1))
+done < <(find "$OVERLAY" -type f -path '*/matugen/config.toml' 2>/dev/null)
+if grep -rqsF '[templates.' "$OVERLAY" 2>/dev/null; then
+  _v_fail "a distro file introduces a '[templates.' matugen block under overlay/ — forbidden (matugen is rsync --delete'd) (THEME-01b)"
+  _th_matugen=$((_th_matugen+1))
+fi
+(( _th_matugen == 0 )) && _v_ok "no distro matugen config / [templates.*] block (colours driven via switchwall.sh only) (THEME-01b)"
+# (c) every baked flavor seed parses + declares a valid #RRGGBB seed.
+_THEMES="$AIROOTFS/usr/share/illogical-impulse/themes"
+if [[ -d "$_THEMES" ]]; then
+  shopt -s nullglob; _th_confs=("$_THEMES"/*.conf); shopt -u nullglob
+  if (( ${#_th_confs[@]} == 0 )); then
+    _v_fail "no flavor seeds staged at usr/share/illogical-impulse/themes/ — 'iictl theme list' would be empty (THEME-01c)"
+  else
+    _th_seed_bad=0
+    for _tc in "${_th_confs[@]}"; do
+      _ts="$(grep -E '^[[:space:]]*seed[[:space:]]*=' "$_tc" | tail -n1 | cut -d= -f2- | tr -d '[:space:]')"
+      if [[ "$_ts" =~ ^#?[A-Fa-f0-9]{6}$ ]]; then
+        :
+      else
+        _v_fail "flavor seed $(basename "$_tc") has no valid #RRGGBB seed= (got '${_ts:-<none>}') (THEME-01c)"
+        _th_seed_bad=$((_th_seed_bad+1))
+      fi
+    done
+    (( _th_seed_bad == 0 )) && _v_ok "${#_th_confs[@]} flavor seed(s): each declares a valid #RRGGBB seed (THEME-01c)"
+  fi
+else
+  _v_fail "themes dir not staged (usr/share/illogical-impulse/themes/) — the flavor catalog is missing (THEME-01c)"
+fi
+# (d) the theme plugin DRIVES switchwall.sh (no forked colour logic) + carries a
+# #spec: header; the revert engine knows the theme-accent inverse. Generic
+# exec/shebang/bash -n/#help: are covered by the "iictl.d/ plugin architecture"
+# step; this adds the domain-specific ones. Comments stripped first so the
+# header prose can neither satisfy nor trip the code greps.
+_THP="$AIROOTFS/usr/local/lib/ii/iictl.d/theme"
+if [[ ! -f "$_THP" ]]; then
+  _v_fail "iictl.d/theme not staged — the flavor engine is missing (THEME-01d)"
+else
+  _thp_code="$(grep -vE '^[[:space:]]*#' "$_THP")"
+  grep -qE 'switchwall\.sh' <<<"$_thp_code" \
+    && _v_ok "theme plugin drives upstream switchwall.sh (no forked colour logic) (THEME-01d)" \
+    || _v_fail "theme plugin never references switchwall.sh — it must DRIVE upstream's pipeline, not duplicate colour logic (THEME-01d)"
+  grep -qE '^#spec:[[:space:]]' "$_THP" \
+    && _v_ok "theme plugin advertises a #spec: header (drives 'iictl tweak theme')" \
+    || _v_fail "theme plugin missing #spec: header — 'iictl tweak' won't list it (THEME-01d)"
+  # The plugin must NOT write an upstream-owned colour path itself (it only RUNS
+  # switchwall.sh + READS config.json). A direct write to matugen/quickshell-ii/
+  # the generated STATE dir would be an Iron-Law breach.
+  if grep -qE '>[[:space:]]*"?[^"]*(\.config/matugen|\.config/quickshell/ii|generated/(colors\.json|material_colors))' <<<"$_thp_code"; then
+    _v_fail "theme plugin appears to WRITE an upstream-owned colour path (matugen/quickshell-ii/generated) — only switchwall.sh may (THEME-01d)"
+  else
+    _v_ok "theme plugin writes no upstream-owned colour path (only runs switchwall.sh) (THEME-01d)"
+  fi
+fi
+# the revert engine must know how to undo a theme accent (clear it).
+if [[ -f "$RA" ]]; then
+  _ra_theme="$(grep -vE '^[[:space:]]*#' "$RA")"
+  grep -qE 'theme-accent' <<<"$_ra_theme" && grep -qE -- '--color clear' <<<"$_ra_theme" \
+    && _v_ok "revert-all knows the theme-accent inverse (switchwall.sh --color clear → never-set) (THEME-01d)" \
+    || _v_fail "revert-all has no theme-accent inverse — 'iictl revert-all' can't clear a set flavor accent (THEME-01d)"
+fi
+# the opt-in recolour watcher is the SINGLE owner of the hook, off by default:
+# its autostart fence must NOT be baked into the skel custom/execs.lua (only
+# written at runtime by `iictl theme watch enable`).
+_SKEL_EXECS="$AIROOTFS/etc/skel/.config/hypr/custom/execs.lua"
+if [[ -f "$_SKEL_EXECS" ]] && grep -qF 'theme-recolor' "$_SKEL_EXECS"; then
+  _v_fail "the recolour-watcher fence ('theme-recolor') is baked into skel execs.lua — it must be OFF by default (opt-in via 'iictl theme watch enable') (THEME-01d)"
+else
+  _v_ok "recolour watcher is off by default (no theme-recolor fence baked into skel execs.lua) (THEME-01d)"
+fi
+
 step "reversibility round-trip e2e test (TEST-02)"
 # The static checks above assert the reversibility STRUCTURE; the e2e test
 # (tests/revert-roundtrip.sh + its in-container payload) DEMONSTRATES it — seed

@@ -1,0 +1,28 @@
+# Illogical Impulse — lazygit config (installed-user skel default).
+#
+# UNOWNED seam: upstream ships no ~/.config/lazygit, so this static default can
+# never collide with or be wiped by upstream's rsync --delete. It themes only
+# lazygit's gui colours toward the Catppuccin-Mocha cold-start palette and leaves
+# all behaviour at lazygit's defaults. Delete ~/.config/lazygit to fall back to
+# lazygit's own default theme.
+gui:
+  theme:
+    activeBorderColor:
+      - "#89b4fa"
+      - bold
+    inactiveBorderColor:
+      - "#585b70"
+    optionsTextColor:
+      - "#89b4fa"
+    selectedLineBgColor:
+      - "#313244"
+    cherryPickedCommitBgColor:
+      - "#45475a"
+    cherryPickedCommitFgColor:
+      - "#89b4fa"
+    unstagedChangesColor:
+      - "#f38ba8"
+    defaultFgColor:
+      - "#cdd6f4"
+  nerdFontsVersion: "3"
+  showFileTree: true
