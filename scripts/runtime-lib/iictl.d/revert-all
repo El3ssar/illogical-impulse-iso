@@ -244,6 +244,12 @@ _plan_line() {
     group)           printf 'remove %s from group %s' "$(_hint_user "$F_hint" || printf '?')" "$F_target" ;;
     chsh)            printf 'restore login shell of %s to %s' "$F_target" "$F_hint" ;;
     pkg|pack)        printf 'pacman -Rns %s' "$F_pkgs" ;;
+    theme-accent)    printf 'clear the theme accent (switchwall.sh --color clear → wallpaper-driven)' ;;
+    theme-image)     if [[ -n "$F_hint" ]]; then
+                       printf 'restore prior wallpaper %s (switchwall.sh --image)' "$F_hint"
+                     else
+                       printf 'leave wallpaper as-is (no prior recorded)'
+                     fi ;;
     path|file)       local _pp _pl="" _pq            # decode each owned token for display (REV-05)
                      IFS=',' read -ra _pq <<< "$F_owned"
                      for _pp in "${_pq[@]}"; do
@@ -311,6 +317,24 @@ _revert_row() {
     pkg|pack)           # offline-safe: removal needs no network or [ii-extra]
       [[ -n "$F_pkgs" ]] || return 0
       _revert_pkgset "$F_pkgs"; return $?
+      ;;
+    theme-accent)       # iictl theme set/reset — the inverse is upstream's own
+                        # `switchwall.sh --color clear`, which empties accentColor
+                        # back to "" (byte-identical to never-set; #16). We never
+                        # re-apply a prior flavor — revert restores VANILLA, not a
+                        # previous override. User-owned config write; no sudo.
+                        # Soft if switchwall is gone (nothing left to drive).
+      local sw="${II_SWITCHWALL:-$HOME/.config/quickshell/ii/scripts/colors/switchwall.sh}"
+      [[ -x "$sw" ]] || { warn "theme-accent: switchwall.sh not found — cannot clear accent (left in place)"; return 1; }
+      "$sw" --color clear >/dev/null 2>&1 && return 0 || return 1
+      ;;
+    theme-image)        # iictl theme set --image — re-apply the recorded prior
+                        # wallpaper (empty hint → nothing to restore). User-owned.
+      [[ -n "$F_hint" ]] || return 0
+      [[ -f "$F_hint" ]] || { warn "theme-image: prior wallpaper '$F_hint' gone — left in place"; return 1; }
+      local sw="${II_SWITCHWALL:-$HOME/.config/quickshell/ii/scripts/colors/switchwall.sh}"
+      [[ -x "$sw" ]] || { warn "theme-image: switchwall.sh not found — cannot restore wallpaper (left in place)"; return 1; }
+      "$sw" --image "$F_hint" >/dev/null 2>&1 && return 0 || return 1
       ;;
     path|file)
       # owned_paths is comma-joined of comma-ESCAPED tokens (ledger.sh) → split
