@@ -1,0 +1,372 @@
+#!/usr/bin/env bash
+#help: nvim	choose a Neovim distro (lazyvim/astronvim/nvchad/kickstart/plain), reversibly
+#spec: nvim	Neovim distro
+# nvim — the iictl Neovim-distro chooser (PROPOSAL §6, issue #17). The flagship
+# "batteries included, choices reversible" editor verb. The BAKED default is
+# plain neovim with an EMPTY ~/.config/nvim (upstream ships zero nvim config —
+# the unowned seam class, PROPOSAL §3). A user who never runs this gets vanilla
+# nvim; there is nothing to revert by default → the Iron Law holds trivially.
+#
+# `set <distro>` is ADDITIVE + STAMPED + REVERSIBLE:
+#   • backs up any existing ~/.config/nvim + ~/.local/share/nvim to a
+#     timestamped ~/.config/ii/nvim-backup/<ts>/ (recorded in the ledger),
+#   • REFUSES to clobber a config that lacks our .ii-distro stamp (a user's own
+#     config) unless --force — back up regardless,
+#   • CLONES the chosen distro ONLINE at a PINNED rev (NOTHING nvim is staged or
+#     baked into the ISO — the on-ISO plugin stash was dropped in the #42 design
+#     pivot; optional editor setup needs a network, PROPOSAL §4 Pillar 1 / §18),
+#   • strips the clone's .git, headless-bootstraps (lazy.nvim fetches the plugin
+#     set online on first run — its native behaviour),
+#   • writes a ~/.config/nvim/.ii-distro ownership stamp (distro/installed/backup),
+#   • ledger_records the action (kind=file, owned_paths = the three nvim dirs,
+#     restore_hint = `iictl nvim restore`) so `iictl revert-all` and `iictl nvim
+#     restore` return the box to bare neovim.
+#
+# `theme` is a ONE-SHOT Material You recolor (NO daemon/watcher — explicitly
+# rejected): it reads upstream's generated colors.json by path (READ-ONLY) and
+# writes only a distro-owned ~/.config/nvim/lua/ii-material.lua.
+#
+# Purely additive: one drop-in beside the iictl core (zero merge surface), under
+# the survive-path /usr/local/lib/ii/iictl.d/ (kept by ii-verify). Touches NO
+# upstream-owned path — the `codeEditor` keybind (SUPER+C → launch_first_available
+# → `command -v nvim`) self-wires the rice's editor key just by nvim existing; we
+# never edit it or anything under ~/.config/hypr/hyprland.
+
+set -u
+
+# Shared header (colors, ok/bad/warn/die, _not_root, RELEASE_FILE, ledger_*). It
+# sources ledger.sh itself, so ledger_record / ledger_escape_path are in scope.
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+
+# ── paths (all overridable for the no-root self-test) ────────────────────────
+NVIM_CONFIG="${II_NVIM_CONFIG:-$HOME/.config/nvim}"
+NVIM_SHARE="${II_NVIM_SHARE:-${XDG_DATA_HOME:-$HOME/.local/share}/nvim}"
+NVIM_STATE="${II_NVIM_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/nvim}"
+BACKUP_ROOT="${II_NVIM_BACKUP_ROOT:-$HOME/.config/ii/nvim-backup}"
+STAMP="$NVIM_CONFIG/.ii-distro"
+# Upstream's generated Material palette (READ-ONLY STATE — we only read it).
+COLORS_JSON="${II_NVIM_COLORS:-${XDG_STATE_HOME:-$HOME/.local/state}/quickshell/user/generated/colors.json}"
+MATERIAL_LUA="$NVIM_CONFIG/lua/ii-material.lua"
+
+# ── pinned distro table ──────────────────────────────────────────────────────
+# <name> → "<git-url>|<pinned-rev>[;<framework-url>|<framework-rev>|<framework-dest-rel>]"
+# PIN EVERY REV — never track HEAD (reproducibility + supply-chain hygiene). The
+# dest-rel for a framework is RELATIVE to ~/.local/share/nvim (where AstroNvim /
+# NvChad expect their framework checkout). LunarVim is deliberately absent
+# (unmaintained). Frameworks pin to RELEASE TAGS (always fetchable shallowly);
+# the un-tagged starters pin to a commit SHA verified to exist at authoring time
+# (git ls-remote). _clone_at falls back to a full clone if a shallow SHA fetch is
+# refused (an older, non-tip SHA), so the pin stays exact regardless. Re-pin by
+# bumping the SHA/tag here — there is no separate manifest file.
+_nvim_distro_spec() {
+  case "$1" in
+    lazyvim)   printf '%s' 'https://github.com/LazyVim/starter|803bc181d7c0d6d5eeba9274d9be49b287294d99' ;;
+    astronvim) printf '%s' 'https://github.com/AstroNvim/template|49a7161b776f8bc6c23508819ea1ad4e7b359bee;https://github.com/AstroNvim/AstroNvim|v4.9.0|lazy/AstroNvim' ;;
+    nvchad)    printf '%s' 'https://github.com/NvChad/starter|e3572e1f5e1c297212c3deeb17b7863139ce663e;https://github.com/NvChad/NvChad|v2.5|lazy/NvChad' ;;
+    kickstart) printf '%s' 'https://github.com/nvim-lua/kickstart.nvim|f0a2108ed51547793c758d9318bad94f242b22e5' ;;
+    *)         return 1 ;;
+  esac
+}
+_nvim_distros() { printf '%s\n' lazyvim astronvim nvchad kickstart; }
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+# _stamp_get <key> — read a key from the .ii-distro stamp (simple key=value).
+_stamp_get() {
+  [[ -f "$STAMP" ]] || return 1
+  local v; v="$(grep -m1 -E "^$1=" "$STAMP" 2>/dev/null)" || return 1
+  printf '%s' "${v#*=}"
+}
+
+# _current_distro — echo the owned distro name, or `plain` (empty/our config with
+# no distro), or `user-owned` (a config WITHOUT our stamp = the user's own).
+_current_distro() {
+  if [[ ! -e "$NVIM_CONFIG" ]] || [[ -z "$(ls -A "$NVIM_CONFIG" 2>/dev/null)" ]]; then
+    printf 'plain'; return 0
+  fi
+  if [[ -f "$STAMP" ]]; then
+    printf '%s' "$(_stamp_get distro || printf plain)"; return 0
+  fi
+  printf 'user-owned'
+}
+
+# _is_ours — true if the current config is empty/plain OR carries our stamp.
+_is_ours() {
+  [[ ! -e "$NVIM_CONFIG" ]] && return 0
+  [[ -z "$(ls -A "$NVIM_CONFIG" 2>/dev/null)" ]] && return 0
+  [[ -f "$STAMP" ]]
+}
+
+# _backup — timestamp-back-up the existing nvim config + share to
+# $BACKUP_ROOT/<ts>/ (only the dirs that exist). Echoes the backup dir (empty if
+# nothing existed). Recorded in the ledger by the caller.
+_backup() {
+  local had=0 ts dest
+  [[ -e "$NVIM_CONFIG" && -n "$(ls -A "$NVIM_CONFIG" 2>/dev/null)" ]] && had=1
+  [[ -e "$NVIM_SHARE"  && -n "$(ls -A "$NVIM_SHARE"  2>/dev/null)" ]] && had=1
+  (( had )) || { printf ''; return 0; }
+  ts="$(date -u +%Y%m%d-%H%M%S)"
+  dest="$BACKUP_ROOT/$ts"
+  mkdir -p "$dest" || { die "could not create backup dir $dest"; }
+  [[ -e "$NVIM_CONFIG" ]] && cp -a "$NVIM_CONFIG" "$dest/config" 2>/dev/null || true
+  [[ -e "$NVIM_SHARE"  ]] && cp -a "$NVIM_SHARE"  "$dest/share"  2>/dev/null || true
+  printf '%s' "$dest"
+}
+
+# _wipe_nvim — empty the three nvim dirs (config/share/state) → bare neovim.
+_wipe_nvim() {
+  rm -rf "$NVIM_CONFIG" "$NVIM_SHARE" "$NVIM_STATE" 2>/dev/null || true
+}
+
+# _record <distro> <backup> — append ONE kind=file ledger row owning the three
+# nvim dirs, with restore_hint = `iictl nvim restore`. revert-all's path|file
+# inverse rm -rf's the owned dirs (→ bare neovim); the hint documents the
+# distro-aware restore (which also rolls a stamped backup back).
+_record() {
+  local distro="$1" backup="$2"
+  local owned
+  owned="$(ledger_escape_path "$NVIM_CONFIG"),$(ledger_escape_path "$NVIM_SHARE"),$(ledger_escape_path "$NVIM_STATE")"
+  ledger_record file "nvim:$distro" "" "$owned" "iictl nvim restore (backup=${backup:-none})"
+}
+
+# ── clone + bootstrap ────────────────────────────────────────────────────────
+# _clone_at <url> <rev> <dest> — shallow-fetch a pinned rev into <dest> and strip
+# .git. Pinned-rev clone with a clear network hint on failure (the install is
+# online by design — PROPOSAL §4 Pillar 1).
+_clone_at() {
+  local url="$1" rev="$2" dest="$3"
+  command -v git >/dev/null 2>&1 || die "git missing — install with: sudo pacman -S --needed git"
+  mkdir -p "$dest" || die "could not create $dest"
+  echo "${C_B}>> cloning${C_0} $url @ $rev"
+  # Fast path: shallow-fetch the exact pinned rev (works for tags and for a SHA
+  # GitHub still advertises — e.g. a tip). Fallback: a full clone + checkout of
+  # the rev, for an older SHA the server refuses to fetch shallowly. Either way
+  # the checkout is the EXACT pinned rev — never a moving HEAD.
+  if ! ( cd "$dest" \
+           && git init -q \
+           && git remote add origin "$url" \
+           && git fetch -q --depth=1 origin "$rev" \
+           && git checkout -q FETCH_HEAD ); then
+    warn "shallow fetch of $rev refused — retrying with a full clone (slower, still pinned)"
+    rm -rf "$dest"; mkdir -p "$dest"
+    ( cd "$dest" \
+        && git clone -q "$url" . \
+        && git checkout -q "$rev" ) \
+      || die "clone failed for $url @ $rev — check your network connection (the editor setup is ONLINE by design) and that the pinned rev still exists"
+  fi
+  rm -rf "$dest/.git"
+}
+
+# _headless_bootstrap — let lazy.nvim fetch the plugin set online, headless.
+# Fail-soft: a bootstrap hiccup (e.g. a transient network blip) leaves a valid
+# config that will simply bootstrap on the next interactive launch — never abort
+# the whole `set` (the config + stamp + ledger row are already in place).
+_headless_bootstrap() {
+  command -v nvim >/dev/null 2>&1 || { warn "nvim not on PATH — skipping headless plugin bootstrap (plugins fetch on first launch)"; return 0; }
+  echo "${C_B}>> bootstrapping plugins headless${C_0} (lazy.nvim fetches online; first run may take a moment)"
+  nvim --headless "+Lazy! sync" +qa >/dev/null 2>&1 \
+    || warn "headless plugin bootstrap reported an issue — plugins will finish fetching on your first interactive 'nvim' launch"
+}
+
+# _write_stamp <distro> <backup> — drop the ownership stamp.
+_write_stamp() {
+  mkdir -p "$NVIM_CONFIG"
+  {
+    printf 'distro=%s\n' "$1"
+    printf 'installed=%s\n' "$(date -u +%FT%TZ)"
+    printf 'backup=%s\n' "${2:-}"
+  } > "$STAMP"
+}
+
+# ── subcommands ──────────────────────────────────────────────────────────────
+cmd_status() {
+  local cur; cur="$(_current_distro)"
+  echo "${C_B}iictl nvim${C_0} — current editor distro: ${C_B}$cur${C_0}"
+  case "$cur" in
+    plain)      echo "  vanilla neovim (empty ~/.config/nvim) — the baked default" ;;
+    user-owned) echo "  your OWN nvim config (no .ii-distro stamp) — 'set' needs --force to replace it" ;;
+    *)          [[ -f "$STAMP" ]] && sed 's/^/  /' "$STAMP" ;;
+  esac
+  echo "  config: $NVIM_CONFIG"
+}
+
+cmd_set() {
+  local distro="" force=0 a
+  for a in "$@"; do
+    case "$a" in
+      --force|-f) force=1 ;;
+      -*) die "unknown flag: $a" ;;
+      *)  [[ -z "$distro" ]] && distro="$a" || die "unexpected argument: $a" ;;
+    esac
+  done
+  [[ -n "$distro" ]] || die "usage: iictl nvim set <lazyvim|astronvim|nvchad|kickstart|plain|restore> [--force]"
+  _not_root
+
+  case "$distro" in
+    restore) cmd_restore; return $? ;;
+    plain)
+      # Empty config (after backup) → vanilla neovim.
+      if ! _is_ours && (( ! force )); then
+        die "your ~/.config/nvim has no .ii-distro stamp (a config you created) — refusing to wipe it. Re-run with --force to back it up and clear to vanilla."
+      fi
+      local backup; backup="$(_backup)"
+      _wipe_nvim
+      _record plain "$backup"
+      ok "nvim reset to plain (vanilla, empty ~/.config/nvim)${backup:+ — prior config backed up to $backup}"
+      return 0
+      ;;
+  esac
+
+  local spec; spec="$(_nvim_distro_spec "$distro")" \
+    || die "unknown distro '$distro' (choose: $(_nvim_distros | tr '\n' ' ' | sed 's/ $//'), or plain/restore)"
+
+  # Refuse to clobber a non-stamped (user-owned) config without --force. We back
+  # up REGARDLESS below — the gate only prevents a silent overwrite.
+  if ! _is_ours && (( ! force )); then
+    die "your ~/.config/nvim has no .ii-distro stamp (a config you created) — refusing to overwrite it. Re-run with --force (your config is backed up first)."
+  fi
+
+  # 1. back up whatever is there (recorded via the ledger row below).
+  local backup; backup="$(_backup)"
+
+  # 2. clear the slate so the clone lands clean.
+  _wipe_nvim
+
+  # 3. clone the chosen distro online at its pinned rev (+ optional framework).
+  local main="${spec%%;*}" frame=""
+  [[ "$spec" == *';'* ]] && frame="${spec#*;}"
+  local m_url="${main%%|*}" m_rev="${main#*|}"
+  _clone_at "$m_url" "$m_rev" "$NVIM_CONFIG"
+  if [[ -n "$frame" ]]; then
+    local f_url f_rev f_dest
+    f_url="${frame%%|*}"; frame="${frame#*|}"
+    f_rev="${frame%%|*}"; f_dest="${frame#*|}"
+    _clone_at "$f_url" "$f_rev" "$NVIM_SHARE/$f_dest"
+  fi
+
+  # 4. headless bootstrap (lazy fetches plugins online).
+  _headless_bootstrap
+
+  # 5. stamp ownership + record the reversible action.
+  _write_stamp "$distro" "$backup"
+  _record "$distro" "$backup"
+
+  ok "nvim set to ${C_B}$distro${C_0}${backup:+ — prior config backed up to $backup}"
+  echo "  open 'nvim' (or press SUPER+C) to use it. Revert with: iictl nvim restore"
+}
+
+cmd_restore() {
+  _not_root
+  local cur; cur="$(_current_distro)"
+  # The backup the LAST `set` recorded (most recent kind=file nvim row), parsed
+  # out of the restore_hint's `backup=<path>` token.
+  local last_hint backup=""
+  last_hint="$(ledger_query file | grep $'\t''nvim:' | tail -n1 | cut -f6)"
+  if [[ "$last_hint" == *'backup='* ]]; then
+    backup="${last_hint#*backup=}"; backup="${backup%)*}"
+    [[ "$backup" == none ]] && backup=""
+  fi
+
+  _wipe_nvim
+  if [[ -n "$backup" && -d "$backup" ]]; then
+    [[ -d "$backup/config" ]] && cp -a "$backup/config" "$NVIM_CONFIG" 2>/dev/null || true
+    [[ -d "$backup/share"  ]] && cp -a "$backup/share"  "$NVIM_SHARE"  2>/dev/null || true
+    ok "restored your prior nvim config from $backup"
+  else
+    ok "nvim restored to vanilla (empty ~/.config/nvim) — 'nvim' opens bare"
+  fi
+  # Record the restore as its own kind=file row so a later revert-all is a no-op
+  # on an already-bare config (the owned dirs are gone; rm -rf is idempotent).
+  _record restore ""
+}
+
+# cmd_theme — ONE-SHOT Material You recolor (NO daemon). Read upstream's generated
+# colors.json (READ-ONLY) by path, emit a distro-owned lua/ii-material.lua that
+# the distro's config can `require('ii-material')`. Dependency-free parse (flat
+# {"key":"#hex"} object → grep/sed, NO jq). Static fallback if the palette is
+# absent (e.g. colours not generated yet). NEVER edits upstream's matugen config
+# (PROPOSAL §6 audit fix (a)).
+cmd_theme() {
+  _not_root
+  [[ -e "$NVIM_CONFIG" && -n "$(ls -A "$NVIM_CONFIG" 2>/dev/null)" ]] \
+    || die "no nvim config to theme — run 'iictl nvim set <distro>' first"
+
+  # _color <key> <fallback-hex> — pull "#rrggbb" for a flat key, else fallback.
+  _color() {
+    local key="$1" fb="$2" v=""
+    if [[ -r "$COLORS_JSON" ]]; then
+      v="$(grep -m1 -E "\"$key\"[[:space:]]*:" "$COLORS_JSON" 2>/dev/null \
+            | sed -E 's/.*:[[:space:]]*"([^"]*)".*/\1/')"
+    fi
+    [[ "$v" =~ ^#[0-9A-Fa-f]{6}$ ]] && printf '%s' "$v" || printf '%s' "$fb"
+  }
+
+  mkdir -p "$(dirname "$MATERIAL_LUA")"
+  {
+    printf -- '-- ii-material.lua — generated by `iictl nvim theme` (one-shot Material You).\n'
+    printf -- '-- Distro-owned; safe to delete. Re-run `iictl nvim theme` to refresh.\n'
+    printf -- 'return {\n'
+    printf -- '  background = "%s",\n'  "$(_color background  '#1a1110')"
+    printf -- '  foreground = "%s",\n'  "$(_color on_background '#ece0dd')"
+    printf -- '  primary    = "%s",\n'  "$(_color primary     '#ffb59f')"
+    printf -- '  secondary  = "%s",\n'  "$(_color secondary   '#e7bdb2')"
+    printf -- '  tertiary   = "%s",\n'  "$(_color tertiary    '#d6c68f')"
+    printf -- '  surface    = "%s",\n'  "$(_color surface     '#1a1110')"
+    printf -- '  error      = "%s",\n'  "$(_color error       '#ffb4ab')"
+    printf -- '}\n'
+  } > "$MATERIAL_LUA"
+
+  # Record as a kind=file row owning just the generated lua so revert-all removes
+  # it (it also falls inside the nvim config dir the main row owns — harmless).
+  ledger_record file "nvim:theme" "" "$(ledger_escape_path "$MATERIAL_LUA")" "rm to undo the one-shot nvim Material You recolor"
+  ok "wrote $MATERIAL_LUA — require('ii-material') in your config to use the Material You palette"
+}
+
+# cmd_spec — emit the iictl chooser-contract spec (#47): ONE `choice` control over
+# the distros + plain, current = the owned distro. The iictl-tui renderer applies
+# a pick by running `nvim set <value>` back through this plugin → the ledger still
+# owns reversibility. Dependency-free JSON (no jq).
+cmd_spec() {
+  local cur; cur="$(_current_distro)"
+  [[ "$cur" == user-owned ]] && cur=plain   # the chooser only offers our values
+  local options='' first=1 d
+  for d in plain $(_nvim_distros); do
+    (( first )) || options+=','
+    options+="{\"value\":\"$d\",\"label\":\"$d\"}"
+    first=0
+  done
+  printf '{"domain":"nvim","title":"Neovim distro","controls":[{"id":"distro","type":"choice","label":"Editor distro","current":"%s","options":[%s],"apply":["nvim","set","%%v"]}]}\n' \
+    "$cur" "$options"
+}
+
+cmd_usage() {
+  cat <<EOF
+${C_B}iictl nvim${C_0} — choose a Neovim distro on top of the shipped vanilla default
+
+The baked default is PLAIN neovim with an empty ~/.config/nvim. Picking a distro
+clones it ONLINE at a pinned rev, backs up any existing config, and stamps it
+.ii-distro so it is fully reversible. Nothing nvim is baked into the ISO.
+
+usage:
+  iictl nvim status                 show the current distro (plain/user-owned/<name>)
+  iictl nvim set <distro> [--force] install a distro (lazyvim|astronvim|nvchad|kickstart)
+  iictl nvim set plain  [--force]   reset to vanilla (empty config; backs up first)
+  iictl nvim set restore            alias for 'iictl nvim restore'
+  iictl nvim restore                remove the distro, restore a stamped backup or go bare
+  iictl nvim theme                  one-shot Material You recolor (no daemon)
+  iictl nvim --spec                 emit the iictl-tui chooser spec (drives 'iictl tweak nvim')
+
+Reversible: every 'set' is ledger-recorded; 'iictl revert-all' (or 'iictl nvim
+restore') returns ~/.config/nvim to vanilla. --force is required to replace a
+config you created yourself (no .ii-distro stamp); it is backed up first.
+EOF
+}
+
+case "${1:-status}" in
+  status)          shift; cmd_status  "$@" ;;
+  set)             shift; cmd_set     "$@" ;;
+  restore)         shift; cmd_restore "$@" ;;
+  theme)           shift; cmd_theme   "$@" ;;
+  --spec|spec)     shift; cmd_spec    "$@" ;;
+  help|-h|--help)  cmd_usage ;;
+  *)               die "unknown subcommand: $1 (try: iictl nvim help)" ;;
+esac
