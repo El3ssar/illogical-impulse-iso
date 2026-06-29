@@ -148,6 +148,7 @@ build/ out/                    # generated
 | ISO-build chroot logic | `scripts/chroot.sh` |
 | Post-install / bootloader / verify logic | `scripts/runtime/ii-*` |
 | Add an iictl subcommand (drop-in) | `scripts/runtime-lib/iictl.d/<cmd>` (exec; `source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"` + a `#help:` line) → staged to `/usr/local/lib/ii/iictl.d/` |
+| Choose/change the Neovim distro (reversible) | `iictl nvim set <lazyvim\|astronvim\|nvchad\|kickstart\|plain\|restore>` — drop-in `scripts/runtime-lib/iictl.d/nvim`; baked default is vanilla nvim (empty `~/.config/nvim`, the unowned seam), clones a distro ONLINE at a pinned rev, `.ii-distro`-stamped + ledger-recorded, `--force` to replace a non-stamped config; `iictl nvim restore`/`iictl revert-all` returns to bare. NOTHING nvim is baked into the ISO. |
 | Give a domain an interactive configurator (TUI) | the domain's `iictl.d/<cmd>` emits `--spec` (the 3-control chooser contract: `choice`/`list`/`toggle`; see BLUEPRINT §"iictl chooser contract") + a `#spec:` header; the baked `iictl-tui` (ratatui) renders it via `iictl tweak <domain>`. The renderer mutates nothing — it shells back to the domain's `iictl` verbs, so the ledger still owns reversibility. |
 | Change/extend the `iictl-tui` renderer | `overlay/aur-pkgbuilds/iictl-tui/crate/` (Rust/ratatui; built by prebuild → `[ii-extra]`, baked via `packages/base.list`) |
 | Pipeline step | `scripts/prepare.d/NN-*.sh` |

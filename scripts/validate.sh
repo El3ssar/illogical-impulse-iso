@@ -651,6 +651,83 @@ if [[ -d "$_IID" ]]; then
   done
 fi
 (( _man_bad == 0 )) && _v_ok "$_man_plug per-plugin man page(s) baked + non-empty"
+step "nvim chooser plugin (NVIM-01)"
+# NVIM-01 (#17): the Neovim-distro chooser is a survive-path iictl.d/ drop-in that
+# clones a chosen distro ONLINE at a pinned rev and owns the unowned nvim seam
+# (~/.config/nvim + ~/.local/{share,state}/nvim) reversibly. Three bug-class
+# guards beyond the generic plugin hygiene (exec/shebang/bash -n/#help already
+# asserted above): (a) the plugin is actually staged (a named guard so it can
+# never silently vanish from the image); (b) NOTHING nvim is baked into skel —
+# the baked default MUST stay vanilla (empty ~/.config/nvim); (c) the plugin
+# owns DIRECTORY trees, so revert-all's path|file inverse MUST rm -rf (plain rm -f
+# errors on a dir → the tree would survive a revert and the Iron Law would break).
+NVP="$AIROOTFS/usr/local/lib/ii/iictl.d/nvim"
+if [[ ! -f "$NVP" ]]; then
+  _v_fail "iictl.d/nvim not staged — the Neovim-distro chooser is missing"
+else
+  # (a) named existence + exec/shebang/bash -n/#help (mirrors the generic loop so
+  #     a regression in THIS plugin is attributed to NVIM-01, not a generic fail).
+  _nv_bad=0
+  [[ -x "$NVP" ]] || { _v_fail "iictl.d/nvim not executable (mkarchiso cp strips mode — chmod at stage)"; _nv_bad=$((_nv_bad+1)); }
+  [[ "$(head -c2 "$NVP")" == "#!" ]] || { _v_fail "iictl.d/nvim has no shebang"; _nv_bad=$((_nv_bad+1)); }
+  bash -n "$NVP" 2>/dev/null || { _v_fail "iictl.d/nvim syntax error"; _nv_bad=$((_nv_bad+1)); }
+  grep -qE '^#help:[[:space:]]' "$NVP" || { _v_fail "iictl.d/nvim missing #help: header (won't show in iictl help)"; _nv_bad=$((_nv_bad+1)); }
+  _nv_code="$(grep -vE '^[[:space:]]*#' "$NVP")"
+  # The chooser must clone the distro at a PINNED rev (never track HEAD) and
+  # never edit an upstream-owned path. A git fetch of a pinned ref is the tell.
+  grep -qE 'git[[:space:]]+fetch' <<<"$_nv_code" \
+    || { _v_fail "iictl.d/nvim never git-fetches — it must clone the chosen distro online (NVIM-01)"; _nv_bad=$((_nv_bad+1)); }
+  grep -qE 'ledger_record' <<<"$_nv_code" \
+    || { _v_fail "iictl.d/nvim never calls ledger_record — a 'set' would be unrevertable (NVIM-01)"; _nv_bad=$((_nv_bad+1)); }
+  (( _nv_bad == 0 )) && _v_ok "iictl.d/nvim staged: exec + shebang + bash -n + #help, pinned online clone, ledger-recorded (NVIM-01)"
+fi
+
+# (b) baked default stays vanilla: NO nvim config may ship in either skel tree.
+#     Upstream ships zero ~/.config/nvim (the unowned seam); the chooser must
+#     leave it empty by default so a fresh user's `nvim` opens bare. A stray
+#     skel-distro/.config/nvim (or share/state) would bake an opinionated editor
+#     into every install — the exact thing #17 refuses (and a skel-shadow risk).
+_nv_skel_bad=0
+for _sk in "$AIROOTFS/etc/skel" "$AIROOTFS/etc/skel-upstream" "$OVERLAY/skel-distro" "$OVERLAY/skel-live"; do
+  [[ -d "$_sk" ]] || continue
+  for _np in .config/nvim .local/share/nvim .local/state/nvim; do
+    if [[ -e "$_sk/$_np" ]]; then
+      _v_fail "NVIM-01: $_sk/$_np exists — no nvim config may be baked into skel (the baked default must be vanilla/empty)"
+      _nv_skel_bad=$((_nv_skel_bad+1))
+    fi
+  done
+done
+(( _nv_skel_bad == 0 )) && _v_ok "NVIM-01: no nvim config baked into any skel tree (baked default is vanilla; no skel-shadow)"
+
+# Focused offline self-test: the chooser's no-network mechanics (refusal gate,
+# backup, stamp, ledger record, restore round-trip, theme). It runs the REAL
+# plugin against a throwaway $HOME with II_LIB relocated — no root, no network,
+# no /usr/local install — so it is safe to run inline here (unlike the nspawn
+# round-trip). A regression in the reversible-state machine reds the build.
+_NV_TEST="$ROOT/tests/nvim-chooser.sh"
+if [[ ! -f "$_NV_TEST" ]]; then
+  _v_fail "NVIM-01: tests/nvim-chooser.sh missing — the chooser self-test is gone"
+elif ! bash -n "$_NV_TEST" 2>/dev/null; then
+  _v_fail "NVIM-01: tests/nvim-chooser.sh has a syntax error"
+elif bash "$_NV_TEST" >/dev/null 2>&1; then
+  _v_ok "NVIM-01: tests/nvim-chooser.sh self-test passes (refusal gate, backup, stamp, ledger, restore, theme)"
+else
+  _v_fail "NVIM-01: tests/nvim-chooser.sh self-test FAILED — run it directly to see which assertion broke"
+fi
+
+# (c) revert-all owns directory trees → must rm -rf, not rm -f, in the path|file
+#     inverse. Comments stripped so the historic-bug note above the line can't
+#     satisfy/trip this grep.
+_RA_NV="$AIROOTFS/usr/local/lib/ii/iictl.d/revert-all"
+if [[ -f "$_RA_NV" ]]; then
+  _ra_nv_code="$(grep -vE '^[[:space:]]*#' "$_RA_NV")"
+  if grep -qE 'rm[[:space:]]+-[a-zA-Z]*r[a-zA-Z]*f?[[:space:]]+"\$p"' <<<"$_ra_nv_code" \
+     || grep -qE 'rm[[:space:]]+-rf[[:space:]]+"\$p"' <<<"$_ra_nv_code"; then
+    _v_ok "NVIM-01: revert-all's path|file inverse rm -rf's owned paths (removes a dir-owning domain's tree, e.g. nvim)"
+  else
+    _v_fail "NVIM-01: revert-all's path|file inverse still uses rm -f \"\$p\" — a directory owned_path (e.g. ~/.config/nvim) survives a revert (Iron Law break)"
+  fi
+fi
 
 step "revert-all reversibility engine"
 # revert-all (#4) replays the ledger in REVERSE to restore vanilla upstream. Its

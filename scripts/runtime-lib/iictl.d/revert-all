@@ -341,12 +341,19 @@ _revert_row() {
       # on the delimiter, then DECODE each token so a path that contained a
       # literal comma is removed as one path, not split into bogus fragments
       # (REV-05). Without the decode, "a,b" stored as "a%2Cb" would survive.
+      # `rm -rf` (NOT plain -f): a domain may own a DIRECTORY TREE, not just a
+      # file (e.g. the nvim chooser owns ~/.config/nvim + ~/.local/{share,state}/
+      # nvim — #17). Plain `rm -f` errors on a directory (rc=1 → the row would be
+      # kept and the tree would survive a revert-all), so the inverse never
+      # returned the box to vanilla for a dir-owning domain. -rf removes a file
+      # OR a tree and is still no-op-safe on an already-gone path. Single-file
+      # rows (e.g. ii-post-install's first_run.txt) are unaffected.
       local p rc=0 paths
       IFS=',' read -ra paths <<< "$F_owned"
       for p in "${paths[@]}"; do
         [[ -n "$p" ]] || continue
         p="$(ledger_unescape_path "$p")"
-        rm -f "$p" 2>/dev/null || rc=1
+        rm -rf "$p" 2>/dev/null || rc=1
       done
       return $rc
       ;;
