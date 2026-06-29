@@ -61,6 +61,35 @@ issue number, use that (still run the claim protocol below).
 
 ---
 
+## 2a. The bug / correctness lane
+
+Not every issue is a feature. Correctness work — a shipped behaviour that is
+wrong, a regression, a broken guard, a security finding — rides its own lane,
+marked with the **`bug`** label (description: *"Something isn't working"*).
+Triage rule:
+
+- **`bug`** — a defect in already-merged behaviour: it does the wrong thing,
+  breaks reversibility, regresses a `validate.sh` guard, or is a security
+  finding. Use it instead of (or alongside) `enhancement` when the work is
+  *fixing* rather than *adding*. Repo-audit P0/P1 findings file as `bug`.
+- **`enhancement`** — net-new capability or polish; the default for feature
+  issues.
+
+A `bug` issue follows the same claim → branch → PR flow as any other, with two
+extra expectations:
+
+- **Branch prefix `fix/<slug>`** (features use `feat/<slug>`), so the branch
+  name alone says whether a PR fixes or adds.
+- **Every fixed bug-class becomes a `validate.sh` (or `tools/lint-additive.sh`)
+  check** — the project immune system documented in `CLAUDE.md` §"Historic bugs
+  encoded in design choices". A bug PR that doesn't add the guard against its
+  own recurrence is not done. Priority and `status:available`/`blocked` labels
+  work exactly as for features.
+
+(There is no separate `type:bug` label — reuse the single `bug` label above.)
+
+---
+
 ## 3. Claim it (collision avoidance — do this *before* writing code)
 
 ```sh
