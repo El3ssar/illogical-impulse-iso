@@ -1,0 +1,133 @@
+#!/usr/bin/env bash
+#help: migrate	run pending schema/setting migrations (--list, --dry-run)
+# migrate — the Omarchy-style migration runner (#27). Distro-owned migration
+# scripts live BAKED in the squashfs at /usr/share/illogical-impulse/migrations/
+# as NNNN-name.sh (a sibling of the iictl survive-path, untouched by ii-verify's
+# /usr/local/lib/ii purge). Each runs ONCE, in NNNN sort order: the highest
+# applied number is the high-water mark recorded in the user-owned
+# $XDG_STATE_HOME/illogical-impulse/migrations.applied, so a second run is a
+# no-op (idempotent). Migrations are ii-owned scripts only — they must use the
+# shared mutator/ledger helpers so their effects are reversible like any other
+# distro action; this runner sources them so they inherit the helpers.
+#
+# Purely ADDITIVE: one new drop-in beside the iictl core, zero merge surface.
+# State (the applied marker) lives only in the user-owned state dir; the baked
+# migration scripts live only in distro-owned /usr/share. No upstream path.
+
+set -u
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+# The mutators are what migrations call to make reversible changes; expose them
+# (and via them ledger.sh) to every sourced migration. Optional — a dev checkout
+# without the staged tree still loads the runner.
+[[ -r "${II_LIB:-/usr/local/lib/ii}/mutator.sh" ]] && source "${II_LIB:-/usr/local/lib/ii}/mutator.sh"
+
+# Baked migration dir (overridable for the no-root unit test).
+II_MIGRATIONS="${II_MIGRATIONS:-/usr/share/illogical-impulse/migrations}"
+# High-water mark of the highest-applied migration number (user-owned state).
+II_MIG_STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/illogical-impulse"
+II_MIG_APPLIED="$II_MIG_STATE_DIR/migrations.applied"
+
+_usage() {
+  cat <<EOF
+${C_B}iictl migrate${C_0} — run pending distro schema/setting migrations
+
+usage: iictl migrate [--list] [--dry-run]
+
+  --list, -l      show every migration and whether it is applied/pending
+  --dry-run, -n   print which migrations WOULD run, make zero changes
+
+Migrations are baked at $II_MIGRATIONS as NNNN-name.sh and run once, in order.
+The highest applied number is recorded in $II_MIG_APPLIED.
+EOF
+}
+
+# _mig_num <path> — echo the leading NNNN of a migration filename (digits only),
+# or "" if the basename does not start with a number.
+_mig_num() {
+  local bn; bn="$(basename "$1")"
+  [[ "$bn" =~ ^([0-9]+) ]] && printf '%s' "${BASH_REMATCH[1]}" || printf ''
+}
+
+# _mig_high — echo the recorded high-water mark (0 if unset/empty/non-numeric).
+_mig_high() {
+  local n=0
+  [[ -f "$II_MIG_APPLIED" ]] && n="$(tr -dc '0-9' < "$II_MIG_APPLIED" 2>/dev/null)"
+  printf '%s' "${n:-0}"
+}
+
+# _mig_files — echo every migrations/NNNN-*.sh in sort order, one per line.
+_mig_files() {
+  [[ -d "$II_MIGRATIONS" ]] || return 0
+  local f
+  for f in "$II_MIGRATIONS"/[0-9]*.sh; do
+    [[ -e "$f" ]] || continue   # the glob itself if none match
+    printf '%s\n' "$f"
+  done | sort
+}
+
+LIST=0 DRY=0
+for a in "$@"; do
+  case "$a" in
+    --list|-l)    LIST=1 ;;
+    --dry-run|-n) DRY=1 ;;
+    -h|--help)    _usage; exit 0 ;;
+    *) die "unknown option: $a (try: iictl migrate --help)" ;;
+  esac
+done
+
+high="$(_mig_high)"
+
+if (( LIST )); then
+  echo "${C_B}migrations${C_0} (high-water mark: $high)"
+  any=0
+  while IFS= read -r f; do
+    [[ -n "$f" ]] || continue
+    any=1
+    n="$(_mig_num "$f")"; [[ -n "$n" ]] || continue
+    if (( 10#$n <= 10#$high )); then
+      printf '  %sapplied%s  %s\n' "$C_G" "$C_0" "$(basename "$f")"
+    else
+      printf '  %spending%s  %s\n' "$C_Y" "$C_0" "$(basename "$f")"
+    fi
+  done < <(_mig_files)
+  (( any )) || echo "  (none baked at $II_MIGRATIONS)"
+  exit 0
+fi
+
+# Apply (or dry-run) every migration whose NNNN exceeds the high-water mark.
+ran=0
+while IFS= read -r f; do
+  [[ -n "$f" ]] || continue
+  n="$(_mig_num "$f")"
+  [[ -n "$n" ]] || { warn "skipping un-numbered migration: $(basename "$f")"; continue; }
+  (( 10#$n <= 10#$high )) && continue   # already applied
+  if (( DRY )); then
+    echo "  ${C_Y}would run${C_0} $(basename "$f")"
+    ran=$((ran+1))
+    continue
+  fi
+  echo "${C_B}>> migrating: $(basename "$f")${C_0}"
+  # Source so the migration inherits the mutator/ledger helpers (its reversible
+  # effects land in the ledger). A failed migration aborts before bumping the
+  # mark, so it retries next run rather than being silently skipped.
+  # shellcheck source=/dev/null
+  if ( source "$f" ); then
+    mkdir -p "$II_MIG_STATE_DIR" 2>/dev/null || true
+    printf '%s\n' "$n" > "$II_MIG_APPLIED" 2>/dev/null || warn "could not record applied marker"
+    high="$n"
+    ok "applied $(basename "$f")"
+    ran=$((ran+1))
+  else
+    die "migration failed: $(basename "$f") — fix it and re-run (not marked applied)"
+  fi
+done < <(_mig_files)
+
+if (( ran == 0 )); then
+  ok "nothing to migrate — all up to date (high-water mark: $high)"
+elif (( DRY )); then
+  echo
+  echo "$ran migration(s) pending — run 'iictl migrate' to apply"
+else
+  echo
+  ok "$ran migration(s) applied"
+fi
