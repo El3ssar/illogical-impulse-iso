@@ -18,6 +18,26 @@
 # Usage: tests/nvim-chooser.sh   (or: bash tests/nvim-chooser.sh)
 
 set -u
+
+# ── Drop root → unprivileged user. CI runs `just validate` (and thus this
+#    self-test) as ROOT inside an Arch container, but the nvim chooser
+#    deliberately refuses to manage a user's config as root ("run as your user").
+#    Re-exec the whole self-test as a throwaway non-root user so CI still
+#    exercises the real reversible-state mechanics. A normal dev runs as their
+#    own user and never enters this branch. No path here clones, so nvim/network
+#    are NOT required — only an unprivileged uid.
+if [[ "$(id -u)" -eq 0 ]]; then
+  _st_user=ii-nvim-selftest
+  id "$_st_user" >/dev/null 2>&1 || useradd -M "$_st_user" >/dev/null 2>&1 || useradd "$_st_user" >/dev/null 2>&1 || true
+  if id "$_st_user" >/dev/null 2>&1 && command -v runuser >/dev/null 2>&1; then
+    exec runuser -u "$_st_user" -- bash "${BASH_SOURCE[0]}" "$@"
+  elif id "$_st_user" >/dev/null 2>&1 && command -v su >/dev/null 2>&1; then
+    exec su -s /bin/bash "$_st_user" -c 'exec bash "$0" "$@"' "${BASH_SOURCE[0]}" "$@"
+  fi
+  echo "FATAL: nvim self-test must run unprivileged and could not drop root" >&2
+  exit 2
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLUGIN_SRC="$ROOT/scripts/runtime-lib/iictl.d/nvim"
 [[ -f "$PLUGIN_SRC" ]] || { echo "FATAL: missing $PLUGIN_SRC" >&2; exit 2; }
