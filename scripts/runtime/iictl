@@ -64,7 +64,12 @@ _help_render() {
 cmd_help() {
   echo "${C_B}iictl${C_0} — Illogical Impulse distro CLI"
   echo
-  echo "built-in commands:"
+  echo "usage: iictl [command] [args]    (bare 'iictl' opens the welcome card)"
+  echo
+  # Two clearly-labelled sections: the inline built-ins (this file's #help:
+  # block) and the discovered iictl.d/ plugins. Shell completions and the baked
+  # man pages harvest the same #help: headers, so all three surfaces agree.
+  echo "${C_B}Core commands:${C_0}"
   grep -E '^#help:[[:space:]]' "$0" 2>/dev/null | sed -E 's/^#help:[[:space:]]*//' | _help_render
   # Plugins: harvest the first #help: line of each executable drop-in. No
   # hard-coded list — drop a file in, it appears here; delete it, it's gone.
@@ -73,7 +78,7 @@ cmd_help() {
     [[ -f "$p" && -x "$p" ]] || continue
     hl=$(grep -m1 -E '^#help:[[:space:]]' "$p" 2>/dev/null) || continue
     [[ -n "$hl" ]] || continue
-    if (( shown == 0 )); then echo; echo "plugins:"; shown=1; fi
+    if (( shown == 0 )); then echo; echo "${C_B}Feature commands (plugins):${C_0}"; shown=1; fi
     printf '%s\n' "$hl" | sed -E 's/^#help:[[:space:]]*//' | _help_render
   done
 }
@@ -219,7 +224,7 @@ cmd_welcome() {
 }
 
 case "${1:-welcome}" in
-  version)  shift; cmd_version "$@" ;;
+  version|--version|-V)  shift; cmd_version "$@" ;;
   update)   shift; cmd_update  "$@" ;;
   venv)     shift; cmd_venv    "$@" ;;
   doctor)   shift; cmd_doctor  "$@" ;;

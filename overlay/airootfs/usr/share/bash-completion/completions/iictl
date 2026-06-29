@@ -1,0 +1,54 @@
+# iictl(1) bash completion — Illogical Impulse distro CLI.
+#
+# Distro-owned system file (NOT a user dotfile): lives under
+# /usr/share/bash-completion/completions/, auto-loaded by bash-completion's
+# vendor mechanism. Additive + reversible: deleting this file simply stops
+# offering iictl completions; it touches no user rc and no upstream path.
+#
+# The plugin verbs are discovered DYNAMICALLY from /usr/local/lib/ii/iictl.d/
+# at completion time — dropping a new iictl.d/<verb> file makes it
+# tab-completable with no edit here (the additive plugin model extends to
+# discoverability for free). The built-in verbs + their well-known flags are
+# the only static knowledge.
+
+_iictl()
+{
+    local cur prev words cword
+    _init_completion 2>/dev/null || {
+        cur="${COMP_WORDS[COMP_CWORD]}"
+        prev="${COMP_WORDS[COMP_CWORD-1]}"
+        cword=$COMP_CWORD
+    }
+
+    # Built-in verbs (mirror the iictl case-arms / #help: block).
+    local builtins='update doctor venv welcome version help'
+
+    # Dynamic plugin verbs: every executable drop-in in the iictl.d/ dir.
+    local iictl_d='/usr/local/lib/ii/iictl.d'
+    local plugins=''
+    if [[ -d $iictl_d ]]; then
+        local f
+        for f in "$iictl_d"/*; do
+            [[ -x $f && -f $f ]] && plugins+=" $(basename "$f")"
+        done
+    fi
+
+    # First token → verb. Otherwise offer the well-known built-in flags.
+    if (( cword == 1 )); then
+        COMPREPLY=( $(compgen -W "$builtins $plugins" -- "$cur") )
+        return 0
+    fi
+
+    case "${COMP_WORDS[1]}" in
+        update)
+            COMPREPLY=( $(compgen -W '--system --check' -- "$cur") ) ;;
+        welcome)
+            COMPREPLY=( $(compgen -W '--auto' -- "$cur") ) ;;
+        version|--version|-V)
+            COMPREPLY=() ;;
+        *)
+            COMPREPLY=() ;;
+    esac
+    return 0
+}
+complete -F _iictl iictl

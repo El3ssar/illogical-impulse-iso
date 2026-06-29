@@ -83,6 +83,10 @@ for f in etc/os-release etc/issue etc/motd \
          usr/local/bin/ii-prepare-bootloader usr/local/bin/ii-finish-systemd-boot \
          usr/local/bin/ii-verify usr/local/bin/ii-build-wheelhouse \
          usr/local/bin/iictl \
+         usr/share/fish/vendor_completions.d/iictl.fish \
+         usr/share/bash-completion/completions/iictl \
+         usr/share/zsh/site-functions/_iictl \
+         usr/share/man/man1/iictl.1.gz \
          usr/share/illogical-impulse/welcome/shell.qml \
          usr/share/applications/illogical-impulse-welcome.desktop \
          root/nvidia-official.txt root/nvidia-aur.txt \
@@ -578,6 +582,75 @@ if [[ -d "$_IID" ]]; then
 else
   _v_fail "iictl.d/ plugin dir not staged under usr/local/lib/ii/"
 fi
+
+step "iictl completions + grouped help + man pages (#12)"
+# Shell completions are distro-owned SYSTEM files under /usr/share/{fish,
+# bash-completion,zsh} (not user dotfiles) + baked man pages under
+# /usr/share/man/man1. They must (a) exist, (b) the bash one must bash -n
+# clean, and (c) each must do DYNAMIC iictl.d/ discovery — a frozen verb list
+# would silently drift from the actual plugin set (Iron-Rule guard).
+_FISH_C="$AIROOTFS/usr/share/fish/vendor_completions.d/iictl.fish"
+_BASH_C="$AIROOTFS/usr/share/bash-completion/completions/iictl"
+_ZSH_C="$AIROOTFS/usr/share/zsh/site-functions/_iictl"
+for _cf in "$_FISH_C" "$_BASH_C" "$_ZSH_C"; do
+  [[ -s "$_cf" ]] && _v_ok "completion present: ${_cf#"$AIROOTFS"/}" \
+                  || _v_fail "completion missing/empty: ${_cf#"$AIROOTFS"/}"
+done
+# The bash completion is the one that runs under bash → bash -n it (mirrors the
+# runtime-scripts syntax loop).
+if [[ -f "$_BASH_C" ]]; then
+  bash -n "$_BASH_C" 2>/dev/null && _v_ok "bash completion bash -n clean" \
+                                 || _v_fail "bash completion has a syntax error"
+fi
+# Dynamic-discovery guard: every completion must reference the iictl.d/ dir, so
+# new plugins tab-complete with no completion-file edit (not a frozen list).
+_disc_bad=0
+for _cf in "$_FISH_C" "$_BASH_C" "$_ZSH_C"; do
+  [[ -f "$_cf" ]] || continue
+  grep -q '/usr/local/lib/ii/iictl.d' "$_cf" \
+    || { _v_fail "${_cf#"$AIROOTFS"/} does not discover /usr/local/lib/ii/iictl.d — frozen verb list will drift"; _disc_bad=1; }
+done
+(( _disc_bad == 0 )) && _v_ok "all completions discover iictl.d/ dynamically (no frozen verb list)"
+# bash completion registers via complete -F; zsh declares #compdef.
+grep -q 'complete -F _iictl iictl' "$_BASH_C" 2>/dev/null \
+  && _v_ok "bash completion registers _iictl for iictl" \
+  || _v_fail "bash completion never registers (complete -F _iictl iictl) — tab does nothing"
+[[ "$(head -1 "$_ZSH_C" 2>/dev/null)" == '#compdef iictl' ]] \
+  && _v_ok "zsh completion has #compdef iictl header" \
+  || _v_fail "zsh _iictl missing the #compdef iictl header — zsh won't load it"
+# Grouped help + --version aliases in the core.
+grep -q 'Core commands:' "$AIROOTFS/usr/local/bin/iictl" \
+  && grep -q 'Feature commands (plugins):' "$AIROOTFS/usr/local/bin/iictl" \
+  && _v_ok "iictl help prints grouped sections (Core / Feature plugins)" \
+  || _v_fail "iictl help dropped the grouped section headers"
+grep -qE 'version\|--version\|-V' "$AIROOTFS/usr/local/bin/iictl" \
+  && _v_ok "iictl --version / -V alias version" \
+  || _v_fail "iictl missing --version / -V aliases"
+# Baked man pages: top-level + non-empty roff under each gz.
+_MAN1="$AIROOTFS/usr/share/man/man1"
+if [[ -f "$_MAN1/iictl.1.gz" ]]; then
+  if command -v gzip >/dev/null 2>&1 && gzip -dc "$_MAN1/iictl.1.gz" 2>/dev/null | grep -q '\.TH IICTL 1'; then
+    _v_ok "iictl.1.gz baked + non-empty roff (.TH IICTL)"
+  else
+    _v_fail "iictl.1.gz empty or not roff (.TH IICTL header missing)"
+  fi
+else
+  _v_fail "iictl.1.gz man page not baked under usr/share/man/man1/"
+fi
+# One iictl-<verb>.1.gz per plugin, each non-empty.
+_man_plug=0 _man_bad=0
+if [[ -d "$_IID" ]]; then
+  for _p in "$_IID"/*; do
+    [[ -f "$_p" && -x "$_p" ]] || continue
+    _v="$(basename "$_p")"
+    _mg="$_MAN1/iictl-$_v.1.gz"
+    _man_plug=$((_man_plug+1))
+    if [[ -f "$_mg" ]] && gzip -dc "$_mg" 2>/dev/null | grep -q '\.TH'; then :; else
+      _v_fail "missing/empty man page for plugin '$_v' ($_mg)"; _man_bad=1
+    fi
+  done
+fi
+(( _man_bad == 0 )) && _v_ok "$_man_plug per-plugin man page(s) baked + non-empty"
 
 step "revert-all reversibility engine"
 # revert-all (#4) replays the ledger in REVERSE to restore vanilla upstream. Its
