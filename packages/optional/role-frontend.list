@@ -1,0 +1,20 @@
+# role-frontend — a thin COMPOSITE bundle for frontend/web work (FETCHED-ONLINE,
+# never baked). The engine has no `#meta:requires` directive, so a role bundle
+# composes by listing the primitives' members directly (pacman --needed dedupes
+# if a member is already present from another pack). KEEP THIS SMALL — it
+# references the primitives, it does not invent new tooling.
+#
+# Source packs it mirrors:
+#   • lang-node  → pnpm, yarn, mise:node@lts   (the primary frontend runtime)
+#   • dev-cli    → httpie, xh, mkcert          (API + local-TLS dev essentials)
+# A few curated members, not the whole of each primitive, so the bundle stays a
+# fast-start frontend kit rather than a kitchen sink.
+#meta:type role
+pnpm
+yarn
+httpie
+xh
+mkcert
+
+# Primary frontend runtime — mise-managed Node LTS (same directive as lang-node).
+mise:node@lts

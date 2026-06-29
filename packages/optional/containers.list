@@ -1,0 +1,19 @@
+# containers — container/orchestration CLIs (FETCHED-ONLINE, never baked). The
+# container ENGINES (docker, docker-compose, podman) stay BAKED in the dev
+# baseline (packages/goodies.list); rootful docker is the default. This pack adds
+# the orchestration + inspection TOOLING on top, fetched online on demand. Most
+# members are official-repo; `kind` (Kubernetes-in-Docker) is AUR, so the engine
+# presence-checks and bootstraps paru for it automatically.
+#
+# A `--rootless` flag (containers.d/post-add) optionally enables the user's
+# rootless podman socket via the shared mutator (ledger-recorded, undone by
+# containers.d/post-remove on `iictl pack remove`). Without the flag the pack is
+# pure tooling with no system side effect.
+#meta:type dev
+lazydocker
+ctop
+dive
+k9s
+kubectl
+helm
+kind

@@ -1,0 +1,15 @@
+# lang-node — Node.js developer toolchain (FETCHED-ONLINE, never baked). The
+# PRIMARY runtime path is mise-managed Node LTS (the `mise:node@lts` directive)
+# rather than a baked `nodejs` — runtimes stay opt-in (PROPOSAL §7/§13 "bake no
+# language runtimes"). The package members are the alternative package managers
+# that pair with Node; both `pnpm` and `yarn` ship in the official repos, so they
+# install via pacman (no AUR needed). `iictl pack remove lang-node` undoes the
+# `mise use -g node@lts` directive and -Rns's pnpm/yarn.
+#meta:type lang
+pnpm
+yarn
+
+# Primary Node runtime, mise-managed and pinned to the LTS line (engine runs
+# `mise use -g node@lts`; the inverse un-sets it on remove). The `@lts` version
+# selector is part of the mise token, not a separate field.
+mise:node@lts

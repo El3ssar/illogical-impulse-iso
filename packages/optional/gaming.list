@@ -1,0 +1,27 @@
+# gaming — the "gaming edition in one image" pack (#25, PROPOSAL §14). Steam,
+# Lutris, Heroic, the GameMode/MangoHud overlay stack, gamescope, and a
+# Proton-GE build for titles upstream Proton can't run. Installed ONLINE on
+# demand (official repos via pacman, AUR via paru) — nothing here is baked or
+# stashed in the ISO (design pivot #42); only this name-list rides as TEXT.
+#
+# multilib is ALREADY enabled in the installed-target pacman.conf
+# (overlay/airootfs/etc/pacman.conf ships a live [multilib] block), so the
+# 32-bit members are declared DIRECTLY — there is deliberately NO multilib
+# toggle (§14 audit fix a; validate.sh forbids one). pacman just resolves the
+# lib32-* names against the already-enabled repo.
+#
+# post-add writes the sentinel-fenced game-mode toggle widget launch line into
+# ~/.config/hypr/custom/execs.lua (via ii_lua_block_write, guarded behind the
+# widget's presence so non-pack users never get a dead launcher); post-remove
+# strips it. The widget QML itself is framework work (out of scope here).
+#meta:type gaming
+steam
+lutris
+heroic-games-launcher
+gamemode
+lib32-gamemode
+mangohud
+lib32-mangohud
+gamescope
+# Proton-GE — community Proton build (AUR; built at runtime via paru).
+proton-ge-custom-bin

@@ -1,0 +1,26 @@
+# creative — the "creator edition in one image" pack (#25, PROPOSAL §14). A
+# curated multimedia/content-creation suite: NLE + audio + 3D + RAW photo +
+# paint + transcode, plus the codec packages those tools lean on. Installed
+# ONLINE on demand (official repos via pacman, AUR via paru) — nothing baked or
+# stashed (design pivot #42); only this name-list rides in the image as TEXT.
+#
+# DaVinci Resolve is gated behind `iictl pack install creative --with-davinci`
+# (AUR — heavy, EULA, NVIDIA/AMD GPU compute): post-add only installs it when
+# the flag is passed. Declared here as a comment so the manifest documents it
+# without the engine installing it unconditionally (it is NOT a plain member).
+#meta:type creative
+kdenlive
+audacity
+blender
+darktable
+krita
+handbrake
+# Codecs / media plumbing the suite leans on.
+gst-plugins-good
+gst-plugins-bad
+gst-plugins-ugly
+gst-libav
+ffmpeg
+# DaVinci Resolve — AUR, behind --with-davinci (NOT a plain member; installed by
+# the post-add hook only when the flag is passed):
+#   davinci-resolve

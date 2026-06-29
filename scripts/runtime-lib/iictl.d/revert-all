@@ -243,7 +243,16 @@ _plan_line() {
     service-disable) printf 're-enable service %s' "$F_target" ;;
     group)           printf 'remove %s from group %s' "$(_hint_user "$F_hint" || printf '?')" "$F_target" ;;
     chsh)            printf 'restore login shell of %s to %s' "$F_target" "$F_hint" ;;
+    mise)            printf 'mise use -gu %s (un-register opt-in runtime)' "$F_target" ;;
+    linger)          printf 'loginctl disable-linger %s' "$F_target" ;;
+    user-unit)       printf 'systemctl --user disable %s (for %s)' "$F_target" "$(_hint_user "$F_hint" || printf '?')" ;;
     pkg|pack)        printf 'pacman -Rns %s' "$F_pkgs" ;;
+    theme-accent)    printf 'clear the theme accent (switchwall.sh --color clear → wallpaper-driven)' ;;
+    theme-image)     if [[ -n "$F_hint" ]]; then
+                       printf 'restore prior wallpaper %s (switchwall.sh --image)' "$F_hint"
+                     else
+                       printf 'leave wallpaper as-is (no prior recorded)'
+                     fi ;;
     path|file)       local _pp _pl="" _pq            # decode each owned token for display (REV-05)
                      IFS=',' read -ra _pq <<< "$F_owned"
                      for _pp in "${_pq[@]}"; do
@@ -308,21 +317,75 @@ _revert_row() {
       [[ -n "$F_hint" ]] || { warn "chsh row missing prior shell — left in place"; return 1; }
       _sudo chsh -s "$F_hint" "$F_target" >/dev/null 2>&1 && return 0 || return 1
       ;;
+    mise)               # un-register an opt-in lang runtime a pack added with
+                        # `mise use -g <tool>` (PROPOSAL §7). The inverse is the
+                        # documented `mise use -gu <tool>`; mise's config is
+                        # user-owned (~/.config/mise), so no sudo. If mise is
+                        # absent the directive is already inert → treat as undone.
+      command -v mise >/dev/null 2>&1 || return 0
+      [[ -n "$F_target" ]] || { warn "mise row missing tool — left in place"; return 1; }
+      mise use -gu "$F_target" >/dev/null 2>&1 && return 0 || return 1
+      ;;
+    linger)             # undo a rootless `loginctl enable-linger <user>` (the
+                        # containers --rootless toggle). Idempotent: disable-linger
+                        # on a non-lingering user succeeds. F_target is the user.
+      [[ -n "$F_target" ]] || { warn "linger row missing user — left in place"; return 1; }
+      command -v loginctl >/dev/null 2>&1 || return 0
+      _sudo loginctl disable-linger "$F_target" >/dev/null 2>&1 && return 0 || return 1
+      ;;
+    user-unit)          # undo a user-scope `systemctl --user enable <unit>` (the
+                        # rootless podman.socket). F_target is the unit; the owning
+                        # user is in restore_hint (user=<u>). Driven via the user
+                        # manager; idempotent (disabling a disabled unit succeeds).
+      local _uu; _uu="$(_hint_user "$F_hint")" \
+        || { warn "user-unit row missing user= hint — left in place"; return 1; }
+      [[ -n "$_uu" && -n "$F_target" ]] || { warn "user-unit row missing user/unit — left in place"; return 1; }
+      if [[ "$(id -un)" == "$_uu" ]]; then
+        systemctl --user disable "$F_target" >/dev/null 2>&1 && return 0 || return 1
+      else
+        _sudo systemctl --user --machine="$_uu@.host" disable "$F_target" >/dev/null 2>&1 && return 0 || return 1
+      fi
+      ;;
     pkg|pack)           # offline-safe: removal needs no network or [ii-extra]
       [[ -n "$F_pkgs" ]] || return 0
       _revert_pkgset "$F_pkgs"; return $?
+      ;;
+    theme-accent)       # iictl theme set/reset — the inverse is upstream's own
+                        # `switchwall.sh --color clear`, which empties accentColor
+                        # back to "" (byte-identical to never-set; #16). We never
+                        # re-apply a prior flavor — revert restores VANILLA, not a
+                        # previous override. User-owned config write; no sudo.
+                        # Soft if switchwall is gone (nothing left to drive).
+      local sw="${II_SWITCHWALL:-$HOME/.config/quickshell/ii/scripts/colors/switchwall.sh}"
+      [[ -x "$sw" ]] || { warn "theme-accent: switchwall.sh not found — cannot clear accent (left in place)"; return 1; }
+      "$sw" --color clear >/dev/null 2>&1 && return 0 || return 1
+      ;;
+    theme-image)        # iictl theme set --image — re-apply the recorded prior
+                        # wallpaper (empty hint → nothing to restore). User-owned.
+      [[ -n "$F_hint" ]] || return 0
+      [[ -f "$F_hint" ]] || { warn "theme-image: prior wallpaper '$F_hint' gone — left in place"; return 1; }
+      local sw="${II_SWITCHWALL:-$HOME/.config/quickshell/ii/scripts/colors/switchwall.sh}"
+      [[ -x "$sw" ]] || { warn "theme-image: switchwall.sh not found — cannot restore wallpaper (left in place)"; return 1; }
+      "$sw" --image "$F_hint" >/dev/null 2>&1 && return 0 || return 1
       ;;
     path|file)
       # owned_paths is comma-joined of comma-ESCAPED tokens (ledger.sh) → split
       # on the delimiter, then DECODE each token so a path that contained a
       # literal comma is removed as one path, not split into bogus fragments
       # (REV-05). Without the decode, "a,b" stored as "a%2Cb" would survive.
+      # `rm -rf` (NOT plain -f): a domain may own a DIRECTORY TREE, not just a
+      # file (e.g. the nvim chooser owns ~/.config/nvim + ~/.local/{share,state}/
+      # nvim — #17). Plain `rm -f` errors on a directory (rc=1 → the row would be
+      # kept and the tree would survive a revert-all), so the inverse never
+      # returned the box to vanilla for a dir-owning domain. -rf removes a file
+      # OR a tree and is still no-op-safe on an already-gone path. Single-file
+      # rows (e.g. ii-post-install's first_run.txt) are unaffected.
       local p rc=0 paths
       IFS=',' read -ra paths <<< "$F_owned"
       for p in "${paths[@]}"; do
         [[ -n "$p" ]] || continue
         p="$(ledger_unescape_path "$p")"
-        rm -f "$p" 2>/dev/null || rc=1
+        rm -rf "$p" 2>/dev/null || rc=1
       done
       return $rc
       ;;

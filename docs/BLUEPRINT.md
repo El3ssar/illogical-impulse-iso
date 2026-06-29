@@ -299,6 +299,70 @@ Center (#14), so CLI/GUI parity is structural, not hand-maintained.
   the live `iictl pack --spec` reference emitter), the single-picker guard (no
   domain opens a second interactive picker), and the advertise↔answer coupling.
 
+### Multi-source list manager — source-resolver drop-ins (#48)
+
+The reusable engine behind #47's `list` control when its candidates come from
+several *ecosystems* (the first is zsh plugins: antidote bundles, Oh My Zsh
+plugins, raw git repos — "including but not limited to ohmyzsh"). The point of
+the split from #47: each domain picks items from multiple sources **without
+re-implementing source fetching**, and the source set is **extensible by
+drop-in** — adding an ecosystem is one file, no renderer edit (the `iictl.d/`
+model applied to sources). #15's shell layer *consumes* this for its plugin
+picker; it owns only the shell *choice* + the `.zshrc`/antidote *loading* wiring.
+
+- **The substrate (`scripts/runtime-lib/sources.sh`).** A sourced lib on the
+  survive-path (kept by `ii-verify`, like `ledger.sh`/`mutator.sh`). It provides:
+  - **manifest line helpers** — `ii_manifest_add`/`_remove`/`_current`/`_has`
+    over a caller-supplied plain-text manifest (one entry per line; `#` comments
+    ignored; exact-line matching, idempotent, atomic-rewrite remove). The shared
+    default add/remove/current every source falls through to.
+  - **drop-in source discovery + dispatch** — `ii_sources_list` enumerates the
+    `sources.d/<name>` basenames (no hardcoded list); `_ii_source_call <name>
+    <op>` sources the resolver once and dispatches `candidates|add|remove|current`
+    to `ii_source_<name>_<op>`, falling through to the manifest helper when the
+    resolver does not override add/remove/current.
+  - **baseline reversibility recorder** — `ii_manifest_baseline <manifest>`
+    records ONE ledger row the first time a manifest is touched (idempotent,
+    keyed on the manifest path as the ledger target), BEFORE the first mutation,
+    reusing an EXISTING revert-all inverse (no new ledger kind): a **`skel-shadow`**
+    row (snapshot the curated baseline to a sibling backup; revert `cp -a`s it
+    back) when the manifest pre-exists, else a **`file`** row owning the manifest
+    path (revert `rm`s it ⇒ vanilla; the antidote load line no-ops when absent).
+
+- **The source-resolver drop-in contract (`sources.d/<name>`).** ONE **sourced**
+  bash fragment (never executed — like a pack hook, so mkarchiso's +x mode-strip
+  can't disarm it) defining at minimum:
+  - `ii_source_<name>_candidates [<manifest>]` — print, one per line, candidate
+    ENTRIES, each line the EXACT manifest line to add. The value is
+    self-describing because #47's renderer applies `apply_add`/`apply_remove` with
+    `%v` only (it does NOT pass the source `%s` to the apply argv — see
+    `app.rs`), so encoding the source into the value keeps add/remove
+    source-agnostic (the same "value == thing to act on" shape as `pack`).
+  - optionally `ii_source_<name>_{add,remove,current} <manifest> [<entry>]` —
+    override only when the entry needs special handling (e.g. `git` normalizes a
+    clone URL to `user/repo` before the shared append). Omit them to inherit the
+    manifest helpers.
+
+- **The domain verb (`scripts/runtime-lib/iictl.d/plugins`).** The first consumer.
+  Manifest: `~/.config/zsh/ii-plugins.txt` — an **ii-namespaced, UNOWNED/excluded
+  slot** (the `.config/zsh` dir is not an upstream-shipped path and is not in
+  upstream's `rsync --delete` set; the SAME file #15 has `antidote load` read).
+  `iictl plugins {list,sources,candidates,add,remove}`; `--spec` emits a
+  source-driven `list` control (`sources` = the resolvers, Tab-cycled in
+  `iictl-tui`; `candidates` = `iictl plugins candidates %s`; `current` = the
+  manifest entries; `apply_add`/`apply_remove` = `iictl plugins {add,remove} %v`);
+  `iictl tweak plugins` renders it. `--revert` delegates to `iictl revert-all
+  <manifest>` (the single replay owner — domains must NOT re-implement replay).
+  Every add/remove is preceded by `ii_manifest_baseline`, so a revert restores
+  the curated baseline; deleting the manifest ⇒ vanilla. `validate.sh`'s
+  `step "iictl plugins multi-source list manager (#48)"` enforces: the manifest
+  target is ii-owned/unowned (skel-shadow invariant — not an upstream/rsync-delete
+  path), the resolvers are drop-in (no hardcoded source `case`), recording routes
+  through the shared baseline recorder (no bespoke `ledger_record` in the verb;
+  reuses `skel-shadow`/`file` inverses), each resolver `bash -n`s + defines
+  `ii_source_<name>_candidates`, and the live `iictl plugins --spec` is a valid
+  source-driven list spec.
+
 ## 4. Pipeline contracts
 
 `just build [profile]` = `prepare [profile]` → `prebuild` → `mkiso`.
@@ -438,6 +502,23 @@ update vm smoke preview nspawn test-revert clean nuke assets image docked`.
 `just update --check` evaluates the bump policy (`min_days_between_releases`,
 `require_new_commits` in distro.toml) and exits 0/1 — CI-consumable. After
 a bump: `just prepare && just validate`, build, VM-test, commit the pin.
+
+**Update channels + the stable pin (#27).** The installed system has a channel,
+a single line in the distro-owned `/etc/illogical-impulse/release` stamp:
+`CHANNEL=stable` (default) or `edge`. `iictl update` (stable) checks out the
+recorded `DOTS_COMMIT` exactly before driving upstream's `./setup`; `--channel
+edge` tracks upstream HEAD and persists `CHANNEL=edge` (reversible — switching
+back restores the pin). **The stable pin lives in the release stamp**:
+`70-assets.sh` stamps `DOTS_COMMIT = git -C $DOTS rev-parse --short HEAD`, so a
+`just update` submodule bump automatically advances the next build's pin — the
+recorded pin can never rot away from the submodule, and `validate.sh` asserts
+the two agree at build time (the anti-rot guard). Channel switches are
+ledger-recorded for `iictl revert-all`. Companion verbs: `iictl migrate` runs
+baked one-time `migrations/NNNN-*.sh` (idempotent via an applied high-water
+mark), `iictl docs` prints the baked offline quickstart, and `iictl config
+export/import` serialises the ledger + choices to a portable bundle (tar/awk,
+no jq) replayed through the per-verb engines — the net-new reproducible-setup
+edge over an irreproducible `curl|bash`.
 
 Implemented in `.github/workflows/release.yml`: daily cron runs the
 `--check` gate → bumps the pin (committed by github-actions[bot]) → `just

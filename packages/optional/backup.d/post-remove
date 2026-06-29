@@ -1,0 +1,25 @@
+# backup/post-remove — SOURCED by the iictl pack engine BEFORE the recorded
+# package set is removed. Inverse of post-add: delete the ADDITIVE
+# ii-snapshots.conf loader entry from the ESP (privileged rm; the matching
+# kind=file ledger row's own rm -f then no-ops). Upstream's loader entries are
+# never touched. set -e is NOT in effect; hooks are SOURCED at subshell top level
+# → `local` is illegal. Idempotent (no-op if the entry was never written, e.g. a
+# non-btrfs root).
+
+# locate the ESP the same way post-add did.
+_ii_esp=""
+if command -v bootctl >/dev/null 2>&1; then
+  _ii_esp="$(bootctl --print-esp-path 2>/dev/null || true)"
+fi
+if [[ -z "$_ii_esp" || ! -d "$_ii_esp" ]]; then
+  for _ii_cand in /boot/efi /efi /boot; do
+    [[ -e "$_ii_cand/loader/entries/ii-snapshots.conf" ]] && { _ii_esp="$_ii_cand"; break; }
+  done
+fi
+
+_ii_entry="$_ii_esp/loader/entries/ii-snapshots.conf"
+if [[ -n "$_ii_esp" ]] && _sudo test -e "$_ii_entry"; then
+  _sudo rm -f "$_ii_entry" \
+    && echo ">> backup: removed additive snapshot loader entry $_ii_entry" \
+    || echo "!! backup: could not remove $_ii_entry" >&2
+fi

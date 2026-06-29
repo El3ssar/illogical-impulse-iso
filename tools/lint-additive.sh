@@ -31,10 +31,19 @@
 #   (6) PII guard: no baked dev-default carries a [user] block, the build host's
 #       git identity, or (for dev defaults) an email-shaped token.
 #   (7) pack-hook hygiene (IMMUNE-03): every packages/optional/<pack>.d/
-#       {post-add,post-remove} fragment is `bash -n`-clean, and a post-add that
-#       applies a reversible side effect via a mutator has a post-remove that
-#       calls the symmetric inverse — so `iictl pack remove` undoes exactly what
-#       `iictl pack install` did, not just a global `revert-all`.
+#       {post-add,post-remove} fragment is `bash -n`-clean, every post-add has a
+#       matching post-remove (#25 step-10b), and a post-add that applies a
+#       reversible side effect via a mutator has a post-remove that calls the
+#       symmetric inverse — so `iictl pack remove` undoes exactly what `iictl pack
+#       install` did, not just a global `revert-all`.
+#   (7b) pack Iron-Law guards (#25 step-10 a/c/d/e/f): over the gaming/creative/
+#       laptop/security/virt/backup/flatpak-extras packs — (a) NO multilib toggle
+#       anywhere (it is pre-enabled; declare lib32-* directly), (c) every
+#       custom/*.lua write goes through the fenced helper (no raw append/tee/sed),
+#       (d) the backup snapshot loader entry is gated on a runtime btrfs check,
+#       (e) no PAM/group mutation is an in-place vendor-file edit (ii-owned
+#       drop-ins + the group mutator only), (f) no manifest/hook references an
+#       upstream-owned path.
 #
 # Entry point: lint_additive  (called from a validate.sh step).
 
@@ -193,16 +202,47 @@ _lint_optional_lists() {
     done < "$pkglist"
   fi
 
-  local l name lbad
+  # #19 step 10(d): rsync --delete'd upstream-owned config trees a pack manifest
+  # OR hook must never write to / reference (it would be wiped on 'iictl update'
+  # or clobber upstream). Substring match — any occurrence in a manifest line or a
+  # hook body is a fail. Mirrors the mutator's refusal set + PROPOSAL §3 row 4.
+  local upstream_paths=(
+    'quickshell/ii' 'matugen' 'fish/config.fish' 'zshrc.d' 'hypr/hyprland'
+  )
+
+  local l name lbad tool up
+  local l name lbad is_flatpak
   for l in "${lists[@]}"; do
     lbad=0
+    # A `#meta:type flatpak` pack's "members" are not heavy pacman packages being
+    # fetched-on-demand — its apps are Flathub app-ids (declared as #meta:app),
+    # and its single pacman member is the already-baked `flatpak` ENABLER (it has
+    # to be present for the hook to add the remote + install the apps). That
+    # enabler is intentionally baked (goodies.list), so the no-double-bake rule
+    # (aimed at heavy software baked AND fetched) does not apply to it. Detect the
+    # flatpak type up front and skip the baked-member assertion for such packs.
+    is_flatpak=0
+    grep -qE '^#meta:type[[:space:]]+flatpak([[:space:]]|$)' "$l" && is_flatpak=1
     while IFS= read -r ln; do
       ln="${ln%$'\r'}"
       [[ -z "${ln//[[:space:]]/}" ]] && continue            # blank line
       if [[ "$ln" == '#meta:'* ]]; then
         # well-formed: '#meta:<key>' or '#meta:<key> <value...>' (key = [a-z]+)
-        if [[ ! "$ln" =~ ^#meta:[a-z][a-z]*([[:space:]].*)?$ ]]; then
+        # (key allows a trailing '-' so '#meta:app' and any future hyphenated key
+        # parse; the original [a-z]+ already covered the keys this repo uses.)
+        if [[ ! "$ln" =~ ^#meta:[a-z][a-z-]*([[:space:]].*)?$ ]]; then
           _v_fail "optional/$(basename "$l"): malformed #meta line: '$ln' (expect '#meta:<key> [value]')"
+          lbad=$((lbad+1))
+        fi
+        continue
+      fi
+      # #19: `mise:<tool>[@<version>]` runtime directive (PROPOSAL §7). The engine
+      # parses these as `mise use -g <tool>`, NOT pacman packages, so validate the
+      # directive grammar here and DO NOT treat the token as a package name.
+      if [[ "$ln" == 'mise:'* ]]; then
+        tool="${ln#mise:}"; tool="${tool%%#*}"; tool="${tool//[[:space:]]/}"
+        if [[ ! "$tool" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*(@[A-Za-z0-9][A-Za-z0-9._+-]*)?$ ]]; then
+          _v_fail "optional/$(basename "$l"): malformed mise directive: '$ln' (expect 'mise:<tool>[@<version>]')"
           lbad=$((lbad+1))
         fi
         continue
@@ -215,12 +255,61 @@ _lint_optional_lists() {
         lbad=$((lbad+1)); continue
       fi
       if [[ -n "${_baked[$name]:-}" ]]; then
+        if (( is_flatpak )); then
+          continue   # the baked flatpak enabler — by design, not a double-bake
+        fi
         _v_fail "optional/$(basename "$l"): member '$name' is ALSO baked into packages.x86_64 — optional packs install online, never double-bake"
         lbad=$((lbad+1))
       fi
     done < "$l"
-    (( lbad == 0 )) && _v_ok "optional/$(basename "$l"): valid manifest, no baked members"
+    # 10(d): no upstream-owned path in a NON-comment manifest line (a package or
+    # mise: line). Explanatory '#' comments naming the tree to say "we don't touch
+    # it" are allowed; an actual member/directive pointing at it is not.
+    for up in "${upstream_paths[@]}"; do
+      if grep -vE '^[[:space:]]*#' "$l" | grep -Fq "$up"; then
+        _v_fail "optional/$(basename "$l"): references upstream-owned path '$up' in a member/directive line — packs must never write/reference the rsync --delete'd tree (#19 step 10d)"
+        lbad=$((lbad+1))
+      fi
+    done
+    (( lbad == 0 )) && _v_ok "optional/$(basename "$l"): valid manifest (names/mise:/#meta:), no baked member, no upstream path"
   done
+
+  # #19 step 10(c): ai-dev's GPU PCI detection MUST live in the hook (PCI is real
+  # on the target), NOT in the manifest. Assert the manifest carries no PCI walk /
+  # variant token and the post-add hook does. Only runs when ai-dev is authored.
+  local aidev="$optdir/ai-dev.list" aidev_hook="$optdir/ai-dev.d/post-add"
+  if [[ -f "$aidev" ]]; then
+    # Scan NON-comment lines only: a comment explaining "the variant is chosen in
+    # the hook" is fine; an actual `ollama-cuda` member or a PCI walk is not.
+    if grep -vE '^[[:space:]]*#' "$aidev" | grep -Eq 'sys/bus/pci|0x10de|0x1002|ollama-cuda|ollama-rocm'; then
+      _v_fail "optional/ai-dev.list: carries a GPU PCI-detect / ollama-cuda|rocm MEMBER — that detection belongs in ai-dev.d/post-add (PCI is real on the target), not the manifest (#19 step 10c)"
+    else
+      _v_ok "optional/ai-dev.list: no PCI-detect member in the manifest (correct — it lives in the hook) (#19 step 10c)"
+    fi
+    if [[ -f "$aidev_hook" ]]; then
+      if grep -q 'sys/bus/pci' "$aidev_hook" && grep -Eq 'ollama-cuda|ollama-rocm' "$aidev_hook"; then
+        _v_ok "optional/ai-dev.d/post-add: PCI-detects the GPU and selects the ollama variant in the hook (#19 step 10c)"
+      else
+        _v_fail "optional/ai-dev.d/post-add: missing the /sys/bus/pci GPU walk + ollama-cuda|rocm selection — ai-dev cannot pick the accelerated variant (#19 step 10c)"
+      fi
+    else
+      _v_fail "optional/ai-dev.d/post-add missing — ai-dev declares GPU-gated variants with no hook to install them (#19 step 10c)"
+    fi
+  fi
+
+  # #19 step 10(d) cont.: hook bodies must also reference no upstream-owned path.
+  local hd hf
+  shopt -s nullglob
+  for hf in "$optdir"/*.d/post-add "$optdir"/*.d/post-remove; do
+    for up in "${upstream_paths[@]}"; do
+      # The ai-dev hook legitimately NAMES the upstream tree in a comment to
+      # explain why it does NOT write it; allow it only inside comment lines.
+      if grep -Fq "$up" "$hf" && grep -vE '^[[:space:]]*#' "$hf" | grep -Fq "$up"; then
+        _v_fail "optional/$(basename "$(dirname "$hf")")/$(basename "$hf"): code references upstream-owned path '$up' — hooks must never write the rsync --delete'd tree (#19 step 10d)"
+      fi
+    done
+  done
+  shopt -u nullglob
   return 0
 }
 
@@ -283,6 +372,17 @@ _lint_pack_hooks() {
       fi
     done
 
+    # (b0) PAIRING (#25 step-10b): a pack that ships a post-add MUST also ship a
+    # post-remove, full stop — even one with no recognised mutator (e.g. a pack
+    # whose only post-add effect is an opt-in package the engine reverts; its
+    # post-remove can be a documented no-op). This is the coarse contract the
+    # finer per-mutator symmetry below refines. (A lone post-remove is fine — it
+    # is a pure inverse with nothing to pair.)
+    if [[ -f "$add" && ! -f "$rm" ]]; then
+      _v_fail "pack hooks: $pack.d/post-add exists but $pack.d/post-remove is MISSING — every post-add must have a matching post-remove (#25)"
+      bad=$((bad+1))
+    fi
+
     # (b) symmetry: for each side-effecting mutator the post-add invokes, the
     # post-remove must call the matching inverse. Comment lines are stripped so
     # a mutator named only in a comment neither demands nor satisfies an inverse.
@@ -305,6 +405,134 @@ _lint_pack_hooks() {
   done
 
   (( bad == 0 )) && _v_ok "pack hooks: $checked fragment(s) bash -n clean, post-add side effects have symmetric post-remove inverses (${#hookdirs[@]} hook dir(s))"
+  return 0
+}
+
+# ── Check 7b — pack-hook Iron-Law guards (#25 step-10 a/c/d/e/f) ────────────
+# Extra static guards over the packs authored by #25 (gaming/creative/laptop/
+# security/virt/backup/flatpak-extras), enforcing the Iron Law at the manifest +
+# hook level. All operate on the repo source of truth (packages/optional/), strip
+# comments so prose can't satisfy/trip a grep, and add NOTHING on a clean repo.
+#
+# Assertions (lettered to match the issue's step-10):
+#   (a) NO multilib toggle anywhere — multilib is pre-enabled in the installed
+#       target pacman.conf; a pack must NEVER write/uncomment a [multilib] block
+#       or run `pacman -Sy` to enable it. lib32-* members install against the
+#       already-enabled repo. (gaming declares lib32-* directly.)
+#   (c) every custom/*.lua write across hooks goes through the fenced helper
+#       (ii_lua_block_write) — never a raw append/sed/tee into a custom/*.lua slot.
+#   (d) the backup pack's snapshot loader entry is gated on a RUNTIME btrfs check
+#       (findmnt -no FSTYPE /), so it is never written on a non-btrfs root.
+#   (e) no PAM/group/socket mutation is an in-place edit of a VENDOR file — PAM
+#       wiring is an ii-owned drop-in, groups go through the mutator; a hook must
+#       not sed/tee/>> a vendor /etc/pam.d/* or /etc/group.
+#   (f) no pack manifest or hook references an upstream-owned path (the rsync
+#       --delete dot trees + the quickshell/matugen/fish/hypr-hyprland roots).
+_lint_pack_extra() {
+  local optdir="$PACKAGES/optional"
+  [[ -d "$optdir" ]] || { _v_ok "pack Iron-Law guards: no packages/optional/ — nothing to lint"; return 0; }
+
+  local lists=() hooks=()
+  shopt -s nullglob
+  lists=("$optdir"/*.list)
+  hooks=("$optdir"/*.d/post-add "$optdir"/*.d/post-remove)
+  shopt -u nullglob
+
+  local bad=0 f code
+
+  # (a) multilib toggle ban — scan BOTH lists and hooks. A toggle looks like an
+  # uncommented [multilib] section header, a Include/Server line under one, or a
+  # `pacman -Sy`/`pacman-conf`/sed that enables multilib. lib32-* package NAMES
+  # are fine (that is the whole point — declare them, don't toggle the repo).
+  local toggle_hit=0
+  for f in "${lists[@]}" "${hooks[@]}"; do
+    [[ -f "$f" ]] || continue
+    code="$(grep -vE '^[[:space:]]*#' "$f" 2>/dev/null)"
+    if grep -qE '^\s*\[multilib\]' <<<"$code" \
+       || grep -qiE 'multilib' <<<"$code"; then
+      _v_fail "pack Iron-Law (a): ${f#"$ROOT"/} mentions multilib — it is ALREADY enabled; never toggle it (declare lib32-* directly) (#25)"
+      bad=$((bad+1)); toggle_hit=$((toggle_hit+1))
+    fi
+  done
+  (( toggle_hit == 0 )) && _v_ok "pack Iron-Law (a): no multilib toggle in any pack manifest/hook (lib32-* install against the pre-enabled repo)"
+
+  # (c) every custom/*.lua write uses the fenced helper. Forbid a raw redirect /
+  # tee / sed / printf-into-file that targets a custom/*.lua slot in any hook.
+  local fence_hit=0
+  for f in "${hooks[@]}"; do
+    [[ -f "$f" ]] || continue
+    code="$(grep -vE '^[[:space:]]*#' "$f" 2>/dev/null)"
+    # a raw write to custom/*.lua = `>`/`>>`/tee/sed -i with a custom/*.lua target.
+    if grep -qE '(>>?|tee|sed -i)[^|;&]*custom/[^[:space:]]*\.lua' <<<"$code"; then
+      _v_fail "pack Iron-Law (c): ${f#"$ROOT"/} writes a custom/*.lua slot raw — use ii_lua_block_write/remove (the ONE fenced helper) (#25)"
+      bad=$((bad+1)); fence_hit=$((fence_hit+1))
+    fi
+  done
+  (( fence_hit == 0 )) && _v_ok "pack Iron-Law (c): no raw custom/*.lua write in any hook (all go through the fenced helper)"
+
+  # (d) backup snapshot entry gated on a runtime btrfs check. If a backup post-add
+  # exists and writes the loader entry, it MUST consult `findmnt … FSTYPE /`.
+  local backup_add="$optdir/backup.d/post-add"
+  if [[ -f "$backup_add" ]]; then
+    code="$(grep -vE '^[[:space:]]*#' "$backup_add" 2>/dev/null)"
+    if grep -qE 'ii-snapshots\.conf' <<<"$code"; then
+      if grep -qE 'findmnt[^|]*FSTYPE[^|]*/' <<<"$code" && grep -qE '\bbtrfs\b' <<<"$code"; then
+        _v_ok "pack Iron-Law (d): backup snapshot loader entry is gated on a runtime btrfs check (findmnt -no FSTYPE /)"
+      else
+        _v_fail "pack Iron-Law (d): backup.d/post-add writes ii-snapshots.conf without a runtime btrfs gate (findmnt -no FSTYPE / == btrfs) (#25)"
+        bad=$((bad+1))
+      fi
+    fi
+  fi
+
+  # (e) no in-place vendor-file edit. A hook must never sed -i / >> / tee a VENDOR
+  # PAM file (/etc/pam.d/system-auth|login|sudo|… — NOT our ii-owned ii-*) or the
+  # vendor /etc/group. ii-owned drop-ins (paths containing 'ii-' or under
+  # /etc/illogical-impulse) and the group MUTATOR (usermod/gpasswd via
+  # ii_group_add) are the sanctioned ways and are exempt.
+  local vendor_hit=0
+  for f in "${hooks[@]}"; do
+    [[ -f "$f" ]] || continue
+    code="$(grep -vE '^[[:space:]]*#' "$f" 2>/dev/null)"
+    # in-place edit of a vendor /etc/pam.d/* file (an ii-owned ii-* drop-in is OK).
+    if grep -qE '(sed -i|tee|>>?)[^|;&]*/etc/pam\.d/(system-auth|login|sudo|sddm|greetd|passwd|su)\b' <<<"$code" \
+       || grep -qE '(sed -i)[^|;&]*/etc/pam\.d/[^[:space:]]+' <<<"$code"; then
+      # allow only when the target is an ii-owned drop-in name.
+      if ! grep -qE '/etc/pam\.d/ii-' <<<"$code"; then
+        _v_fail "pack Iron-Law (e): ${f#"$ROOT"/} edits a vendor /etc/pam.d/* file in place — use an ii-owned drop-in (never edit a vendor PAM stack) (#25)"
+        bad=$((bad+1)); vendor_hit=$((vendor_hit+1))
+      fi
+    fi
+    # in-place edit of the vendor group db (groups go through ii_group_add).
+    if grep -qE '(sed -i|tee|>>?)[^|;&]*/etc/group\b' <<<"$code"; then
+      _v_fail "pack Iron-Law (e): ${f#"$ROOT"/} edits /etc/group in place — add groups via the ii_group_add mutator (#25)"
+      bad=$((bad+1)); vendor_hit=$((vendor_hit+1))
+    fi
+  done
+  (( vendor_hit == 0 )) && _v_ok "pack Iron-Law (e): no in-place vendor PAM/group edit in any hook (ii-owned drop-ins + the group mutator only)"
+
+  # (f) no upstream-owned path reference. The rsync --delete dot trees + the
+  # single-file sync slots are READ-ONLY to the distro; a pack manifest/hook must
+  # not target any. (The sanctioned custom/*.lua slots are NOT upstream-owned —
+  # they are the ignore_existing seam — so they are intentionally NOT listed.)
+  local up_paths=(
+    '.config/quickshell' '.config/matugen' '.config/fish/config.fish'
+    '.config/zshrc.d' '.config/hypr/hyprland' '.config/fontconfig'
+    'quickshell/ii'
+  )
+  local up_hit=0 p
+  for f in "${lists[@]}" "${hooks[@]}"; do
+    [[ -f "$f" ]] || continue
+    code="$(grep -vE '^[[:space:]]*#' "$f" 2>/dev/null)"
+    for p in "${up_paths[@]}"; do
+      if grep -qF -- "$p" <<<"$code"; then
+        _v_fail "pack Iron-Law (f): ${f#"$ROOT"/} references upstream-owned path '$p' — packs never touch the rsync --delete dot trees (#25)"
+        bad=$((bad+1)); up_hit=$((up_hit+1))
+      fi
+    done
+  done
+  (( up_hit == 0 )) && _v_ok "pack Iron-Law (f): no pack manifest/hook references an upstream-owned path"
+
   return 0
 }
 
@@ -369,6 +597,7 @@ lint_additive() {
   _lint_skel_shadow
   _lint_optional_lists
   _lint_pack_hooks
+  _lint_pack_extra
   _lint_pii
   return 0
 }

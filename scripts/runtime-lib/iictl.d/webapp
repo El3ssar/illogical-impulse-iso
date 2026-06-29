@@ -1,0 +1,324 @@
+#!/usr/bin/env bash
+#help: webapp	add/remove/seed/list Brave --app launchers (accent-aware, reversible)
+# webapp — the accent-aware web-app launcher verb (parity with Omarchy's one-key
+# webapp installer, issue #21 / PROPOSAL §12). It writes a per-user .desktop that
+# runs the already-baked `brave-bin` in `--app` mode with a CUSTOM window class
+# (`ii-webapp-<slug>`), so the window is targetable by a themed/auto-placed
+# Hyprland rule — our differentiator over plain Chromium windows.
+#
+# Purely ADDITIVE: it writes ONLY into user-owned, upstream-unowned territory —
+# `~/.local/share/applications/ii-webapp-<slug>.desktop`, a distro-owned icon
+# cache `~/.local/share/icons/ii-webapps/<slug>.png`, and (with --accent) ONE
+# sentinel-fenced block in the SANCTIONED `~/.config/hypr/custom/rules.lua` slot
+# (the install_dir__ignore_existing seam — PROPOSAL §3). It NEVER touches the
+# rsync --delete'd upstream trees (quickshell/ii, hypr/hyprland, matugen,
+# fish/config.fish, zshrc.d): the accent rule lives ONLY in custom/rules.lua,
+# written through the shared ii_lua_block_write mutator.
+#
+# Purely REVERSIBLE: every .desktop + icon is recorded as a kind=path ledger row
+# (inverse: rm), and every accent block is recorded by ii_lua_block_write as a
+# kind=lua-block row (inverse: ii_lua_block_remove). `iictl webapp remove <name>`
+# peels exactly those, and `iictl revert-all` replays the ledger back to vanilla.
+# Deleting the launchers + the fenced block by hand also returns vanilla (the
+# rules.lua slot reverts to upstream's empty stub).
+
+set -u
+
+# Shared header (colors, ok/bad/warn/die, _not_root, RELEASE_FILE, ledger_*) and
+# the mutator library (ii_lua_block_write / ii_lua_block_remove + the II_FENCE_*
+# constants — the ONLY sanctioned way to write/strip a fenced custom/*.lua block,
+# and ledger_record/ledger_escape_path for the .desktop + icon rows). Both source
+# ledger.sh themselves; double-source is safe.
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+source "${II_LIB:-/usr/local/lib/ii}/mutator.sh"
+
+# ── locations (all user-owned, never an upstream rsync --delete path) ──────────
+APP_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+ICON_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/icons/ii-webapps"
+# The accent rule's ONLY home — the sanctioned custom/ slot (PROPOSAL §3). NEVER
+# quickshell/ii or hypr/hyprland (those are rsync --delete'd on `iictl update`).
+RULES_LUA="$HOME/.config/hypr/custom/rules.lua"
+# Baked manifest + fallback icon (ride in the squashfs under /usr/share — a
+# sibling of the iictl survive-path, untouched by ii-verify's purge). Overridable
+# for the no-root unit test.
+WEBAPP_SHARE="${II_WEBAPP_SHARE:-/usr/share/illogical-impulse/webapps}"
+DEFAULTS_LIST="$WEBAPP_SHARE/defaults.list"
+FALLBACK_ICON="$WEBAPP_SHARE/fallback.png"
+
+# ── helpers ────────────────────────────────────────────────────────────────────
+# _slug <name> — lowercase, collapse anything outside [a-z0-9] into a single '-',
+# trim leading/trailing '-'. Pure bash (no sed/tr dependency on the hot path).
+_slug() {
+  local s; s="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  s="${s//[^a-z0-9]/-}"
+  while [[ "$s" == *--* ]]; do s="${s//--/-}"; done
+  s="${s#-}"; s="${s%-}"
+  printf '%s' "$s"
+}
+
+# _brave_bin — resolve the Brave binary name. brave-bin ships `brave`; some other
+# packagings ship `brave-browser`. Prefer `brave`, fall back, else default to
+# `brave` (the .desktop is still written so a later install just works).
+_brave_bin() {
+  if command -v brave >/dev/null 2>&1; then printf 'brave'
+  elif command -v brave-browser >/dev/null 2>&1; then printf 'brave-browser'
+  else printf 'brave'; fi
+}
+
+# _host <url> — extract the bare host (for the favicon fetch). Strips scheme,
+# userinfo, path, and port. Pure parameter expansion.
+_host() {
+  local u="${1:-}"
+  u="${u#*://}"          # drop scheme
+  u="${u%%/*}"           # drop path
+  u="${u##*@}"           # drop userinfo
+  u="${u%%:*}"           # drop port
+  printf '%s' "$u"
+}
+
+# _fetch_icon <url> <dest.png> — best-effort favicon → PNG. DuckDuckGo's icon
+# service returns a usable raster; convert with imagemagick if present (the
+# .desktop Icon= wants a real image path). All failure modes are non-fatal: the
+# caller falls back to the baked generic icon. Needs network; offline → fail →
+# fallback. Returns 0 only if dest is a non-empty file.
+_fetch_icon() {
+  local url="$1" dest="$2" host tmp magick
+  host="$(_host "$url")"
+  [[ -n "$host" ]] || return 1
+  command -v curl >/dev/null 2>&1 || return 1
+  tmp="$(mktemp)" || return 1
+  if ! curl -fsSL --max-time 10 "https://icons.duckduckgo.com/ip3/${host}.ico" -o "$tmp" 2>/dev/null \
+     || [[ ! -s "$tmp" ]]; then
+    rm -f "$tmp"; return 1
+  fi
+  # Convert to PNG so a desktop environment that ignores .ico still shows an icon.
+  if   command -v magick  >/dev/null 2>&1; then magick=(magick)
+  elif command -v convert >/dev/null 2>&1; then magick=(convert)
+  else magick=(); fi
+  if (( ${#magick[@]} )); then
+    if "${magick[@]}" "$tmp" "$dest" 2>/dev/null && [[ -s "$dest" ]]; then
+      rm -f "$tmp"; return 0
+    fi
+  fi
+  # No imagemagick (or convert failed) → keep the raw download as <slug>.png.
+  if cp -f "$tmp" "$dest" 2>/dev/null && [[ -s "$dest" ]]; then
+    rm -f "$tmp"; return 0
+  fi
+  rm -f "$tmp"; return 1
+}
+
+# _refresh_db — rebuild the desktop database so the launcher appears immediately
+# (best-effort; absent on a minimal box — never fatal).
+_refresh_db() {
+  command -v update-desktop-database >/dev/null 2>&1 \
+    && update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
+}
+
+# ── subcommands ────────────────────────────────────────────────────────────────
+cmd_add() {
+  local accent=0 args=()
+  while (( $# )); do
+    case "$1" in
+      --accent) accent=1 ;;
+      --) shift; while (( $# )); do args+=("$1"); shift; done; break ;;
+      -*) die "unknown flag: $1 (usage: iictl webapp add <name> <url> [icon] [--accent])" ;;
+      *) args+=("$1") ;;
+    esac
+    shift
+  done
+  local name="${args[0]:-}" url="${args[1]:-}" icon_arg="${args[2]:-}"
+  [[ -n "$name" && -n "$url" ]] || die "usage: iictl webapp add <name> <url> [icon] [--accent]"
+  _not_root
+
+  local slug; slug="$(_slug "$name")"
+  [[ -n "$slug" ]] || die "name '$name' has no usable slug characters ([a-z0-9])"
+  local wmclass="ii-webapp-$slug"
+  local desktop="$APP_DIR/ii-webapp-$slug.desktop"
+  local icon="$ICON_DIR/$slug.png"
+  local brave; brave="$(_brave_bin)"
+
+  mkdir -p "$APP_DIR" "$ICON_DIR" 2>/dev/null || die "cannot create $APP_DIR / $ICON_DIR"
+
+  # ── icon: explicit > favicon > baked fallback ──────────────────────────────
+  if [[ -n "$icon_arg" && -f "$icon_arg" ]]; then
+    cp -f "$icon_arg" "$icon" 2>/dev/null || warn "could not copy icon '$icon_arg'"
+  elif _fetch_icon "$url" "$icon"; then
+    : # favicon fetched
+  elif [[ -f "$FALLBACK_ICON" ]]; then
+    cp -f "$FALLBACK_ICON" "$icon" 2>/dev/null || true
+  fi
+  # Icon= points at the resolved PNG if we produced one, else just the wmclass
+  # name (desktop themes resolve it; harmless if unresolved).
+  local icon_field="$wmclass"
+  [[ -s "$icon" ]] && icon_field="$icon"
+
+  # ── the .desktop launcher (Brave --app with the targetable custom class) ────
+  cat > "$desktop" <<EOF || die "cannot write $desktop"
+[Desktop Entry]
+Type=Application
+Name=$name
+Comment=Illogical Impulse web app: $url
+Exec=$brave --app=$url --class=$wmclass
+StartupWMClass=$wmclass
+Icon=$icon_field
+Categories=Network;WebBrowser;
+StartupNotify=true
+X-II-Webapp=$slug
+EOF
+
+  _refresh_db
+
+  # ── ledger: one kind=path row owning the .desktop + the icon (if any) ───────
+  # owned_paths is comma-joined of COMMA-ESCAPED tokens (ledger.sh contract); the
+  # path/file inverse rm's each. Record only files we actually wrote.
+  local owned; owned="$(ledger_escape_path "$desktop")"
+  [[ -s "$icon" ]] && owned="$owned,$(ledger_escape_path "$icon")"
+  ledger_record path "webapp:$slug" "" "$owned" "webapp $slug"
+
+  ok "web app '$name' added → $desktop  (class: $wmclass)"
+
+  # ── optional accent-aware Hyprland window rule (ONLY in custom/rules.lua) ────
+  if (( accent )); then
+    _write_accent "$slug" "$wmclass"
+  fi
+}
+
+# _write_accent <slug> <wmclass> — append a sentinel-fenced Hyprland window rule
+# to custom/rules.lua (created if absent — a SANCTIONED slot). The block is named
+# `webapp <slug>` and targets the custom class; the mutator records the kind=
+# lua-block ledger row + refuses any non-custom path. Mirrors how skel-distro's
+# custom/execs.lua documents itself.
+_write_accent() {
+  local slug="$1" wmclass="$2"
+  mkdir -p "$(dirname "$RULES_LUA")" 2>/dev/null || true
+  # Create upstream's empty stub if the slot does not exist yet (it is shipped as
+  # a 1-byte stub by upstream but may be absent on a fresh box — sanctioned to
+  # create). ii_lua_block_write also creates the parent dir, but we want the
+  # fence to land in an otherwise-empty file, not error.
+  [[ -e "$RULES_LUA" ]] || : > "$RULES_LUA" 2>/dev/null || true
+  # Tag the lua-block ledger row with this webapp's feature key so revert-all's
+  # per-feature filter (`webapp:<slug>`) sweeps the accent rule WITH the launcher
+  # (REV-04 mechanism: the mutator stamps II_PACK_TAG into the row's packages
+  # column, which revert-all's _row_in_filter matches for non-pkg/pack kinds).
+  # The path row already carries target=webapp:<slug>; this gives the lua-block
+  # row the same handle so `iictl webapp remove` prunes both, and a later
+  # `iictl revert-all webapp:<slug>` finds nothing orphaned.
+  local II_PACK_TAG="webapp:$slug"
+  export II_PACK_TAG
+  if printf '%s\n' \
+       "-- Illogical Impulse webapp accent rule (reversible via iictl webapp remove $slug)" \
+       "-- Themed border + auto-placement for the Brave --app window class:$wmclass." \
+       "windowrule = bordercolor \$accent, class:^($wmclass)\$" \
+       "windowrule = float, class:^($wmclass)\$" \
+       "windowrule = center, class:^($wmclass)\$" \
+       | ii_lua_block_write "$RULES_LUA" "webapp $slug"; then
+    ok "accent rule written → $RULES_LUA  (fenced: webapp $slug)"
+  else
+    warn "could not write the accent rule into $RULES_LUA (launcher still works)"
+  fi
+  unset II_PACK_TAG
+}
+
+cmd_remove() {
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: iictl webapp remove <name>"
+  _not_root
+  local slug; slug="$(_slug "$name")"
+  [[ -n "$slug" ]] || die "name '$name' has no usable slug"
+  local desktop="$APP_DIR/ii-webapp-$slug.desktop"
+  local icon="$ICON_DIR/$slug.png"
+
+  local removed=0
+  [[ -e "$desktop" ]] && { rm -f "$desktop" && removed=1; }
+  [[ -e "$icon" ]]    && { rm -f "$icon"; }
+  # Strip the accent fence (no-op if absent) through the shared inverse — never a
+  # bespoke sed/rm against the slot.
+  ii_lua_block_remove "$RULES_LUA" "webapp $slug"
+  _refresh_db
+  # Prune the ledger rows for this webapp via the single replay owner (BLUEPRINT
+  # §3 "domains must NOT re-implement ledger replay"). Both rows carry the
+  # `webapp:<slug>` feature key: the kind=path .desktop/icon row as its target,
+  # and the kind=lua-block accent row via its REV-04 packages-column tag — so the
+  # per-feature filter sweeps both. The .desktop/icon are already gone, so the
+  # path inverse (rm -f) is a clean no-op that just prunes the row; the lua-block
+  # inverse (ii_lua_block_remove) is likewise a no-op now we stripped it above.
+  if command -v iictl >/dev/null 2>&1; then
+    iictl revert-all "webapp:$slug" >/dev/null 2>&1 || true
+  fi
+
+  if (( removed )); then
+    ok "web app '$name' removed (launcher + icon + any accent rule)"
+  else
+    warn "no web app launcher found for '$name' (slug: $slug) — nothing to remove"
+  fi
+}
+
+cmd_seed() {
+  _not_root
+  [[ -f "$DEFAULTS_LIST" ]] || die "no curated defaults manifest at $DEFAULTS_LIST"
+  local line name url icon n=0 skipped=0 slug desktop
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "${line//[[:space:]]/}" ]] && continue   # blank
+    [[ "$line" == '#'* ]] && continue              # comment
+    IFS='|' read -r name url icon <<< "$line"
+    name="${name#"${name%%[![:space:]]*}"}"; name="${name%"${name##*[![:space:]]}"}"
+    url="${url#"${url%%[![:space:]]*}"}";   url="${url%"${url##*[![:space:]]}"}"
+    icon="${icon#"${icon%%[![:space:]]*}"}"; icon="${icon%"${icon##*[![:space:]]}"}"
+    [[ -n "$name" && -n "$url" ]] || continue
+    slug="$(_slug "$name")"
+    desktop="$APP_DIR/ii-webapp-$slug.desktop"
+    if [[ -e "$desktop" ]]; then
+      skipped=$((skipped+1)); continue            # idempotent: skip existing
+    fi
+    if [[ -n "$icon" ]]; then
+      cmd_add "$name" "$url" "$icon"
+    else
+      cmd_add "$name" "$url"
+    fi
+    n=$((n+1))
+  done < "$DEFAULTS_LIST"
+  ok "seeded $n curated web app(s) ($skipped already present, skipped)"
+}
+
+cmd_list() {
+  local found=0 d slug name
+  shopt -s nullglob
+  for d in "$APP_DIR"/ii-webapp-*.desktop; do
+    found=1
+    slug="$(basename "$d")"; slug="${slug#ii-webapp-}"; slug="${slug%.desktop}"
+    name="$(awk -F= '/^Name=/{print $2; exit}' "$d" 2>/dev/null)"
+    printf '  %s%-20s%s %s\n' "$C_B" "$slug" "$C_0" "${name:-$slug}"
+  done
+  shopt -u nullglob
+  (( found )) || echo "  (no ii-webapp launchers in $APP_DIR)"
+}
+
+cmd_usage() {
+  cat <<EOF
+${C_B}iictl webapp${C_0} — accent-aware Brave --app web-app launchers (additive + reversible)
+
+Writes a user-owned .desktop launcher that runs the already-baked brave-bin in
+--app mode with a custom window class (ii-webapp-<slug>) so a themed Hyprland
+rule can target it. Every file + accent rule is ledger-recorded; removal and
+'iictl revert-all' restore vanilla.
+
+usage:
+  iictl webapp add <name> <url> [icon] [--accent]   add a launcher (+ optional accent rule)
+  iictl webapp remove <name>                        remove the launcher, icon, and accent rule
+  iictl webapp seed                                 install the curated defaults (idempotent)
+  iictl webapp list                                 list installed launchers
+
+The accent rule (--accent) is written ONLY into ~/.config/hypr/custom/rules.lua,
+sentinel-fenced via the shared mutator — never into an upstream-owned tree.
+EOF
+}
+
+case "${1:-help}" in
+  add)             shift; cmd_add    "$@" ;;
+  remove|rm)       shift; cmd_remove "$@" ;;
+  seed)            shift; cmd_seed   "$@" ;;
+  list|ls)         shift; cmd_list   "$@" ;;
+  help|-h|--help)  cmd_usage ;;
+  *)               die "unknown subcommand: $1 (try: iictl webapp help)" ;;
+esac

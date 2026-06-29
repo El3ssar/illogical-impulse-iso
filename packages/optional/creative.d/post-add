@@ -1,0 +1,32 @@
+# creative/post-add — SOURCED by the iictl pack engine AFTER the creative
+# members install online (engine helpers in scope; pack tag exported). The base
+# suite (kdenlive/audacity/blender/darktable/krita/handbrake + codecs) is plain
+# members the engine already installed; this hook only handles the OPT-IN extra.
+#
+# DaVinci Resolve (AUR, heavy, EULA, GPU compute) is NOT a plain member — it is
+# installed ONLY when opted in. The merged #6 engine does not forward CLI flags
+# to hooks, so the opt-in is an ENV TOGGLE the user sets on the command line:
+#
+#     II_CREATIVE_WITH_DAVINCI=1 iictl pack install creative
+#
+# When set, the hook installs davinci-resolve via paru (AUR). The pack engine's
+# post-add top-up re-snapshots the installed set, so the extra package is folded
+# into the kind=pack ledger row and removed on `iictl pack remove creative`
+# (no separate recording needed here). set -e is NOT in effect.
+
+if [[ -n "${II_CREATIVE_WITH_DAVINCI:-}" ]]; then
+  echo ">> creative: --with-davinci → installing davinci-resolve (AUR, via paru)"
+  command -v paru >/dev/null 2>&1 \
+    || { _ensure_paru 2>/dev/null || true; }
+  if command -v paru >/dev/null 2>&1; then
+    # NB: hooks are SOURCED at the engine's subshell top level (not inside a
+    # function), so `local` is illegal here — use a plainly-scoped var.
+    _ii_cdc=(); [[ -t 0 ]] || _ii_cdc=(--noconfirm)
+    paru -S --needed "${_ii_cdc[@]}" davinci-resolve \
+      || echo "!! creative: davinci-resolve install failed (AUR build) — re-run after fixing build deps" >&2
+  else
+    echo "!! creative: paru unavailable — cannot build davinci-resolve from the AUR" >&2
+  fi
+else
+  echo ">> creative: davinci-resolve NOT installed (set II_CREATIVE_WITH_DAVINCI=1 to opt in)"
+fi

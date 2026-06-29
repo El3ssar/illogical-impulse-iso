@@ -1,0 +1,12 @@
+# lang-go — Go developer toolchain (FETCHED-ONLINE, never baked). Official-repo
+# Go compiler + the LSP and debugger, plus an OPT-IN `mise:go` runtime directive
+# for users who prefer a mise-managed Go version alongside the system `go`.
+# `iictl pack install lang-go` fetches the members online and records the set
+# for an exact, reversible `iictl pack remove lang-go`.
+#meta:type lang
+go
+gopls
+delve
+
+# Opt-in mise-managed Go runtime (engine runs `mise use -g go`; inverse on remove).
+mise:go

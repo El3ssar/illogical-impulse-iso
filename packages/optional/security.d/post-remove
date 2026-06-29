@@ -1,0 +1,17 @@
+# security/post-remove — SOURCED by the iictl pack engine BEFORE the recorded
+# package set is removed. Inverse of post-add: delete the ii-OWNED ruleset(s) the
+# pack dropped (privileged rm; the matching kind=file ledger row's own rm -f then
+# no-ops). The pack enabled NO services, so there is nothing to disable. Any
+# firewall/VPN the USER enabled from the printed hints is the user's own choice
+# and is intentionally NOT touched here (we only undo what the pack did). set -e
+# is NOT in effect; hooks are SOURCED at subshell top level → `local` is illegal.
+
+_ii_rules_dir=/etc/illogical-impulse/security
+_ii_ufw_rules="$_ii_rules_dir/ufw-default.rules"
+if _sudo test -e "$_ii_ufw_rules"; then
+  _sudo rm -f "$_ii_ufw_rules" \
+    && echo ">> security: removed ii-owned ruleset $_ii_ufw_rules" \
+    || echo "!! security: could not remove $_ii_ufw_rules" >&2
+fi
+# prune the ii-owned dir if it is now empty (leave it if the user put files there).
+_sudo rmdir "$_ii_rules_dir" 2>/dev/null || true

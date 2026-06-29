@@ -1,0 +1,26 @@
+# virt — virtualization pack (#25, PROPOSAL §14). The libvirt/QEMU stack with
+# virt-manager and the UEFI firmware (edk2-ovmf) for UEFI guests. Installed
+# ONLINE on demand (official repos via pacman, AUR via paru) — nothing baked or
+# stashed (design pivot #42); only this name-list rides in the image as TEXT.
+# (distrobox stays BAKED in goodies.list per §7/§14 — it is NOT part of this
+# pack. dnsmasq, libvirt's NAT helper, is already in the archiso releng baseline,
+# so it is NOT re-declared here — that would be a double-bake the validity lint
+# forbids; libvirt finds it already present.)
+#
+# post-add adds the user to the `libvirt` group via ii_group_add (the
+# reversible mirror of ii-post-install's docker-group idiom) so virsh/
+# virt-manager work without root, but does NOT auto-enable libvirtd — it prints
+# the enable hint (§14: virt services are not auto-up). post-remove removes the
+# group membership (the package set + group row are reverted by the engine).
+#
+# waydroid (Android container) is gated behind
+# `iictl pack install virt --with-waydroid` (AUR — pulls a large image stack):
+# post-add installs it only when the flag is passed. It is NOT a plain member.
+#meta:type virt
+libvirt
+qemu-full
+virt-manager
+edk2-ovmf
+# waydroid — AUR, behind --with-waydroid (NOT a plain member; installed by the
+# post-add hook only when the flag is passed):
+#   waydroid

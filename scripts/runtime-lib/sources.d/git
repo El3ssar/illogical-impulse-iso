@@ -1,0 +1,70 @@
+# git — raw git-repo source resolver (#48). Sourced (NOT executed) by sources.sh
+# / the iictl plugins manager. Lets the user add ANY zsh plugin by its git
+# coordinates — a bare `user/repo` (antidote's short form) OR a full clone URL,
+# which is normalized to the short form antidote understands:
+#
+#     https://github.com/user/repo(.git)   →   user/repo
+#     git@github.com:user/repo.git          →   user/repo
+#     user/repo                             →   user/repo   (unchanged)
+#
+# This is the open-ended escape hatch ("including but not limited to ohmyzsh"):
+# anything not in the antidote/ohmyzsh shortlists is reachable here. Because a git
+# coordinate cannot be enumerated, the `candidates` set is the raw-git entries
+# ALREADY in the manifest (so the TUI shows them marked/removable); NEW entries
+# are added via the direct verb `iictl plugins add git <user/repo|url>`.
+
+# _ii_git_normalize <ref> — echo the canonical `user/repo` for a git ref, or echo
+# the input unchanged when it is already in `user/repo` short form (or carries an
+# antidote annotation we must not mangle).
+_ii_git_normalize() {
+  local ref="$1"
+  # Already an antidote line with annotations (a space) → leave verbatim.
+  case "$ref" in *' '*) printf '%s' "$ref"; return 0 ;; esac
+  case "$ref" in
+    https://*|http://*)
+      ref="${ref%.git}"
+      ref="${ref#http://}"; ref="${ref#https://}"
+      ref="${ref#*/}"               # strip host → user/repo[/...]
+      # keep the first two path segments (user/repo)
+      printf '%s' "$ref" | cut -d/ -f1,2
+      ;;
+    git@*:*|ssh://git@*)
+      ref="${ref%.git}"
+      ref="${ref##*:}"              # git@host:user/repo → user/repo
+      ref="${ref#git@*/}"           # ssh://git@host/user/repo → user/repo (best effort)
+      printf '%s' "$ref" | cut -d/ -f1,2
+      ;;
+    *)
+      printf '%s' "$ref"            # assume already user/repo
+      ;;
+  esac
+}
+
+# ii_source_git_candidates — the raw `user/repo` entries already in the manifest
+# (annotation-free, no antidote `path:` form → those belong to ohmyzsh/antidote).
+# $1 is the manifest path, passed by the manager so candidates reflect state.
+ii_source_git_candidates() {
+  local f="${1:-}" line
+  [[ -n "$f" ]] || return 0
+  while IFS= read -r line; do
+    # raw git == a bare user/repo with no whitespace annotations.
+    case "$line" in *' '*) continue ;; esac
+    [[ "$line" == */* ]] && printf '%s\n' "$line"
+  done < <(ii_manifest_current "$f")
+}
+
+# ii_source_git_add <manifest> <ref> — normalize then append (idempotent). Routes
+# the write through the shared manifest helper so the ledger/reversibility path
+# is identical to every other source.
+ii_source_git_add() {
+  local f="$1" ref; ref="$(_ii_git_normalize "$2")"
+  ii_manifest_add "$f" "$ref"
+}
+
+# ii_source_git_remove <manifest> <ref> — normalize then drop (idempotent).
+ii_source_git_remove() {
+  local f="$1" ref; ref="$(_ii_git_normalize "$2")"
+  ii_manifest_remove "$f" "$ref"
+}
+
+# current intentionally omitted → shared ii_manifest_current.

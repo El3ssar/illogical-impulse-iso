@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+#help: docs	print the baked offline quickstart (iictl verbs, channels, revert)
+# docs — print the offline quickstart subset (#27). The honest-concession item:
+# no hosted docs site, just a small quickstart baked into the squashfs at
+# /usr/share/illogical-impulse/docs/ (distro-owned, unowned by upstream). Read-
+# only output — nothing to record, nothing to revert. Pages through $PAGER /
+# less when stdout is a TTY; plain cat otherwise (pipe-friendly).
+
+set -u
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+
+# Baked docs dir (overridable for the no-root unit test).
+II_DOCS="${II_DOCS:-/usr/share/illogical-impulse/docs}"
+
+_usage() {
+  cat <<EOF
+${C_B}iictl docs${C_0} — print the offline quickstart
+
+usage: iictl docs [<page>] [--list]
+
+  --list, -l   list the baked pages
+  <page>       a page name (default: quickstart); .md optional
+
+Docs are baked at $II_DOCS and printed offline (no network).
+EOF
+}
+
+LIST=0 page="quickstart"
+for a in "$@"; do
+  case "$a" in
+    --list|-l) LIST=1 ;;
+    -h|--help) _usage; exit 0 ;;
+    -*) die "unknown option: $a (try: iictl docs --help)" ;;
+    *)  page="$a" ;;
+  esac
+done
+
+[[ -d "$II_DOCS" ]] || die "no docs baked at $II_DOCS"
+
+if (( LIST )); then
+  echo "${C_B}offline docs${C_0} ($II_DOCS):"
+  for f in "$II_DOCS"/*.md; do
+    [[ -e "$f" ]] || { echo "  (none)"; break; }
+    printf '  %s\n' "$(basename "$f" .md)"
+  done
+  exit 0
+fi
+
+# Resolve <page> → file (accept with or without the .md suffix).
+file="$II_DOCS/$page"
+[[ -f "$file" ]] || file="$II_DOCS/${page%.md}.md"
+[[ -f "$file" ]] || die "no such doc page: $page (try: iictl docs --list)"
+
+# Page through a pager only when stdout is an interactive terminal; otherwise
+# plain cat so `iictl docs | grep …` and the welcome card's console behave.
+if [[ -t 1 ]]; then
+  pager="${PAGER:-less}"
+  if command -v "${pager%% *}" >/dev/null 2>&1; then
+    [[ "${pager%% *}" == less ]] && export LESS="${LESS:--R}"
+    "$pager" "$file"
+  else
+    cat "$file"
+  fi
+else
+  cat "$file"
+fi

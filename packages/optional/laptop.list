@@ -1,0 +1,35 @@
+# laptop — laptop power management + ergonomics pack (#25, PROPOSAL §14).
+# Installed ONLINE on demand (official repos via pacman) — nothing baked or
+# stashed (design pivot #42); only this name-list rides in the image as TEXT.
+#
+# POWER TOOLS ARE MUTUALLY EXCLUSIVE. power-profiles-daemon (the default),
+# tlp, and auto-cpufreq each own the CPU-frequency/power policy and fight if
+# co-installed. The #meta:conflicts line declares the two NON-DEFAULT tools
+# (tlp, auto-cpufreq): the engine's ii_conflicts_check gate REFUSES the pack
+# install BEFORE any pacman transaction if a foreign power tool is already
+# present, so there is no half-applied state. (ppd is intentionally NOT in the
+# manifest conflicts — it is a member here and the boxed-in system default, so a
+# system already running ppd must NOT be refused.) The post-add hook then
+# honours `--power=<ppd|tlp|auto-cpufreq>` (default ppd) and re-runs
+# ii_conflicts_check on the OTHER two relative to the chosen tool before pacman,
+# installs exactly the chosen tool, and enables exactly its one service via
+# ii_service_enable (recorded; reversed on remove). tlp and auto-cpufreq are
+# therefore NOT plain members — they are installed by the hook on demand.
+#
+# power-profiles-daemon ships as a plain member (the default), enabled by
+# post-add. fprintd is the one unconditional member (brightnessctl is already
+# baked via upstream's illogical-impulse-backlight dependency, so it is NOT
+# re-declared here — listing an already-baked package would be a double-bake the
+# validity lint forbids). fprintd is wired into login via an ii-OWNED PAM drop-in
+# written by post-add (an additive file, never an in-place edit of a vendor
+# /etc/pam.d/* file) and removed on post-remove. post-add also writes the
+# sentinel-fenced power-widget launch line into ~/.config/hypr/custom/execs.lua
+# (the widget QML is framework work, out of scope); post-remove strips it.
+#meta:type laptop
+#meta:conflicts tlp auto-cpufreq
+power-profiles-daemon
+fprintd
+# Alternate power tools — installed by post-add only when selected via --power=;
+# declared in #meta:conflicts above so the engine enforces the mutual exclusion:
+#   tlp
+#   auto-cpufreq

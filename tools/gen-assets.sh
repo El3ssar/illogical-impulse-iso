@@ -18,6 +18,8 @@ WALL="$ROOT/overlay/assets/default-wallpaper.png"
 OUT_LOGO="$ROOT/overlay/calamares/branding/illogical-impulse/logo.png"
 OUT_WELCOME="$ROOT/overlay/calamares/branding/illogical-impulse/welcome.png"
 OUT_PIXMAP="$ROOT/overlay/airootfs/usr/share/pixmaps/illogical-impulse.png"
+WEBAPP_FALLBACK_SVG="$ROOT/overlay/assets/branding/webapp-fallback.svg"
+OUT_WEBAPP_FALLBACK="$ROOT/overlay/airootfs/usr/share/illogical-impulse/webapps/fallback.png"
 
 PAL_BASE="#1e1e2e" PAL_CRUST="#11111b" PAL_TEXT="#cdd6f4"
 PAL_MAUVE="#cba6f7" PAL_TEAL="#94e2d5"
@@ -106,5 +108,16 @@ else
 fi
 install -Dm 0644 "$work/welcome.png" "$OUT_WELCOME" ; echo "   $OUT_WELCOME"
 
+# ── 3. webapps/fallback.png — generic icon for iictl webapp launchers ──────
+# The baked fallback when `iictl webapp add` has no explicit icon and the
+# favicon fetch fails/offline. Source SVG is a Catppuccin globe glyph.
+echo ">> webapps/fallback.png"
+if [[ -f "$WEBAPP_FALLBACK_SVG" ]]; then
+  rsvg-convert -w 256 -h 256 "$WEBAPP_FALLBACK_SVG" -o "$work/webapp-fallback.png"
+else
+  magick -size 256x256 radial-gradient:"${PAL_MAUVE}-${PAL_CRUST}" "$work/webapp-fallback.png"
+fi
+install -Dm 0644 "$work/webapp-fallback.png" "$OUT_WEBAPP_FALLBACK" ; echo "   $OUT_WEBAPP_FALLBACK"
+
 echo
-echo "Done. Review with: git diff -- overlay/calamares/branding/ overlay/airootfs/usr/share/pixmaps/"
+echo "Done. Review with: git diff -- overlay/calamares/branding/ overlay/airootfs/usr/share/pixmaps/ overlay/airootfs/usr/share/illogical-impulse/webapps/"

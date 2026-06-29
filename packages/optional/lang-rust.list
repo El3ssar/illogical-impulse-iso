@@ -1,0 +1,24 @@
+# lang-rust — Rust developer toolchain (FETCHED-ONLINE, never baked). `rustup`
+# itself is already in the baked dev baseline (packages/goodies.list), so this
+# pack only adds the dev CLIs around it plus an OPT-IN `mise:rust` runtime
+# directive. All members are official-repo; `iictl pack install lang-rust`
+# fetches them online and records the resolved set for an exact, reversible
+# `iictl pack remove lang-rust`.
+#
+# rustup-vs-mise coexistence (PROPOSAL §13): the distro's primary Rust toolchain
+# manager is the baked `rustup`. The `mise:rust` directive below is OPT-IN for
+# users who prefer mise-managed toolchains; mise installs Rust under its own
+# user-owned ~/.config/mise + data dir and shims it on PATH ahead of rustup, so
+# the two coexist without either clobbering the other. `iictl pack remove
+# lang-rust` undoes the `mise use -g rust` directive (the engine runs the inverse
+# `mise use -gu rust`); `rustup` stays, being baseline.
+#meta:type lang
+cargo-edit
+cargo-watch
+cargo-nextest
+sccache
+
+# Opt-in mise-managed Rust runtime (the engine runs `mise use -g rust`; the
+# inverse on remove un-sets it). This is a runtime DIRECTIVE only — no shell
+# activation line is written here (that belongs to the shell domain).
+mise:rust

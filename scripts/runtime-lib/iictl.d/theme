@@ -1,0 +1,362 @@
+#!/usr/bin/env bash
+#help: theme	flavor engine over upstream switchwall.sh (list|set|reset|current|gui|watch)
+#spec: theme	Theme flavor
+# theme — the iictl theming flavor engine (PROPOSAL §9 / issue #16). It DRIVES
+# upstream's own Material You pipeline rather than forking it: a "flavor" is a
+# SEED colour fed through upstream's public entry point
+# `~/.config/quickshell/ii/scripts/colors/switchwall.sh`, so a named flavor
+# (Catppuccin / Nord / Gruvbox / …) becomes a LIVE, wallpaper-harmonized matugen
+# recolour of the whole rice — not an all-or-nothing frozen palette. NO distro
+# colour logic is duplicated here.
+#
+# Subcommands:
+#   list                enumerate the baked flavor seeds (/usr/share/illogical-impulse/themes/*.conf)
+#   current             print the active accentColor (warns: it overrides wallpaper picks until reset)
+#   set <flavor>        switchwall.sh --color <seed>  (ledger-records the prior accent)
+#   set --image PATH    switchwall.sh --image PATH    (ledger-records the prior wallpaper)
+#   reset               switchwall.sh --color clear   (accentColor → "", byte-identical to never-set)
+#   gui                 thin stub → the QML swatch picker if present (full picker is out of scope, #16)
+#   watch enable|disable|status   opt-in, OFF-by-default debounced recolour hook (single owner)
+#   --spec              emit the iictl-tui chooser contract (drives `iictl tweak theme`)
+#
+# Additive: one drop-in beside the iictl core (zero merge surface) + flavor seeds
+# under the UNOWNED /usr/share/illogical-impulse/themes/ namespace. Reversible:
+# `set` records the prior accent in the ledger and `reset` is literally upstream's
+# own `--color clear`, so it returns BYTE-IDENTICAL to a system that never had a
+# flavor set; `iictl revert-all` replays that clear and strips the (optional,
+# off-by-default) recolour-watcher fence. We NEVER write an upstream-owned path:
+# no `~/.config/matugen` `[templates.*]`, no `~/.config/quickshell/ii`, no
+# `generated/` STATE — only switchwall.sh's own config write + the one fenced
+# custom/execs.lua block (via the shared mutator) when the user opts the watcher in.
+
+set -u
+
+# Shared header (colors, ok/bad/warn/die, _not_root, RELEASE_FILE, ledger_*) and
+# the mutator library (ii_lua_block_write/ii_lua_block_remove — the ONLY
+# sanctioned writer of a sentinel-fenced custom/*.lua block, which the opt-in
+# watcher uses). Both source ledger.sh themselves; double-source is safe.
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+source "${II_LIB:-/usr/local/lib/ii}/mutator.sh"
+
+# Baked flavor seed catalog — a sibling of welcome/ under the UNOWNED
+# /usr/share/illogical-impulse/ namespace, untouched by ii-verify's
+# /usr/local/lib/ii purge. Overridable for the no-root unit test.
+II_THEMEDIR="${II_THEMEDIR:-/usr/share/illogical-impulse/themes}"
+
+# Upstream's public colour entry point + the rice config it mutates. Both are
+# upstream-owned (read-only territory): we only RUN switchwall.sh (never patch
+# it) and only READ the accent/wallpaper from config.json via jq — switchwall.sh
+# itself is the only thing that ever WRITES that config. Resolve under $HOME so a
+# missing path can `die` softly (the upstream-drift guard).
+SWITCHWALL="${II_SWITCHWALL:-$HOME/.config/quickshell/ii/scripts/colors/switchwall.sh}"
+II_CONFIG_JSON="${II_CONFIG_JSON:-${XDG_CONFIG_HOME:-$HOME/.config}/illogical-impulse/config.json}"
+
+# The opt-in recolour watcher hook: a static script baked into skel-distro (an
+# UNOWNED path), autostarted ONLY via a sentinel-fenced block this plugin writes
+# into the custom/execs.lua slot when the user runs `iictl theme watch enable`.
+II_RECOLOR_SCRIPT="${II_RECOLOR_SCRIPT:-$HOME/.config/hypr/custom/scripts/ii-theme-recolor.sh}"
+II_EXECS_LUA="${II_EXECS_LUA:-$HOME/.config/hypr/custom/execs.lua}"
+II_WATCH_FENCE="theme-recolor"
+
+# ── flavor seed parsing ──────────────────────────────────────────────────────
+# _theme_get <conf> <key> — echo the value of key=value in a flavor .conf (last
+# wins; comments and blank lines ignored; surrounding whitespace trimmed). Pure
+# bash — no sed/jq dependency for parsing our own text format.
+_theme_get() {
+  local f="$1" key="$2" line k v out=""
+  [[ -f "$f" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" == \#* ]] && continue
+    [[ "$line" == *=* ]] || continue
+    k="${line%%=*}"; v="${line#*=}"
+    k="${k#"${k%%[![:space:]]*}"}"; k="${k%"${k##*[![:space:]]}"}"
+    [[ "$k" == "$key" ]] || continue
+    v="${v#"${v%%[![:space:]]*}"}"; v="${v%"${v##*[![:space:]]}"}"
+    out="$v"
+  done < "$f"
+  printf '%s' "$out"
+}
+
+# _theme_seed <conf> — echo the seed hex if it is a valid #RRGGBB / RRGGBB, else
+# nothing (caller treats empty as "no/invalid seed").
+_theme_seed() {
+  local s; s="$(_theme_get "$1" seed)"
+  [[ "$s" =~ ^#?[A-Fa-f0-9]{6}$ ]] && printf '%s' "$s"
+}
+
+# _theme_confs — echo every flavor .conf path, one per line (sorted, nullglob).
+_theme_confs() {
+  [[ -d "$II_THEMEDIR" ]] || return 0
+  local c; shopt -s nullglob
+  for c in "$II_THEMEDIR"/*.conf; do printf '%s\n' "$c"; done
+  shopt -u nullglob
+}
+
+# _current_accent — echo the active accentColor from the rice config (empty when
+# unset/no jq/no config). switchwall.sh stores it at .appearance.palette.accentColor.
+_current_accent() {
+  command -v jq >/dev/null 2>&1 || return 0
+  [[ -f "$II_CONFIG_JSON" ]] || return 0
+  local v; v="$(jq -r '.appearance.palette.accentColor // ""' "$II_CONFIG_JSON" 2>/dev/null)"
+  [[ "$v" == "null" ]] && v=""
+  printf '%s' "$v"
+}
+
+# _current_wallpaper — echo the active wallpaperPath from the rice config.
+_current_wallpaper() {
+  command -v jq >/dev/null 2>&1 || return 0
+  [[ -f "$II_CONFIG_JSON" ]] || return 0
+  local v; v="$(jq -r '.background.wallpaperPath // ""' "$II_CONFIG_JSON" 2>/dev/null)"
+  [[ "$v" == "null" ]] && v=""
+  printf '%s' "$v"
+}
+
+# _need_switchwall — soft drift guard: switchwall.sh is upstream-owned; if the
+# path drifted (or this is not a real install) we die clearly rather than
+# half-acting. JSON helper: warn is enough where colour-from-accent still works.
+_need_switchwall() {
+  [[ -x "$SWITCHWALL" ]] || die "upstream switchwall.sh not found/executable at $SWITCHWALL — cannot drive the colour pipeline (upstream path drift? run 'iictl update')"
+}
+
+# ── JSON (dependency-free — mirrors the pack plugin; no jq for OUTPUT) ─────────
+_json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+
+# ── subcommands ──────────────────────────────────────────────────────────────
+cmd_list() {
+  local json=0
+  [[ "${1:-}" == "--json" ]] && json=1
+  local confs=(); mapfile -t confs < <(_theme_confs)
+
+  if (( json )); then
+    local first=1 c name label seed mode active
+    active="$(_current_accent)"
+    printf '['
+    for c in "${confs[@]}"; do
+      name="$(basename "${c%.conf}")"
+      label="$(_theme_get "$c" label)"; [[ -n "$label" ]] || label="$name"
+      seed="$(_theme_seed "$c")"
+      mode="$(_theme_get "$c" mode)"
+      (( first )) || printf ','
+      first=0
+      printf '{"name":"%s","label":"%s","seed":"%s","mode":"%s"}' \
+        "$(_json_escape "$name")" "$(_json_escape "$label")" \
+        "$(_json_escape "$seed")" "$(_json_escape "$mode")"
+    done
+    printf ']\n'
+    return 0
+  fi
+
+  if (( ${#confs[@]} == 0 )); then
+    echo "${C_B}iictl theme${C_0}: no flavors available (none staged at $II_THEMEDIR)"
+    return 0
+  fi
+  local active; active="$(_current_accent)"
+  echo "${C_B}available flavors${C_0} ($II_THEMEDIR):"
+  local c name label seed mark
+  for c in "${confs[@]}"; do
+    name="$(basename "${c%.conf}")"
+    label="$(_theme_get "$c" label)"; [[ -n "$label" ]] || label="$name"
+    seed="$(_theme_seed "$c")"
+    mark=""
+    [[ -n "$active" && "${active,,}" == "${seed,,}" ]] && mark="  ${C_G}(active)${C_0}"
+    printf '  %s%-18s%s %s  %s%b\n' "$C_B" "$name" "$C_0" "$label" "${seed:-(no seed!)}" "$mark"
+  done
+  echo
+  echo "set one: ${C_B}iictl theme set <flavor>${C_0}    clear it: ${C_B}iictl theme reset${C_0}"
+}
+
+cmd_current() {
+  local active; active="$(_current_accent)"
+  if [[ -n "$active" ]]; then
+    echo "${C_B}active accent${C_0}: $active"
+    warn "an accent override is set — it WINS over later wallpaper picks until 'iictl theme reset'"
+  else
+    echo "${C_B}active accent${C_0}: (none — colours follow the wallpaper)"
+  fi
+}
+
+cmd_set() {
+  _not_root
+  # set --image PATH — switch wallpaper through upstream; record prior wallpaper.
+  if [[ "${1:-}" == "--image" ]]; then
+    local img="${2:-}"
+    [[ -n "$img" ]] || die "usage: iictl theme set --image <path>"
+    [[ -f "$img" ]] || die "image not found: $img"
+    _need_switchwall
+    local prior; prior="$(_current_wallpaper)"
+    # Record the prior wallpaper so revert can re-apply it via --image (offline-safe).
+    ledger_record theme-image "theme:wallpaper" "$(_ii_pack_tag)" "" "${prior:-}"
+    echo "${C_B}>> switching wallpaper${C_0} (upstream switchwall.sh --image)"
+    exec "$SWITCHWALL" --image "$img"
+  fi
+
+  local flavor="${1:-}"
+  [[ -n "$flavor" ]] || die "usage: iictl theme set <flavor>   (see: iictl theme list)   or: iictl theme set --image <path>"
+  # The chooser-spec's synthetic "none" option maps to a reset (clear the accent)
+  # so the iictl-tui round-trip ('theme set %v') needs no second apply verb.
+  [[ "$flavor" == none ]] && { cmd_reset; return $?; }
+  local conf="$II_THEMEDIR/$flavor.conf"
+  [[ -f "$conf" ]] || die "unknown flavor '$flavor' (see: iictl theme list)"
+  local seed; seed="$(_theme_seed "$conf")"
+  [[ -n "$seed" ]] || die "flavor '$flavor' declares no valid #RRGGBB seed in $conf"
+  _need_switchwall
+
+  # Record the PRIOR accent so revert can re-apply it (or 'clear' when it was
+  # empty — byte-identical to never-set). The restore hint carries the exact
+  # prior value; an empty value means "the inverse is --color clear".
+  local prior; prior="$(_current_accent)"
+  ledger_record theme-accent "theme:accent" "$(_ii_pack_tag)" "" "${prior:-}"
+
+  echo "${C_B}>> setting flavor '$flavor'${C_0} (seed $seed → upstream switchwall.sh --color)"
+  warn "the accent override PERSISTS and WINS over later wallpaper picks until 'iictl theme reset'"
+  exec "$SWITCHWALL" --color "$seed"
+}
+
+cmd_reset() {
+  _not_root
+  _need_switchwall
+  # Record the prior accent before clearing so a global revert-all has a row to
+  # reason about; the inverse of a clear is itself a clear (idempotent), so we
+  # record the clear as the canonical "accent is now empty" state.
+  local prior; prior="$(_current_accent)"
+  ledger_record theme-accent "theme:accent" "$(_ii_pack_tag)" "" ""
+  if [[ -z "$prior" ]]; then
+    echo "${C_B}>> clearing accent${C_0} (already empty — colours follow the wallpaper)"
+  else
+    echo "${C_B}>> clearing accent${C_0} (was $prior → upstream switchwall.sh --color clear)"
+  fi
+  exec "$SWITCHWALL" --color clear
+}
+
+cmd_gui() {
+  # Thin stub — the full QML swatch-grid picker is deferred (#16 "Out of scope",
+  # PROPOSAL §9). Shell to it only if a future package drops one on PATH.
+  if command -v ii-theme-picker >/dev/null 2>&1; then
+    exec ii-theme-picker "$@"
+  fi
+  warn "GUI flavor picker not installed (deferred — use 'iictl theme set <flavor>' or 'iictl tweak theme')"
+}
+
+# ── opt-in recolour watcher (OFF by default; the SINGLE owner of this hook) ────
+# enable → write ONE sentinel-fenced block into the custom/execs.lua slot (via
+# the shared mutator, ledger-recorded) that autostarts the debounced recolour
+# script. disable → strip exactly that fence (no-op if absent). The watcher reads
+# the FINISHED colors.json and re-renders the static extra-tool themes; it NEVER
+# writes an upstream-owned path. The terminal/TUI work (#23) CONSUMES this hook
+# and must NOT add a second watcher.
+cmd_watch() {
+  _not_root
+  case "${1:-status}" in
+    enable|on)
+      [[ -x "$II_RECOLOR_SCRIPT" || -f "$II_RECOLOR_SCRIPT" ]] \
+        || die "recolour script missing at $II_RECOLOR_SCRIPT (not a full install?)"
+      ii_lua_block_write "$II_EXECS_LUA" "$II_WATCH_FENCE" <<EOF
+-- Opt-in extra-tool recolour watcher (iictl theme watch). OFF by default; this
+-- fenced block is the SINGLE owner of the recolour hook. Disable + remove it
+-- with 'iictl theme watch disable' or 'iictl revert-all'.
+hl.on("hyprland.start", function()
+    hl.exec_cmd("$II_RECOLOR_SCRIPT --watch")
+end)
+EOF
+      ok "recolour watcher enabled (fenced '$II_WATCH_FENCE' block in custom/execs.lua) — takes effect next Hyprland start"
+      ;;
+    disable|off)
+      ii_lua_block_remove "$II_EXECS_LUA" "$II_WATCH_FENCE" \
+        && ok "recolour watcher disabled (fenced block stripped — upstream stub restored)" \
+        || warn "could not strip the watcher fence from $II_EXECS_LUA"
+      ;;
+    status)
+      # `--` before the pattern: the fence marker starts with "--", which grep
+      # would otherwise parse as an option (it dies "unrecognized option").
+      if [[ -f "$II_EXECS_LUA" ]] && grep -qxF -- "${II_FENCE_OPEN}${II_WATCH_FENCE}" "$II_EXECS_LUA"; then
+        echo "${C_B}recolour watcher${C_0}: ${C_G}enabled${C_0}"
+      else
+        echo "${C_B}recolour watcher${C_0}: disabled (default)"
+      fi
+      ;;
+    *) die "usage: iictl theme watch [enable|disable|status]" ;;
+  esac
+}
+
+# ── doctor surface (per-plugin hook; iictl's revert-all re-runs `iictl doctor`) ─
+# `iictl theme doctor` warns when an accent override is active and soft-fails if
+# switchwall.sh is missing. Wired here (not in the iictl core) so deleting the
+# plugin removes the surface cleanly — purely additive.
+cmd_doctor() {
+  echo "${C_B}theme doctor${C_0}"
+  if [[ -x "$SWITCHWALL" ]]; then
+    ok "upstream switchwall.sh present (colour pipeline drivable)"
+  else
+    bad "upstream switchwall.sh missing at $SWITCHWALL — 'iictl theme set/reset' cannot drive colours"
+  fi
+  local active; active="$(_current_accent)"
+  if [[ -n "$active" ]]; then
+    warn "accent override active ($active) — wallpaper picks will NOT change the accent until 'iictl theme reset'"
+  else
+    ok "no accent override (colours follow the wallpaper)"
+  fi
+}
+
+# cmd_spec — emit the iictl chooser-contract spec for the theme domain (#47). ONE
+# `choice` control: current = the active accent (matched back to a flavor by
+# seed), options = every baked flavor + a synthetic "none" that maps to reset.
+# The iictl-tui renderer draws it and applies a pick by shelling back to
+# `iictl theme set <flavor>` / `iictl theme reset` — so the round-trip drives the
+# TUI with ZERO new mutation paths and the ledger still owns reversibility.
+cmd_spec() {
+  local confs=(); mapfile -t confs < <(_theme_confs)
+  local active; active="$(_current_accent)"
+  local options='[{"value":"none","label":"None (follow wallpaper)"}' current='"none"'
+  local c name seed
+  for c in "${confs[@]}"; do
+    name="$(basename "${c%.conf}")"
+    seed="$(_theme_seed "$c")"
+    options+=",{\"value\":\"$(_json_escape "$name")\",\"label\":\"$(_json_escape "$name")\"}"
+    [[ -n "$active" && "${active,,}" == "${seed,,}" ]] && current="\"$(_json_escape "$name")\""
+  done
+  options+=']'
+  # apply: set <%v> for a flavor, reset for the synthetic "none". The renderer
+  # substitutes %v with the chosen value; the theme verb maps "none" → reset.
+  printf '{"domain":"theme","title":"Theme flavor","controls":[{"id":"flavor","type":"choice","label":"Material You flavor seed","current":%s,"options":%s,"apply":["theme","set","%%v"]}]}\n' \
+    "$current" "$options"
+}
+
+cmd_usage() {
+  cat <<EOF
+${C_B}iictl theme${C_0} — flavor engine over upstream's Material You pipeline
+
+A flavor is a SEED colour fed through upstream's own switchwall.sh, so the whole
+rice recolours LIVE and harmonizes with the wallpaper (not a frozen palette). No
+distro colour logic is duplicated; reset is upstream's own --color clear.
+
+usage:
+  iictl theme list [--json]        list baked flavor seeds (+ which is active)
+  iictl theme current              print the active accent (warns it overrides picks)
+  iictl theme set <flavor>         seed → switchwall.sh --color <hex> (recolours live)
+  iictl theme set --image <path>   switch wallpaper via switchwall.sh --image
+  iictl theme reset                switchwall.sh --color clear (back to wallpaper-driven)
+  iictl theme gui                  open the QML swatch picker if installed (deferred)
+  iictl theme watch [enable|disable|status]
+                                   opt-in recolour watcher (OFF by default)
+  iictl theme doctor               accent-override + switchwall.sh health
+  iictl theme --spec               emit the iictl-tui chooser spec ('iictl tweak theme')
+
+reversible: 'iictl theme reset' (or 'iictl revert-all') restores the empty accent,
+byte-identical to a system on which a flavor was never set.
+EOF
+}
+
+case "${1:-help}" in
+  list)             shift; cmd_list    "$@" ;;
+  current)          shift; cmd_current "$@" ;;
+  set)              shift; cmd_set     "$@" ;;
+  reset|clear)      shift; cmd_reset   "$@" ;;
+  gui)              shift; cmd_gui     "$@" ;;
+  watch)            shift; cmd_watch   "$@" ;;
+  doctor)           shift; cmd_doctor  "$@" ;;
+  --spec|spec)      shift; cmd_spec    "$@" ;;
+  help|-h|--help)   cmd_usage ;;
+  # the renderer's synthetic "none" pick maps to reset (see cmd_spec apply note).
+  *)                die "unknown subcommand: $1 (try: iictl theme help)" ;;
+esac

@@ -1,0 +1,11 @@
+# creative/post-remove — SOURCED by the iictl pack engine BEFORE the recorded
+# package set is removed. The creative pack adds NO out-of-band system state
+# (no service/group/PAM/fence/loader-entry) — its only optional extra,
+# davinci-resolve, is captured into the kind=pack ledger row by the engine's
+# post-add top-up snapshot, so the shared revert engine's offline-safe
+# `pacman -Rns` of the recorded set removes it (and every base member) on
+# removal. This inverse therefore has nothing of its own to undo; it exists to
+# satisfy the post-add/post-remove pairing contract and to document that the
+# package removal is the complete inverse. No-op by design.
+
+: # nothing to undo — package removal is handled by the shared revert engine

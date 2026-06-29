@@ -1,0 +1,24 @@
+# role-devops — a thin COMPOSITE bundle for ops/platform work (FETCHED-ONLINE,
+# never baked). Composes primitives' members directly (no `#meta:requires` in the
+# engine; pacman --needed dedupes). KEEP THIS SMALL.
+#
+# Source packs it mirrors:
+#   • containers → lazydocker, ctop, dive, k9s, kubectl, helm  (orchestration CLIs;
+#                  `kind` is AUR — left to the containers pack so this bundle is
+#                  all official-repo and never blocks on an AUR build)
+#   • dev-cli    → dust, procs, bottom, hyperfine               (system + perf CLIs)
+# The container ENGINES (docker/podman/compose) are already baked; this bundle is
+# the orchestration + observability tooling on top. Rootless podman is a
+# `containers --rootless` choice, not a role concern — a role composes package
+# members only, not another pack's side-effect hooks.
+#meta:type role
+lazydocker
+ctop
+dive
+k9s
+kubectl
+helm
+dust
+procs
+bottom
+hyperfine

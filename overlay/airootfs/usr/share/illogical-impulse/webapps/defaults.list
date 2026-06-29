@@ -1,0 +1,21 @@
+# defaults.list — the curated default web apps for `iictl webapp seed`.
+#
+# OPT-IN ONLY: nothing here is installed automatically. The distro ships zero
+# web-app launchers by default; `iictl webapp seed` reads this file and runs
+# `iictl webapp add` for each line (idempotently — already-present launchers are
+# skipped). Each becomes a user-owned ~/.local/share/applications/ii-webapp-
+# <slug>.desktop running brave-bin in --app mode, fully reversible via
+# `iictl webapp remove <name>` / `iictl revert-all`.
+#
+# Format, one per line:   <name>|<url>[|<icon-path>]
+#   name  — display name; the slug is derived (lowercase, [a-z0-9-]).
+#   url   — the web app URL (https://…).
+#   icon  — OPTIONAL absolute path to a local icon; omitted → best-effort favicon
+#           fetch, then the generic baked fallback.png.
+# Lines starting with '#' and blank lines are ignored. Text-only — NO PII.
+
+YouTube|https://youtube.com
+Proton Mail|https://mail.proton.me
+Google Maps|https://maps.google.com
+ChatGPT|https://chat.openai.com
+WhatsApp Web|https://web.whatsapp.com

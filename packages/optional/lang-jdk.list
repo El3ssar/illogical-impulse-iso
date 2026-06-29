@@ -1,0 +1,10 @@
+# lang-jdk — Java developer toolchain (FETCHED-ONLINE, never baked). The
+# official OpenJDK package provides javac + the JRE/JDK; an OPT-IN `mise:java`
+# directive is offered for users who manage JDK versions through mise instead.
+# `iictl pack remove lang-jdk` undoes both.
+#meta:type lang
+jdk-openjdk
+
+# Opt-in mise-managed Java runtime (engine runs `mise use -g java`; inverse on
+# remove). mise's plugin name for the JDK is `java`.
+mise:java

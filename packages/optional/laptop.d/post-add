@@ -1,0 +1,119 @@
+# laptop/post-add — SOURCED by the iictl pack engine AFTER the laptop members
+# install online (engine helpers in scope: mutators, ledger, _sudo, _ensure_paru;
+# pack tag exported as II_PACK_TAG=pack:laptop so every side-effect row is swept
+# on `iictl pack remove laptop`). Hooks are SOURCED at the engine's subshell top
+# level (NOT inside a function), so `local` is illegal — use plainly-scoped vars.
+# set -e is NOT in effect; guard explicitly.
+#
+# Three side effects, ALL through the shared mutator / additive-file model so
+# each has a recorded inverse:
+#   1. power tool — honour II_LAPTOP_POWER=<ppd|tlp|auto-cpufreq> (default ppd),
+#      enforce the mutual exclusion with ii_conflicts_check BEFORE pacman, install
+#      the chosen tool (ppd is already a member), and enable EXACTLY its one
+#      service via ii_service_enable (ledger kind=service, reversed on remove).
+#   2. fprintd — wire fingerprint login via an ii-OWNED PAM drop-in file (a NEW
+#      file we create + record + delete; NEVER an in-place edit of a vendor
+#      /etc/pam.d/* file), recorded as a kind=file ledger row.
+#   3. power widget — sentinel-fenced launch line in the user's execs.lua
+#      (ii_lua_block_write; the widget QML is framework work, guarded at runtime).
+
+# The mutators (ii_service_enable, …) touch system state with NO internal sudo
+# and record the ledger into $HOME — so we run them as ROOT via a re-sourced
+# bash while FORCING HOME/XDG_STATE_HOME (so the row lands in the user's state)
+# and passing the pack tag through (so revert-all pack:laptop sweeps it). This
+# mirrors ii-post-install's ii_group_add_for pattern, adapted for the user-context
+# pack hook (we have passwordless sudo via the baked 10-wheel-nopasswd drop-in).
+_ii_mut_root() {   # _ii_mut_root <mutator-fn> [args…]
+  _sudo env HOME="$HOME" XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}" \
+    II_PACK_TAG="${II_PACK_TAG:-}" II_LIB="${II_LIB:-/usr/local/lib/ii}" \
+    bash -c 'source "${II_LIB}/mutator.sh"; fn="$1"; shift; "$fn" "$@"' _ "$@"
+  # the ledger may now be root-owned if its dir was freshly created; reclaim it.
+  _sudo chown -R "$(id -un):$(id -gn)" "${XDG_STATE_HOME:-$HOME/.local/state}/illogical-impulse" 2>/dev/null || true
+}
+
+# ── 1. power tool selection (default power-profiles-daemon) ──────────────────
+_ii_power="${II_LAPTOP_POWER:-ppd}"
+case "$_ii_power" in
+  ppd|power-profiles-daemon) _ii_power=ppd ;;
+  tlp|auto-cpufreq) : ;;
+  *) echo "!! laptop: unknown II_LAPTOP_POWER='$_ii_power' (use ppd|tlp|auto-cpufreq) — defaulting to ppd" >&2; _ii_power=ppd ;;
+esac
+
+case "$_ii_power" in
+  ppd)
+    echo ">> laptop: power tool = power-profiles-daemon (default)"
+    # ppd is already installed (a plain member). Enable its service.
+    _ii_mut_root ii_service_enable power-profiles-daemon.service \
+      || echo "!! laptop: enabling power-profiles-daemon.service failed" >&2
+    ;;
+  tlp)
+    echo ">> laptop: power tool = tlp"
+    # refuse to co-install with the other power tools (mutual exclusion).
+    if ii_conflicts_check auto-cpufreq power-profiles-daemon; then
+      _ii_lcfg=(); [[ -t 0 ]] || _ii_lcfg=(--noconfirm)
+      if _sudo pacman -S --needed "${_ii_lcfg[@]}" tlp; then
+        _ii_mut_root ii_service_enable tlp.service \
+          || echo "!! laptop: enabling tlp.service failed" >&2
+      else
+        echo "!! laptop: installing tlp failed" >&2
+      fi
+    else
+      echo "!! laptop: a conflicting power tool is already installed — leaving power management unchanged" >&2
+    fi
+    ;;
+  auto-cpufreq)
+    echo ">> laptop: power tool = auto-cpufreq (AUR)"
+    if ii_conflicts_check tlp power-profiles-daemon; then
+      command -v paru >/dev/null 2>&1 || { _ensure_paru 2>/dev/null || true; }
+      if command -v paru >/dev/null 2>&1; then
+        _ii_lcfg=(); [[ -t 0 ]] || _ii_lcfg=(--noconfirm)
+        if paru -S --needed "${_ii_lcfg[@]}" auto-cpufreq; then
+          _ii_mut_root ii_service_enable auto-cpufreq.service \
+            || echo "!! laptop: enabling auto-cpufreq.service failed" >&2
+        else
+          echo "!! laptop: building auto-cpufreq from the AUR failed" >&2
+        fi
+      else
+        echo "!! laptop: paru unavailable — cannot build auto-cpufreq" >&2
+      fi
+    else
+      echo "!! laptop: a conflicting power tool is already installed — leaving power management unchanged" >&2
+    fi
+    ;;
+esac
+
+# ── 2. fprintd fingerprint login — ii-OWNED PAM drop-in (never a vendor edit) ─
+# We create a NEW, distro-owned PAM stack fragment and record it as an owned path
+# so `iictl revert-all` / `iictl pack remove laptop` rm's it. We do NOT edit any
+# vendor /etc/pam.d/* file in place. The fragment is inert until a vendor stack
+# `@include`s it (left to the user/admin), so dropping it cannot lock anyone out.
+_ii_pam_dropin=/etc/pam.d/ii-fprintd
+if command -v fprintd-enroll >/dev/null 2>&1 || pacman -Qq fprintd >/dev/null 2>&1; then
+  if ! _sudo test -e "$_ii_pam_dropin"; then
+    _sudo tee "$_ii_pam_dropin" >/dev/null <<'PAM'
+# ii-fprintd — Illogical Impulse fprintd PAM drop-in (laptop pack).
+# DISTRO-OWNED, additive, fully removable: created by `iictl pack install laptop`
+# and deleted by `iictl pack remove laptop` / `iictl revert-all`. This file does
+# NOT edit any vendor /etc/pam.d/* stack in place. It is inert on its own; to use
+# fingerprint auth, @include it from a stack you manage, e.g. add at the top of a
+# local PAM config:
+#     auth    sufficient    pam_fprintd.so
+auth    sufficient    pam_fprintd.so
+PAM
+    # record the ii-owned drop-in as an owned path → revert `rm`s it (kind=file).
+    bash -c 'source "${II_LIB:-/usr/local/lib/ii}/ledger.sh"; ledger_record file "'"$_ii_pam_dropin"'" "'"${II_PACK_TAG:-}"'" "$(ledger_escape_path "'"$_ii_pam_dropin"'")" "ii-owned fprintd PAM drop-in"'
+    echo ">> laptop: wrote ii-owned fprintd PAM drop-in at $_ii_pam_dropin (inert until @included)"
+  else
+    echo ">> laptop: $_ii_pam_dropin already present — leaving it (not ours to overwrite)"
+  fi
+fi
+
+# ── 3. power-widget launch line — sentinel-fenced (user-owned, no sudo) ───────
+ii_lua_block_write "$HOME/.config/hypr/custom/execs.lua" laptop <<'LUA'
+-- laptop pack — power-profile widget launcher. The widget QML is framework work
+-- (not shipped by this pack); only launch it when present so a missing widget
+-- never errors. Removed by `iictl pack remove laptop` (post-remove).
+hl.on("hyprland.start", function()
+    hl.exec_cmd("sh -c 'command -v ii-power-widget >/dev/null 2>&1 && exec ii-power-widget'")
+end)
+LUA

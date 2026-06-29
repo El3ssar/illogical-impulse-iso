@@ -1,0 +1,62 @@
+#compdef iictl
+# iictl(1) zsh completion — Illogical Impulse distro CLI.
+#
+# Distro-owned system file (NOT a user dotfile): lives under
+# /usr/share/zsh/site-functions/, auto-loaded by zsh's fpath vendor mechanism.
+# Additive + reversible: deleting this file simply stops offering iictl
+# completions; it edits no user config and no upstream path.
+#
+# Plugin verbs are discovered DYNAMICALLY from /usr/local/lib/ii/iictl.d/ at
+# completion time, with each verb's #help: header as its description — drop a
+# new iictl.d/<verb> file in and it tab-completes here with no edit.
+
+_iictl() {
+  local curcontext="$curcontext" state line
+  local -a verbs
+
+  # Built-in verbs (mirror the iictl case-arms / #help: block).
+  verbs=(
+    'update:update the dots (./setup); --system upgrades repos+AUR first'
+    'doctor:health checks (venv, greetd, boot, pacman)'
+    'venv:rebuild the Quickshell python venv'
+    'welcome:show the distro welcome card'
+    'version:distro build + dots commit'
+    'help:show grouped help'
+  )
+
+  # Dynamic plugin verbs: read each iictl.d/ executable's #help: header for the
+  # description (header is "#help:<sep>verb<sep>desc").
+  local iictl_d=/usr/local/lib/ii/iictl.d
+  local f verb desc hl
+  if [[ -d $iictl_d ]]; then
+    for f in $iictl_d/*(N); do
+      [[ -x $f && -f $f ]] || continue
+      verb=${f:t}
+      hl=$(grep -m1 -E '^#help:[[:space:]]' "$f" 2>/dev/null)
+      desc=${hl#\#help:}
+      desc=${desc##[[:space:]]#}
+      # Drop the leading verb token from "verb<sep>desc".
+      desc=${desc#${verb}}
+      desc=${desc##[[:space:]]#}
+      [[ -n $desc ]] && verbs+=("${verb}:${desc}") || verbs+=("${verb}:iictl ${verb} plugin")
+    done
+  fi
+
+  _arguments -C \
+    '1: :->verb' \
+    '*::arg:->args' && return 0
+
+  case $state in
+    verb)
+      _describe -t commands 'iictl command' verbs && return 0
+      ;;
+    args)
+      case ${line[1]} in
+        update)  _values 'flag' '--system' '--check' && return 0 ;;
+        welcome) _values 'flag' '--auto' && return 0 ;;
+      esac
+      ;;
+  esac
+}
+
+_iictl "$@"

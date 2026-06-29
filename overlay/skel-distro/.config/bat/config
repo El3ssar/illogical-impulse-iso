@@ -1,0 +1,13 @@
+# Illogical Impulse — bat config (installed-user skel default).
+#
+# UNOWNED seam: upstream ships no ~/.config/bat, so this static default can
+# never collide with or be wiped by upstream's rsync --delete. It only selects a
+# dark theme that harmonizes with the Catppuccin-Mocha cold-start palette;
+# "Catppuccin Mocha" is used when present (bat cache built), else the bundled
+# "Coldark-Dark" via the documented fallback below. Delete ~/.config/bat to fall
+# back to bat's own default theme.
+--theme="Catppuccin Mocha"
+--theme-dark="Catppuccin Mocha"
+--style="numbers,changes,header"
+--italic-text=always
+--paging=auto

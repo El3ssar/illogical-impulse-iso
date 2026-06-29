@@ -17,8 +17,10 @@ _v_fail() { printf '   %sFAIL%s %s\n' "$C_R" "$C_0" "$*" >&2
             FAIL=$((FAIL+1)); fails+=("$*"); }
 
 # Pillar-6 reversibility lint — the structural checks not already inline below
-# (skel-shadow collision, optional-list validity, pack-hook hygiene, PII guard,
-# and the skel-upstream precondition). Sourced here, invoked as its own step
+# (skel-shadow collision, optional-list validity, pack-hook hygiene, the #25
+# pack Iron-Law guards [no multilib toggle / fenced custom/*.lua writes only /
+# btrfs-gated snapshot entry / no in-place vendor edit / no upstream-owned path],
+# PII guard, and the skel-upstream precondition). Sourced here, invoked as its step
 # further down; reuses the _v_* tallies above. Checks 2/3/5 of Pillar 6 already
 # live inline in their own steps (see tools/lint-additive.sh header for the map).
 # shellcheck source=../tools/lint-additive.sh
@@ -83,6 +85,10 @@ for f in etc/os-release etc/issue etc/motd \
          usr/local/bin/ii-prepare-bootloader usr/local/bin/ii-finish-systemd-boot \
          usr/local/bin/ii-verify usr/local/bin/ii-build-wheelhouse \
          usr/local/bin/iictl \
+         usr/share/fish/vendor_completions.d/iictl.fish \
+         usr/share/bash-completion/completions/iictl \
+         usr/share/zsh/site-functions/_iictl \
+         usr/share/man/man1/iictl.1.gz \
          usr/share/illogical-impulse/welcome/shell.qml \
          usr/share/applications/illogical-impulse-welcome.desktop \
          root/nvidia-official.txt root/nvidia-aur.txt \
@@ -336,6 +342,70 @@ grep -qE '^\s*- (netinstall|packages)\s*(#.*)?$' "$SETTINGS" \
   && _v_fail "settings.conf still references the removed selection flow" \
   || _v_ok "settings.conf has no selection-screen leftovers"
 
+# ── iictl webapp + install drop-ins (#21) ────────────────────────────────────
+# The webapp launcher + curated app-group picker. The generic plugin-lint
+# (exec/shebang/bash -n/#help) for EVERY iictl.d/ drop-in is asserted in the
+# "iictl.d/ plugin architecture" step; here we assert these two SPECIFICALLY
+# exist and pass it, plus the baked manifest + fallback icon, plus the
+# accent-rule-LOCATION bug-class guard (the "never write a sync-deleted dir"
+# class): the webapp accent rule must target ONLY ~/.config/hypr/custom/rules.lua
+# — never an upstream rsync --delete tree (quickshell/ii, hypr/hyprland, matugen,
+# fish/config.fish, zshrc.d), which `iictl update` wipes.
+_IID="$AIROOTFS/usr/local/lib/ii/iictl.d"
+for _drop in webapp install; do
+  _p="$_IID/$_drop"
+  if [[ ! -f "$_p" ]]; then
+    _v_fail "iictl.d/$_drop not staged (#21) — the $_drop verb is missing"
+    continue
+  fi
+  _ok=1
+  [[ -x "$_p" ]] || { _v_fail "iictl.d/$_drop not executable"; _ok=0; }
+  [[ "$(head -c2 "$_p")" == "#!" ]] || { _v_fail "iictl.d/$_drop has no shebang"; _ok=0; }
+  bash -n "$_p" 2>/dev/null || { _v_fail "iictl.d/$_drop syntax error"; _ok=0; }
+  grep -qE '^#help:[[:space:]]' "$_p" || { _v_fail "iictl.d/$_drop missing #help: header"; _ok=0; }
+  (( _ok )) && _v_ok "iictl.d/$_drop staged (exec + shebang + bash -n + #help:)"
+done
+# install MUST delegate to the ONLINE pack engine (iictl pack install), NOT an
+# on-ISO stash or [ii-extra] (PR #42 pivot: optional packs are fetched online).
+_INST="$_IID/install"
+if [[ -f "$_INST" ]]; then
+  _inst_code="$(grep -vE '^[[:space:]]*#' "$_INST")"
+  grep -q 'pack install' <<<"$_inst_code" \
+    && _v_ok "iictl install delegates to the online pack engine (iictl pack install)" \
+    || _v_fail "iictl install does not call 'iictl pack install' — it must wrap the #6 online pack engine"
+  if grep -qE 'ii-extra|pacman-ii-[a-z]+\.conf|/usr/share/illogical-impulse/[a-z]*stash|repo-add' <<<"$_inst_code"; then
+    _v_fail "iictl install references an on-ISO stash / [ii-extra] — optional packs are fetched ONLINE (PR #42); never an offline stash"
+  else
+    _v_ok "iictl install uses no on-ISO stash / [ii-extra] (online-only, per PR #42)"
+  fi
+fi
+# Baked, opt-in manifest + generic fallback icon for `iictl webapp seed`/`add`.
+[[ -f "$AIROOTFS/usr/share/illogical-impulse/webapps/defaults.list" ]] \
+  && _v_ok "webapps/defaults.list baked (opt-in curated seed list)" \
+  || _v_fail "webapps/defaults.list missing — iictl webapp seed has no manifest"
+[[ -s "$AIROOTFS/usr/share/illogical-impulse/webapps/fallback.png" ]] \
+  && _v_ok "webapps/fallback.png baked (generic webapp icon)" \
+  || _v_fail "webapps/fallback.png missing/empty — iictl webapp add has no fallback icon"
+# Accent-rule-LOCATION bug-class guard. Comments stripped first so the file's own
+# documentation of the rule (which legitimately NAMES the forbidden trees to warn
+# itself away from them) can neither satisfy nor trip the code check.
+_WAPP="$_IID/webapp"
+if [[ -f "$_WAPP" ]]; then
+  _wapp_code="$(grep -vE '^[[:space:]]*#' "$_WAPP")"
+  if grep -qE '(quickshell/ii|hypr/hyprland|/matugen/|fish/config\.fish|zshrc\.d)' <<<"$_wapp_code"; then
+    _v_fail "iictl.d/webapp writes into an upstream rsync --delete tree (quickshell/ii, hypr/hyprland, matugen, fish/config.fish, zshrc.d) — the accent rule must live ONLY in custom/rules.lua"
+  else
+    _v_ok "iictl.d/webapp touches no sync-deleted upstream tree (accent rule confined to custom/rules.lua)"
+  fi
+  grep -q 'custom/rules.lua' <<<"$_wapp_code" \
+    && _v_ok "iictl.d/webapp targets the sanctioned custom/rules.lua slot for accent rules" \
+    || _v_fail "iictl.d/webapp never references custom/rules.lua — the accent rule has no sanctioned slot"
+  # The fence write MUST go through the shared mutator, never a bespoke append.
+  grep -q 'ii_lua_block_write' <<<"$_wapp_code" \
+    && _v_ok "iictl.d/webapp fences the accent rule via the shared ii_lua_block_write mutator" \
+    || _v_fail "iictl.d/webapp does not use ii_lua_block_write — accent rules must be sentinel-fenced via the shared mutator"
+fi
+
 step "iictl update flags + embedded welcome"
 # Bug-class guards for the 'iictl update --noask' fix + the embedded welcome:
 #   • iictl must NOT pass the dropped '--noask' to upstream ./setup (it now
@@ -579,6 +649,230 @@ else
   _v_fail "iictl.d/ plugin dir not staged under usr/local/lib/ii/"
 fi
 
+step "iictl completions + grouped help + man pages (#12)"
+# Shell completions are distro-owned SYSTEM files under /usr/share/{fish,
+# bash-completion,zsh} (not user dotfiles) + baked man pages under
+# /usr/share/man/man1. They must (a) exist, (b) the bash one must bash -n
+# clean, and (c) each must do DYNAMIC iictl.d/ discovery — a frozen verb list
+# would silently drift from the actual plugin set (Iron-Rule guard).
+_FISH_C="$AIROOTFS/usr/share/fish/vendor_completions.d/iictl.fish"
+_BASH_C="$AIROOTFS/usr/share/bash-completion/completions/iictl"
+_ZSH_C="$AIROOTFS/usr/share/zsh/site-functions/_iictl"
+for _cf in "$_FISH_C" "$_BASH_C" "$_ZSH_C"; do
+  [[ -s "$_cf" ]] && _v_ok "completion present: ${_cf#"$AIROOTFS"/}" \
+                  || _v_fail "completion missing/empty: ${_cf#"$AIROOTFS"/}"
+done
+# The bash completion is the one that runs under bash → bash -n it (mirrors the
+# runtime-scripts syntax loop).
+if [[ -f "$_BASH_C" ]]; then
+  bash -n "$_BASH_C" 2>/dev/null && _v_ok "bash completion bash -n clean" \
+                                 || _v_fail "bash completion has a syntax error"
+fi
+# Dynamic-discovery guard: every completion must reference the iictl.d/ dir, so
+# new plugins tab-complete with no completion-file edit (not a frozen list).
+_disc_bad=0
+for _cf in "$_FISH_C" "$_BASH_C" "$_ZSH_C"; do
+  [[ -f "$_cf" ]] || continue
+  grep -q '/usr/local/lib/ii/iictl.d' "$_cf" \
+    || { _v_fail "${_cf#"$AIROOTFS"/} does not discover /usr/local/lib/ii/iictl.d — frozen verb list will drift"; _disc_bad=1; }
+done
+(( _disc_bad == 0 )) && _v_ok "all completions discover iictl.d/ dynamically (no frozen verb list)"
+# bash completion registers via complete -F; zsh declares #compdef.
+grep -q 'complete -F _iictl iictl' "$_BASH_C" 2>/dev/null \
+  && _v_ok "bash completion registers _iictl for iictl" \
+  || _v_fail "bash completion never registers (complete -F _iictl iictl) — tab does nothing"
+[[ "$(head -1 "$_ZSH_C" 2>/dev/null)" == '#compdef iictl' ]] \
+  && _v_ok "zsh completion has #compdef iictl header" \
+  || _v_fail "zsh _iictl missing the #compdef iictl header — zsh won't load it"
+# Grouped help + --version aliases in the core.
+grep -q 'Core commands:' "$AIROOTFS/usr/local/bin/iictl" \
+  && grep -q 'Feature commands (plugins):' "$AIROOTFS/usr/local/bin/iictl" \
+  && _v_ok "iictl help prints grouped sections (Core / Feature plugins)" \
+  || _v_fail "iictl help dropped the grouped section headers"
+grep -qE 'version\|--version\|-V' "$AIROOTFS/usr/local/bin/iictl" \
+  && _v_ok "iictl --version / -V alias version" \
+  || _v_fail "iictl missing --version / -V aliases"
+# Baked man pages: top-level + non-empty roff under each gz.
+_MAN1="$AIROOTFS/usr/share/man/man1"
+if [[ -f "$_MAN1/iictl.1.gz" ]]; then
+  if command -v gzip >/dev/null 2>&1 && gzip -dc "$_MAN1/iictl.1.gz" 2>/dev/null | grep -q '\.TH IICTL 1'; then
+    _v_ok "iictl.1.gz baked + non-empty roff (.TH IICTL)"
+  else
+    _v_fail "iictl.1.gz empty or not roff (.TH IICTL header missing)"
+  fi
+else
+  _v_fail "iictl.1.gz man page not baked under usr/share/man/man1/"
+fi
+# One iictl-<verb>.1.gz per plugin, each non-empty.
+_man_plug=0 _man_bad=0
+if [[ -d "$_IID" ]]; then
+  for _p in "$_IID"/*; do
+    [[ -f "$_p" && -x "$_p" ]] || continue
+    _v="$(basename "$_p")"
+    _mg="$_MAN1/iictl-$_v.1.gz"
+    _man_plug=$((_man_plug+1))
+    if [[ -f "$_mg" ]] && gzip -dc "$_mg" 2>/dev/null | grep -q '\.TH'; then :; else
+      _v_fail "missing/empty man page for plugin '$_v' ($_mg)"; _man_bad=1
+    fi
+  done
+fi
+(( _man_bad == 0 )) && _v_ok "$_man_plug per-plugin man page(s) baked + non-empty"
+step "nvim chooser plugin (NVIM-01)"
+# NVIM-01 (#17): the Neovim-distro chooser is a survive-path iictl.d/ drop-in that
+# clones a chosen distro ONLINE at a pinned rev and owns the unowned nvim seam
+# (~/.config/nvim + ~/.local/{share,state}/nvim) reversibly. Three bug-class
+# guards beyond the generic plugin hygiene (exec/shebang/bash -n/#help already
+# asserted above): (a) the plugin is actually staged (a named guard so it can
+# never silently vanish from the image); (b) NOTHING nvim is baked into skel —
+# the baked default MUST stay vanilla (empty ~/.config/nvim); (c) the plugin
+# owns DIRECTORY trees, so revert-all's path|file inverse MUST rm -rf (plain rm -f
+# errors on a dir → the tree would survive a revert and the Iron Law would break).
+NVP="$AIROOTFS/usr/local/lib/ii/iictl.d/nvim"
+if [[ ! -f "$NVP" ]]; then
+  _v_fail "iictl.d/nvim not staged — the Neovim-distro chooser is missing"
+else
+  # (a) named existence + exec/shebang/bash -n/#help (mirrors the generic loop so
+  #     a regression in THIS plugin is attributed to NVIM-01, not a generic fail).
+  _nv_bad=0
+  [[ -x "$NVP" ]] || { _v_fail "iictl.d/nvim not executable (mkarchiso cp strips mode — chmod at stage)"; _nv_bad=$((_nv_bad+1)); }
+  [[ "$(head -c2 "$NVP")" == "#!" ]] || { _v_fail "iictl.d/nvim has no shebang"; _nv_bad=$((_nv_bad+1)); }
+  bash -n "$NVP" 2>/dev/null || { _v_fail "iictl.d/nvim syntax error"; _nv_bad=$((_nv_bad+1)); }
+  grep -qE '^#help:[[:space:]]' "$NVP" || { _v_fail "iictl.d/nvim missing #help: header (won't show in iictl help)"; _nv_bad=$((_nv_bad+1)); }
+  _nv_code="$(grep -vE '^[[:space:]]*#' "$NVP")"
+  # The chooser must clone the distro at a PINNED rev (never track HEAD) and
+  # never edit an upstream-owned path. A git fetch of a pinned ref is the tell.
+  grep -qE 'git[[:space:]]+fetch' <<<"$_nv_code" \
+    || { _v_fail "iictl.d/nvim never git-fetches — it must clone the chosen distro online (NVIM-01)"; _nv_bad=$((_nv_bad+1)); }
+  grep -qE 'ledger_record' <<<"$_nv_code" \
+    || { _v_fail "iictl.d/nvim never calls ledger_record — a 'set' would be unrevertable (NVIM-01)"; _nv_bad=$((_nv_bad+1)); }
+  (( _nv_bad == 0 )) && _v_ok "iictl.d/nvim staged: exec + shebang + bash -n + #help, pinned online clone, ledger-recorded (NVIM-01)"
+fi
+
+# (b) baked default stays vanilla: NO nvim config may ship in either skel tree.
+#     Upstream ships zero ~/.config/nvim (the unowned seam); the chooser must
+#     leave it empty by default so a fresh user's `nvim` opens bare. A stray
+#     skel-distro/.config/nvim (or share/state) would bake an opinionated editor
+#     into every install — the exact thing #17 refuses (and a skel-shadow risk).
+_nv_skel_bad=0
+for _sk in "$AIROOTFS/etc/skel" "$AIROOTFS/etc/skel-upstream" "$OVERLAY/skel-distro" "$OVERLAY/skel-live"; do
+  [[ -d "$_sk" ]] || continue
+  for _np in .config/nvim .local/share/nvim .local/state/nvim; do
+    if [[ -e "$_sk/$_np" ]]; then
+      _v_fail "NVIM-01: $_sk/$_np exists — no nvim config may be baked into skel (the baked default must be vanilla/empty)"
+      _nv_skel_bad=$((_nv_skel_bad+1))
+    fi
+  done
+done
+(( _nv_skel_bad == 0 )) && _v_ok "NVIM-01: no nvim config baked into any skel tree (baked default is vanilla; no skel-shadow)"
+
+# Focused offline self-test: the chooser's no-network mechanics (refusal gate,
+# backup, stamp, ledger record, restore round-trip, theme). It runs the REAL
+# plugin against a throwaway $HOME with II_LIB relocated — no root, no network,
+# no /usr/local install — so it is safe to run inline here (unlike the nspawn
+# round-trip). A regression in the reversible-state machine reds the build.
+_NV_TEST="$ROOT/tests/nvim-chooser.sh"
+if [[ ! -f "$_NV_TEST" ]]; then
+  _v_fail "NVIM-01: tests/nvim-chooser.sh missing — the chooser self-test is gone"
+elif ! bash -n "$_NV_TEST" 2>/dev/null; then
+  _v_fail "NVIM-01: tests/nvim-chooser.sh has a syntax error"
+elif bash "$_NV_TEST" >/dev/null 2>&1; then
+  _v_ok "NVIM-01: tests/nvim-chooser.sh self-test passes (refusal gate, backup, stamp, ledger, restore, theme)"
+else
+  _v_fail "NVIM-01: tests/nvim-chooser.sh self-test FAILED — run it directly to see which assertion broke"
+fi
+
+# (c) revert-all owns directory trees → must rm -rf, not rm -f, in the path|file
+#     inverse. Comments stripped so the historic-bug note above the line can't
+#     satisfy/trip this grep.
+_RA_NV="$AIROOTFS/usr/local/lib/ii/iictl.d/revert-all"
+if [[ -f "$_RA_NV" ]]; then
+  _ra_nv_code="$(grep -vE '^[[:space:]]*#' "$_RA_NV")"
+  if grep -qE 'rm[[:space:]]+-[a-zA-Z]*r[a-zA-Z]*f?[[:space:]]+"\$p"' <<<"$_ra_nv_code" \
+     || grep -qE 'rm[[:space:]]+-rf[[:space:]]+"\$p"' <<<"$_ra_nv_code"; then
+    _v_ok "NVIM-01: revert-all's path|file inverse rm -rf's owned paths (removes a dir-owning domain's tree, e.g. nvim)"
+  else
+    _v_fail "NVIM-01: revert-all's path|file inverse still uses rm -f \"\$p\" — a directory owned_path (e.g. ~/.config/nvim) survives a revert (Iron Law break)"
+  fi
+fi
+step "update channels + migrations + docs + config (#27)"
+# This feature adds channel-pinned updates (stable=recorded DOTS_COMMIT,
+# edge=HEAD) plus three drop-ins. The generic plugin lint (exec/shebang/bash -n/
+# #help) is already asserted above; these add the feature-specific bug-class
+# guards.
+#
+# (a) ANTI-ROT — the stable pin must equal the submodule HEAD at build time.
+# DOTS_COMMIT in the built release stamp IS the stable channel pin (iictl update
+# checks it out). If the stamp ever drifts from the submodule the pin "rots" —
+# stable would track a commit the ISO was never built from. 70-assets.sh derives
+# it from `git -C $DOTS rev-parse --short HEAD`, so they must match here.
+_REL_STAMP="$AIROOTFS/etc/$DISTRO_ID/release"
+if [[ ! -f "$_REL_STAMP" ]]; then
+  _v_fail "release stamp not staged ($_REL_STAMP) — anti-rot pin check can't run"
+else
+  _stamp_pin="$(awk -F= '/^DOTS_COMMIT=/{print $2; exit}' "$_REL_STAMP")"
+  _sub_head="$(git -C "$DOTS" rev-parse --short HEAD 2>/dev/null)"
+  if [[ -z "$_stamp_pin" ]]; then
+    _v_fail "release stamp has no DOTS_COMMIT — the stable pin is missing"
+  elif [[ -z "$_sub_head" ]]; then
+    _v_warn "could not read submodule HEAD ($DOTS) — anti-rot pin check skipped"
+  elif [[ "$_stamp_pin" == "$_sub_head" ]]; then
+    _v_ok "stable pin honest: stamp DOTS_COMMIT ($_stamp_pin) == submodule HEAD (#27 anti-rot)"
+  else
+    _v_fail "stable pin ROT: stamp DOTS_COMMIT ($_stamp_pin) != submodule HEAD ($_sub_head) — re-run just prepare after a submodule bump"
+  fi
+  # (b) the stamp must carry CHANNEL= (the channel marker iictl reads/flips).
+  grep -q '^CHANNEL=' "$_REL_STAMP" \
+    && _v_ok "release stamp carries CHANNEL= (channel marker present)" \
+    || _v_fail "release stamp missing CHANNEL= — iictl update channels have no marker (#27)"
+fi
+# (c) cmd_update must implement the channel switch (localized to the built-in).
+_IICTL_BIN="$AIROOTFS/usr/local/bin/iictl"
+if [[ -f "$_IICTL_BIN" ]]; then
+  grep -q -- '--channel' "$_IICTL_BIN" \
+    && _v_ok "iictl cmd_update implements --channel (stable|edge)" \
+    || _v_fail "iictl has no --channel handling — update channels missing (#27)"
+else
+  _v_fail "iictl not staged — cannot check the channel extension"
+fi
+# (d) the three new drop-ins exist (generic lint covers exec/shebang/bash -n/
+# #help; here we assert presence so a missing verb fails loudly).
+for _v27 in migrate docs config; do
+  _p27="$AIROOTFS/usr/local/lib/ii/iictl.d/$_v27"
+  [[ -f "$_p27" && -x "$_p27" ]] \
+    && _v_ok "iictl.d/$_v27 staged + executable (#27)" \
+    || _v_fail "iictl.d/$_v27 missing/not executable — the $_v27 verb won't resolve (#27)"
+done
+# (e) baked content: migrations dir + offline quickstart, distro-owned /usr/share.
+_MIGDIR="$AIROOTFS/usr/share/$DISTRO_ID/migrations"
+[[ -d "$_MIGDIR" ]] \
+  && _v_ok "migrations dir baked ($_MIGDIR)" \
+  || _v_fail "migrations dir not baked at $_MIGDIR (#27)"
+_QSTART="$AIROOTFS/usr/share/$DISTRO_ID/docs/quickstart.md"
+[[ -f "$_QSTART" ]] \
+  && _v_ok "offline quickstart baked ($_QSTART)" \
+  || _v_fail "docs/quickstart.md not baked at $_QSTART (#27)"
+# (f) UPSTREAM-PATH GUARD — none of the new files may write an upstream-owned
+# path. Channel/pin/migration/config state lives ONLY in distro-owned
+# /etc/$DISTRO_ID/release + /usr/share/$DISTRO_ID/ and user-owned
+# $XDG_STATE_HOME/illogical-impulse/. The upstream-owned rice config dirs
+# (~/.config/{quickshell/ii,hypr/hyprland,matugen,zshrc.d}) must never be a write
+# TARGET. Match write idioms ('> path', 'tee path', 'install … path',
+# 'sed -i … path') against those dirs; comments stripped first so the doc prose
+# can't trip it.
+_u_bad=0
+for _f27 in "$AIROOTFS/usr/local/lib/ii/iictl.d/migrate" \
+            "$AIROOTFS/usr/local/lib/ii/iictl.d/docs" \
+            "$AIROOTFS/usr/local/lib/ii/iictl.d/config" \
+            "$_IICTL_BIN"; do
+  [[ -f "$_f27" ]] || continue
+  _code27="$(grep -vE '^[[:space:]]*#' "$_f27")"
+  if grep -qE '(>>?|tee|install|cp|mv|sed -i)[^|&;]*\.config/(quickshell/ii|hypr/hyprland|matugen|zshrc\.d)' <<<"$_code27"; then
+    _v_fail "$(basename "$_f27") writes an upstream-owned rice path (.config/{quickshell/ii,hypr,matugen,zshrc.d}) — #27 forbids it"
+    _u_bad=$((_u_bad+1))
+  fi
+done
+(( _u_bad == 0 )) && _v_ok "channels/migrate/docs/config write no upstream-owned path (#27 additive guard)"
+
 step "revert-all reversibility engine"
 # revert-all (#4) replays the ledger in REVERSE to restore vanilla upstream. Its
 # bug-class guard (Iron Rule): it MUST strip fenced custom/*.lua blocks through
@@ -605,6 +899,127 @@ else
   else
     _v_ok "revert-all has no bespoke custom/*.lua stripping (no rm -r / sed against a slot)"
   fi
+fi
+
+step "iictl theme flavor engine + §9 reversibility seam (THEME-01)"
+# THEME-01: the theming domain (#16) drives upstream's Material You pipeline
+# rather than forking it, and bakes static themed defaults only into UNOWNED
+# paths. Four bug-class guards, each a real reversibility/Iron-Law trap:
+#   (a) NO overlay/skel-distro file may land in an upstream rsync --delete dir —
+#       it would be silently WIPED on the next `iictl update`, so it is never a
+#       reliable default and (worse) masks the real upstream file until then.
+#   (b) NO distro file may ship/edit matugen's config.toml or add a distro
+#       `[templates.*]` block: ~/.config/matugen is rsync --delete'd, so any
+#       template we add there vanishes on update — the colour pipeline must be
+#       driven via switchwall.sh's public flags, not by patching matugen config.
+#   (c) every baked flavor seed (themes/*.conf) must parse and declare a valid
+#       #RRGGBB seed — a seedless flavor would `die` at `set` time on a user.
+#   (d) the theme plugin must DRIVE switchwall.sh (no forked colour logic) and
+#       the revert engine must know the theme-accent inverse (--color clear), or
+#       `iictl revert-all` could not restore the empty, never-set accent.
+_SKD="$OVERLAY/skel-distro"
+# (a) sync-deleted dirs (mirrors 30-skel.sh's `rsync -a --delete` set + the
+# broader read-only seam from the Iron Law). A skel-distro file under any of
+# these is wiped on update — refuse it.
+_th_sync_deleted=(
+  ".config/quickshell" ".config/matugen" ".config/fontconfig"
+  ".config/hypr/hyprland" ".config/hypr/hyprlock" ".config/zshrc.d"
+)
+if [[ -d "$_SKD" ]]; then
+  _th_leak=0
+  for _sd in "${_th_sync_deleted[@]}"; do
+    if [[ -e "$_SKD/$_sd" ]]; then
+      _v_fail "skel-distro ships files under '$_sd' — an upstream rsync --delete path; they are WIPED on 'iictl update' (THEME-01a)"
+      _th_leak=$((_th_leak+1))
+    fi
+  done
+  # fish is --delete EXCEPT conf.d (the sanctioned ii-*.fish seam) — flag any
+  # skel-distro fish file that is NOT under conf.d.
+  if [[ -d "$_SKD/.config/fish" ]]; then
+    while IFS= read -r _ff; do
+      [[ "$_ff" == *"/.config/fish/conf.d/"* ]] && continue
+      _v_fail "skel-distro fish file outside conf.d ('${_ff#"$_SKD"/}') — fish/ is rsync --delete'd except conf.d (THEME-01a)"
+      _th_leak=$((_th_leak+1))
+    done < <(find "$_SKD/.config/fish" -type f 2>/dev/null)
+  fi
+  (( _th_leak == 0 )) && _v_ok "no skel-distro file lands in an upstream rsync --delete dir (THEME-01a)"
+else
+  _v_warn "overlay/skel-distro missing — THEME-01a skipped"
+fi
+# (b) we must NOT ship/edit matugen config or add a distro [templates.*] block
+# (anywhere in overlay/ — airootfs or skel). Upstream owns matugen entirely.
+_th_matugen=0
+while IFS= read -r _mf; do
+  _v_fail "distro ships/edits a matugen config.toml ('${_mf#"$OVERLAY"/}') — ~/.config/matugen is rsync --delete'd; drive colours via switchwall.sh, never matugen config (THEME-01b)"
+  _th_matugen=$((_th_matugen+1))
+done < <(find "$OVERLAY" -type f -path '*/matugen/config.toml' 2>/dev/null)
+if grep -rqsF '[templates.' "$OVERLAY" 2>/dev/null; then
+  _v_fail "a distro file introduces a '[templates.' matugen block under overlay/ — forbidden (matugen is rsync --delete'd) (THEME-01b)"
+  _th_matugen=$((_th_matugen+1))
+fi
+(( _th_matugen == 0 )) && _v_ok "no distro matugen config / [templates.*] block (colours driven via switchwall.sh only) (THEME-01b)"
+# (c) every baked flavor seed parses + declares a valid #RRGGBB seed.
+_THEMES="$AIROOTFS/usr/share/illogical-impulse/themes"
+if [[ -d "$_THEMES" ]]; then
+  shopt -s nullglob; _th_confs=("$_THEMES"/*.conf); shopt -u nullglob
+  if (( ${#_th_confs[@]} == 0 )); then
+    _v_fail "no flavor seeds staged at usr/share/illogical-impulse/themes/ — 'iictl theme list' would be empty (THEME-01c)"
+  else
+    _th_seed_bad=0
+    for _tc in "${_th_confs[@]}"; do
+      _ts="$(grep -E '^[[:space:]]*seed[[:space:]]*=' "$_tc" | tail -n1 | cut -d= -f2- | tr -d '[:space:]')"
+      if [[ "$_ts" =~ ^#?[A-Fa-f0-9]{6}$ ]]; then
+        :
+      else
+        _v_fail "flavor seed $(basename "$_tc") has no valid #RRGGBB seed= (got '${_ts:-<none>}') (THEME-01c)"
+        _th_seed_bad=$((_th_seed_bad+1))
+      fi
+    done
+    (( _th_seed_bad == 0 )) && _v_ok "${#_th_confs[@]} flavor seed(s): each declares a valid #RRGGBB seed (THEME-01c)"
+  fi
+else
+  _v_fail "themes dir not staged (usr/share/illogical-impulse/themes/) — the flavor catalog is missing (THEME-01c)"
+fi
+# (d) the theme plugin DRIVES switchwall.sh (no forked colour logic) + carries a
+# #spec: header; the revert engine knows the theme-accent inverse. Generic
+# exec/shebang/bash -n/#help: are covered by the "iictl.d/ plugin architecture"
+# step; this adds the domain-specific ones. Comments stripped first so the
+# header prose can neither satisfy nor trip the code greps.
+_THP="$AIROOTFS/usr/local/lib/ii/iictl.d/theme"
+if [[ ! -f "$_THP" ]]; then
+  _v_fail "iictl.d/theme not staged — the flavor engine is missing (THEME-01d)"
+else
+  _thp_code="$(grep -vE '^[[:space:]]*#' "$_THP")"
+  grep -qE 'switchwall\.sh' <<<"$_thp_code" \
+    && _v_ok "theme plugin drives upstream switchwall.sh (no forked colour logic) (THEME-01d)" \
+    || _v_fail "theme plugin never references switchwall.sh — it must DRIVE upstream's pipeline, not duplicate colour logic (THEME-01d)"
+  grep -qE '^#spec:[[:space:]]' "$_THP" \
+    && _v_ok "theme plugin advertises a #spec: header (drives 'iictl tweak theme')" \
+    || _v_fail "theme plugin missing #spec: header — 'iictl tweak' won't list it (THEME-01d)"
+  # The plugin must NOT write an upstream-owned colour path itself (it only RUNS
+  # switchwall.sh + READS config.json). A direct write to matugen/quickshell-ii/
+  # the generated STATE dir would be an Iron-Law breach.
+  if grep -qE '>[[:space:]]*"?[^"]*(\.config/matugen|\.config/quickshell/ii|generated/(colors\.json|material_colors))' <<<"$_thp_code"; then
+    _v_fail "theme plugin appears to WRITE an upstream-owned colour path (matugen/quickshell-ii/generated) — only switchwall.sh may (THEME-01d)"
+  else
+    _v_ok "theme plugin writes no upstream-owned colour path (only runs switchwall.sh) (THEME-01d)"
+  fi
+fi
+# the revert engine must know how to undo a theme accent (clear it).
+if [[ -f "$RA" ]]; then
+  _ra_theme="$(grep -vE '^[[:space:]]*#' "$RA")"
+  grep -qE 'theme-accent' <<<"$_ra_theme" && grep -qE -- '--color clear' <<<"$_ra_theme" \
+    && _v_ok "revert-all knows the theme-accent inverse (switchwall.sh --color clear → never-set) (THEME-01d)" \
+    || _v_fail "revert-all has no theme-accent inverse — 'iictl revert-all' can't clear a set flavor accent (THEME-01d)"
+fi
+# the opt-in recolour watcher is the SINGLE owner of the hook, off by default:
+# its autostart fence must NOT be baked into the skel custom/execs.lua (only
+# written at runtime by `iictl theme watch enable`).
+_SKEL_EXECS="$AIROOTFS/etc/skel/.config/hypr/custom/execs.lua"
+if [[ -f "$_SKEL_EXECS" ]] && grep -qF 'theme-recolor' "$_SKEL_EXECS"; then
+  _v_fail "the recolour-watcher fence ('theme-recolor') is baked into skel execs.lua — it must be OFF by default (opt-in via 'iictl theme watch enable') (THEME-01d)"
+else
+  _v_ok "recolour watcher is off by default (no theme-recolor fence baked into skel execs.lua) (THEME-01d)"
 fi
 
 step "reversibility round-trip e2e test (TEST-02)"
@@ -776,6 +1191,29 @@ else
   done
   if (( ${#_pk_names[@]} > 0 && _pk_collide == 0 )); then
     _v_ok "optional pack names are prefix-collision-free (${#_pk_names[@]} pack(s)) — per-pack revert stays exact"
+  fi
+fi
+
+# (f) mise: runtime-directive wiring (#19). lang-* packs mix pacman names with
+# `mise:<tool>` directive lines the engine applies as `mise use -g` and reverses
+# as `mise use -gu`; the directive token must NEVER reach the pacman/paru
+# classifier. Guard the three load-bearing halves so a future engine edit can't
+# silently regress the lang packs into "mise:rust treated as a package".
+if [[ -f "$PK" ]]; then
+  _pk_code3="$(grep -vE '^[[:space:]]*#' "$PK")"
+  # _pack_members must skip `mise:` lines (else they are sent to pacman -Si).
+  grep -qE "mise:" <<<"$_pk_code3" \
+    && _v_ok "pack engine parses mise: runtime directives (kept out of the pacman classifier) (#19)" \
+    || _v_fail "pack engine never references mise: — mise:<tool> lines would be mis-classified as packages (#19)"
+  # the engine applies `mise use -g` (install) somewhere.
+  grep -qE 'mise[[:space:]]+use[[:space:]]+-g' <<<"$_pk_code3" \
+    && _v_ok "pack engine applies mise: directives via 'mise use -g' (#19)" \
+    || _v_fail "pack engine declares no 'mise use -g' application for mise: directives (#19)"
+  # the inverse lives in revert-all (the single ledger-replay owner), not the engine.
+  if [[ -f "$RA" ]]; then
+    grep -qE 'mise[[:space:]]+use[[:space:]]+-gu' <<<"$_ra_code" \
+      && _v_ok "revert-all reverses mise: directives via 'mise use -gu' (kind=mise inverse) (#19)" \
+      || _v_fail "revert-all has no 'mise use -gu' inverse — a mise: directive would not be reversible (#19)"
   fi
 fi
 
@@ -957,6 +1395,142 @@ if [[ -d "$_TUI_LIB/iictl.d" ]]; then
       || { _v_fail "iictl.d/$(basename "$_p") advertises #spec: but has no --spec handler — 'iictl tweak' would lie"; _spec_bad=$((_spec_bad+1)); }
   done
   (( _spec_bad == 0 )) && _v_ok "every #spec: advertiser answers --spec (tweak listing is truthful)"
+fi
+
+step "iictl plugins multi-source list manager (#48)"
+# Bug-class guards for the reusable multi-source list manager (#48): the iictl
+# plugins verb + the sources.sh substrate + the antidote/ohmyzsh/git resolver
+# drop-ins. It sits behind #47's `list` control and edits an ii-OWNED manifest;
+# the Iron-Law-critical invariants are (a) the manifest target is an unowned/
+# ii-namespaced path (never an upstream-owned one), (b) sources are drop-in
+# discovered (no hardcoded list — a new ecosystem is one file), (c) every
+# add/remove routes through the shared ledger (no bespoke writer), and (d) the
+# resolvers + substrate parse cleanly. The single-picker guard (no second
+# fzf/skim) and the spec advertise↔answer coupling are already enforced for every
+# iictl.d/ plugin by the "#47" step above (which auto-covers `plugins`).
+_PL="$AIROOTFS/usr/local/lib/ii/iictl.d/plugins"
+_SRCLIB="$AIROOTFS/usr/local/lib/ii/sources.sh"
+_SRCD="$AIROOTFS/usr/local/lib/ii/sources.d"
+if [[ ! -f "$_PL" || ! -f "$_SRCLIB" ]]; then
+  _v_fail "iictl.d/plugins and/or sources.sh not staged — the multi-source list manager is missing (#48)"
+else
+  # (a) the substrate parses + is staged on the survive-path (kept by ii-verify,
+  #     like ledger.sh/mutator.sh, so the installed system's manager works).
+  bash -n "$_SRCLIB" 2>/dev/null \
+    && _v_ok "sources.sh substrate staged + bash -n clean" \
+    || _v_fail "sources.sh has a syntax error — the list manager substrate won't load"
+
+  # (b) MANIFEST is an ii-owned/UNOWNED path (the skel-shadow invariant): the
+  #     manager must never write an upstream-owned path. Assert the configured
+  #     manifest sits under an ii-namespaced/unowned slot (.config/zsh — NOT the
+  #     rsync --delete'd .config/zshrc.d, NOT any upstream-shipped file). Derived
+  #     from the literal default in the plugin so a future retarget is caught.
+  _pl_code="$(grep -vE '^[[:space:]]*#' "$_PL")"
+  _manifest_def="$(grep -oE 'II_PLUGINS_MANIFEST:-[^}]*' "$_PL" | head -n1 | sed 's/^II_PLUGINS_MANIFEST:-//')"
+  if [[ "$_manifest_def" == *'.config/zsh/'* && "$_manifest_def" != *'.config/zshrc.d/'* ]]; then
+    _v_ok "plugins manifest defaults to an ii-owned/unowned slot (\$HOME/.config/zsh/…, not the rsync --delete'd zshrc.d)"
+  else
+    _v_fail "plugins manifest default ('$_manifest_def') is not the ii-owned .config/zsh slot — it must not be an upstream-owned/rsync-deleted path (skel-shadow invariant, #48)"
+  fi
+  # Cross-check against the same upstream rsync --delete dir set the skel-shadow
+  # lint uses: the manifest's skel-relative dir must NOT be one of them.
+  case "$_manifest_def" in
+    *'.config/quickshell/'*|*'.config/matugen/'*|*'.config/fish/'*|\
+    *'.config/zshrc.d/'*|*'.config/hypr/hyprland/'*|*'.config/fontconfig/'*)
+      _v_fail "plugins manifest lands in an upstream rsync --delete dir — wiped on 'iictl update' (#48)" ;;
+    *) _v_ok "plugins manifest is outside every upstream rsync --delete dir (survives 'iictl update')" ;;
+  esac
+
+  # (c) every manifest mutation routes through the shared ledger: the manager must
+  #     call ii_manifest_baseline BEFORE add/remove (so even the first edit is
+  #     reversible), and must NOT hand-write a ledger row or open-code the file
+  #     restore (it delegates revert to the single shared revert-all engine).
+  grep -q 'ii_manifest_baseline' <<<"$_pl_code" \
+    && _v_ok "iictl plugins records the manifest baseline (ii_manifest_baseline) before mutating — first edit is reversible" \
+    || _v_fail "iictl plugins never calls ii_manifest_baseline — an add/remove would be unrevertable (#48)"
+  grep -q 'ledger_record' <<<"$_pl_code" \
+    && _v_fail "iictl plugins calls ledger_record directly — recording must go through the shared sources.sh baseline recorder, not a bespoke writer (#48)" \
+    || _v_ok "iictl plugins records nothing itself (delegates to sources.sh ii_manifest_baseline)"
+  grep -qE 'revert-all|iictl[[:space:]]+revert' <<<"$_pl_code" \
+    && _v_ok "iictl plugins --revert delegates to the single shared revert-all engine (no re-implemented replay)" \
+    || _v_fail "iictl plugins does not delegate revert to revert-all — domains must NOT re-implement ledger replay (#48)"
+  # sources.sh's baseline recorder must reuse EXISTING revert-all inverses
+  # (skel-shadow restore / file rm), never invent a new ledger kind revert-all
+  # can't dispatch.
+  _src_code="$(grep -vE '^[[:space:]]*#' "$_SRCLIB")"
+  if grep -qE 'ledger_record[[:space:]]+(skel-shadow|file)' <<<"$_src_code"; then
+    _v_ok "sources.sh baseline reuses existing revert-all inverses (skel-shadow restore / file rm) — no new ledger kind"
+  else
+    _v_fail "sources.sh baseline does not record a skel-shadow/file row — revert-all could not restore the curated baseline (#48)"
+  fi
+
+  # (d) sources are DROP-IN discovered: no hardcoded source list in the manager or
+  #     substrate (a new ecosystem must be exactly one file). The manager must
+  #     enumerate via ii_sources_list and dispatch via _ii_source_call — it must
+  #     not switch/case on literal source names.
+  grep -q 'ii_sources_list' <<<"$_pl_code" \
+    && _v_ok "iictl plugins enumerates sources via ii_sources_list (drop-in discovery, no hardcoded list)" \
+    || _v_fail "iictl plugins does not use ii_sources_list — sources would not be drop-in discoverable (#48)"
+  if grep -qE 'case[[:space:]]+"?\$(source|src)"?[[:space:]]+in' <<<"$_pl_code"; then
+    _v_fail "iictl plugins switch/cases on literal source names — sources must be drop-in, not hardcoded (#48)"
+  else
+    _v_ok "iictl plugins hardcodes no source name (dispatch is purely drop-in via _ii_source_call)"
+  fi
+
+  # (e) the resolver drop-ins: each is a sourced fragment (NO shebang/+x needed —
+  #     like pack hooks) that bash -n parses and defines ii_source_<name>_candidates
+  #     (the one mandatory hook; add/remove/current fall through to the shared
+  #     manifest helpers). At least the three #48 resolvers ship.
+  if [[ ! -d "$_SRCD" ]]; then
+    _v_fail "sources.d/ resolver dir not staged — no plugin sources available (#48)"
+  else
+    _res_n=0; _res_bad=0
+    for _r in "$_SRCD"/*; do
+      [[ -f "$_r" ]] || continue
+      _rn="$(basename "$_r")"
+      _res_n=$((_res_n+1))
+      bash -n "$_r" 2>/dev/null || { _v_fail "sources.d/$_rn syntax error (sourced fragment — would break 'iictl plugins')"; _res_bad=$((_res_bad+1)); }
+      grep -qE "^[[:space:]]*ii_source_${_rn}_candidates[[:space:]]*\(\)" "$_r" \
+        || { _v_fail "sources.d/$_rn missing ii_source_${_rn}_candidates() — the one mandatory resolver hook (#48)"; _res_bad=$((_res_bad+1)); }
+    done
+    for _want in antidote ohmyzsh git; do
+      [[ -f "$_SRCD/$_want" ]] || { _v_fail "sources.d/$_want resolver not staged — #48 requires antidote/ohmyzsh/git"; _res_bad=$((_res_bad+1)); }
+    done
+    (( _res_bad == 0 )) && _v_ok "$_res_n source resolver(s) staged: bash -n clean + each defines ii_source_<name>_candidates (antidote/ohmyzsh/git present)"
+  fi
+
+  # (f) live reference emitter: `iictl plugins --spec` must produce a valid #47
+  #     chooser spec (a source-driven `list` control), proving the contract
+  #     end-to-end on this very plugin — same schema validator the pack emitter
+  #     uses. No root/network: run against a throwaway lib+manifest fixture.
+  if command -v python3 >/dev/null 2>&1 && [[ -n "${_SPEC_PY:-}" ]]; then
+    if [[ -x "$_PL" ]]; then
+      _pl_fix="$(mktemp -d)"
+      mkdir -p "$_pl_fix/lib/sources.d" "$_pl_fix/home/.config/zsh" "$_pl_fix/state"
+      # minimal substrate the plugin sources at runtime
+      for _need in iictl-common.sh ledger.sh sources.sh; do
+        cp "$AIROOTFS/usr/local/lib/ii/$_need" "$_pl_fix/lib/$_need" 2>/dev/null
+      done
+      cp "$_SRCD"/* "$_pl_fix/lib/sources.d/" 2>/dev/null
+      printf 'zsh-users/zsh-autosuggestions\n' > "$_pl_fix/home/.config/zsh/ii-plugins.txt"
+      if _pl_spec="$(II_LIB="$_pl_fix/lib" II_SOURCES_D="$_pl_fix/lib/sources.d" \
+                     HOME="$_pl_fix/home" XDG_STATE_HOME="$_pl_fix/state" \
+                     II_PLUGINS_MANIFEST="$_pl_fix/home/.config/zsh/ii-plugins.txt" \
+                     bash "$_PL" --spec 2>/dev/null)" \
+         && printf '%s' "$_pl_spec" | python3 -c "$_SPEC_PY" 2>/dev/null \
+         && grep -q '"type":"list"' <<<"$_pl_spec" \
+         && grep -q '"sources":\[' <<<"$_pl_spec"; then
+        _v_ok "iictl plugins --spec emits a valid source-driven list chooser spec (reference consumer, end-to-end, #48)"
+      else
+        _v_fail "iictl plugins --spec output fails the chooser-contract schema or is not a source-driven list (#48)"
+      fi
+      rm -rf "$_pl_fix"
+    else
+      _v_fail "iictl.d/plugins not executable — the --spec reference emitter can't run (#48)"
+    fi
+  else
+    _v_warn "skipped iictl plugins --spec schema check (python3 unavailable or schema not set up)"
+  fi
 fi
 
 step "live mkinitcpio"
@@ -1803,10 +2377,12 @@ fi
 step "additive/reversibility lint"
 # Pillar 6 (the structural checks): skel-upstream precondition + skel-shadow
 # collision, packages/optional/*.list validity (no double-bake), pack
-# post-add/post-remove hook hygiene (bash -n + mutator inverse symmetry,
-# IMMUNE-03), and the PII guard. '|| true' so an unexpected non-zero can't abort
-# before the summary (the FAIL tally, not lint_additive's return code, is what
-# gates the build).
+# post-add/post-remove hook hygiene (bash -n + post-add↔post-remove pairing +
+# mutator inverse symmetry, IMMUNE-03), the #25 pack Iron-Law guards (no multilib
+# toggle / fenced custom/*.lua writes only / btrfs-gated snapshot entry / no
+# in-place vendor edit / no upstream-owned path), and the PII guard. '|| true' so
+# an unexpected non-zero can't abort before the summary (the FAIL tally, not
+# lint_additive's return code, is what gates the build).
 lint_additive || true
 
 step "docs drift guard (DOC-01)"

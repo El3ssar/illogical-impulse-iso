@@ -1,0 +1,48 @@
+# virt/post-add — SOURCED by the iictl pack engine AFTER the virt members
+# install online (engine helpers in scope: mutators, ledger, _sudo, _ensure_paru;
+# pack tag exported as II_PACK_TAG=pack:virt so the group row is swept on
+# `iictl pack remove virt`). Hooks are SOURCED at the engine's subshell top level
+# (NOT inside a function) → `local` is illegal; set -e is NOT in effect.
+#
+# Two parts:
+#   1. add the invoking user to the `libvirt` group via ii_group_add (the
+#      reversible mirror of ii-post-install's docker-group idiom) so virsh /
+#      virt-manager work without root. libvirtd is DELIBERATELY NOT enabled
+#      (§14: virt services are not auto-up) — we print the enable hint instead.
+#   2. waydroid (AUR) only when opted in. The #6 engine does not forward CLI
+#      flags to hooks, so the opt-in is an env toggle:
+#         II_VIRT_WITH_WAYDROID=1 iictl pack install virt
+#      The engine's post-add top-up snapshot folds the extra package into the
+#      kind=pack ledger row, so removal is handled by the shared revert engine.
+
+# ii_group_add touches /etc (usermod) with no internal sudo and records the
+# ledger into $HOME — run it as ROOT via a re-sourced bash while forcing
+# HOME/XDG_STATE_HOME (so the row lands in the user's state) and passing the pack
+# tag through. Mirrors ii-post-install's ii_group_add_for, adapted for the
+# user-context pack hook (passwordless sudo via the baked 10-wheel-nopasswd).
+_ii_user="$(id -un)"
+_sudo env HOME="$HOME" XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}" \
+  II_PACK_TAG="${II_PACK_TAG:-}" II_LIB="${II_LIB:-/usr/local/lib/ii}" \
+  bash -c 'source "${II_LIB}/mutator.sh"; ii_group_add "$@"' _ "$_ii_user" libvirt \
+  || echo "!! virt: adding $_ii_user to the libvirt group failed" >&2
+_sudo chown -R "$_ii_user:$(id -gn)" "${XDG_STATE_HOME:-$HOME/.local/state}/illogical-impulse" 2>/dev/null || true
+
+echo ">> virt: added '$_ii_user' to the libvirt group (log out/in to take effect)"
+echo ">> virt: libvirtd was NOT enabled (you choose). Enable it with:"
+echo "     sudo systemctl enable --now libvirtd"
+echo "   undo everything with: iictl pack remove virt"
+
+# ── optional: waydroid (AUR), opt-in via II_VIRT_WITH_WAYDROID=1 ─────────────
+if [[ -n "${II_VIRT_WITH_WAYDROID:-}" ]]; then
+  echo ">> virt: --with-waydroid → installing waydroid (AUR, via paru)"
+  command -v paru >/dev/null 2>&1 || { _ensure_paru 2>/dev/null || true; }
+  if command -v paru >/dev/null 2>&1; then
+    _ii_vcfg=(); [[ -t 0 ]] || _ii_vcfg=(--noconfirm)
+    paru -S --needed "${_ii_vcfg[@]}" waydroid \
+      || echo "!! virt: waydroid install failed (AUR build) — re-run after fixing build deps" >&2
+  else
+    echo "!! virt: paru unavailable — cannot build waydroid from the AUR" >&2
+  fi
+else
+  echo ">> virt: waydroid NOT installed (set II_VIRT_WITH_WAYDROID=1 to opt in)"
+fi

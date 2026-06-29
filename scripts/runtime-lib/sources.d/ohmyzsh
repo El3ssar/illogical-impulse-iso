@@ -1,0 +1,77 @@
+# ohmyzsh — Oh My Zsh plugin source resolver (#48). Sourced (NOT executed) by
+# sources.sh / the iictl plugins manager. Resolves an Oh My Zsh plugin NAME to an
+# antidote-compatible manifest entry so `antidote load` can pull just that plugin
+# out of the ohmyzsh monorepo:
+#
+#     ohmyzsh/ohmyzsh path:plugins/<name>
+#
+# That `path:` annotation is antidote's own subdirectory syntax — the entry is a
+# plain manifest line, so add/remove/current fall through to the shared manifest
+# helpers (no override needed). The candidate set is a curated list of the most
+# commonly-used Oh My Zsh plugins ("including but not limited to ohmyzsh" — the
+# user can name ANY ohmyzsh plugin via this source by editing the manifest, or
+# reach a non-ohmyzsh repo through the `git` source); this list is a convenience.
+#
+# If a checked-out ohmyzsh tree is present (vendored via skel-distro.fetch or an
+# AUR pack), enumerate its real plugins/ directory so the candidate set tracks
+# the installed version; otherwise fall back to the curated shortlist. Either way
+# every candidate is emitted in the antidote `path:` form.
+
+# Known Oh My Zsh plugin checkout locations (read-only; first match wins). Kept
+# small + overridable for the no-root unit test (II_OMZ_DIR).
+_ii_omz_dirs() {
+  printf '%s\n' \
+    "${II_OMZ_DIR:-}" \
+    "$HOME/.config/zsh/.antidote/ohmyzsh/ohmyzsh" \
+    "$HOME/.cache/antidote/ohmyzsh/ohmyzsh" \
+    "/usr/share/oh-my-zsh"
+}
+
+# _ii_omz_plugin_names — print plugin names from a real ohmyzsh plugins/ dir if
+# one is found, else nothing (the caller falls back to the curated list).
+_ii_omz_plugin_names() {
+  local d p
+  while IFS= read -r d; do
+    [[ -n "$d" && -d "$d/plugins" ]] || continue
+    for p in "$d"/plugins/*/; do
+      [[ -d "$p" ]] || continue
+      basename "$p"
+    done
+    return 0
+  done < <(_ii_omz_dirs)
+}
+
+# ii_source_ohmyzsh_candidates — emit each plugin as the antidote `path:` entry.
+# Prefer a real plugins/ listing; otherwise the curated shortlist.
+ii_source_ohmyzsh_candidates() {
+  local names name
+  names="$(_ii_omz_plugin_names)"
+  if [[ -z "$names" ]]; then
+    names="$(cat <<'EOF'
+git
+sudo
+docker
+docker-compose
+kubectl
+fzf
+z
+extract
+command-not-found
+colored-man-pages
+gh
+rust
+golang
+python
+node
+npm
+EOF
+)"
+  fi
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    printf 'ohmyzsh/ohmyzsh path:plugins/%s\n' "$name"
+  done <<<"$names"
+}
+
+# add/remove/current intentionally omitted → shared manifest helpers. The entry
+# is a plain antidote line; no special handling beyond exact-line manifest ops.

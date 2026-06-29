@@ -1,0 +1,169 @@
+#!/usr/bin/env bash
+#help: config	export/import the reversible setup (ledger + choices) — the portable edge
+# config — export/import a whole reversible setup (#27). The net-new capability
+# Omarchy structurally lacks: because every iictl action is already ledger-
+# recorded with its inverse (framework Pillar 4), the ledger IS a portable
+# manifest. `iictl config export` bundles the ledger TSV + the per-user iictl
+# choice files; `iictl config import` carries it to a fresh install and REPLAYS
+# each recorded action through the same per-verb engines (pack/…), recording new
+# ledger entries on the target — so the imported state is itself revertible
+# (`iictl revert-all` on the target peels it back to vanilla).
+#
+# Dependency-free by contract: the ledger is plain TSV, so export/import parse
+# with awk/cut and bundle with tar — NO jq, NO JSON. Touches only user-owned
+# state ($XDG_STATE_HOME/illogical-impulse/ + a user-specified bundle path);
+# never an upstream-owned path.
+
+set -u
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+
+# User-owned state (the ledger + choice files). The ledger.sh constants are the
+# canonical location; fall back to the same path if ledger.sh wasn't sourced.
+II_STATE_DIR="${II_LEDGER_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/illogical-impulse}"
+II_LEDGER="${II_LEDGER:-$II_STATE_DIR/ledger.tsv}"
+# iictl itself — used to replay verbs on import (sibling of this plugin dir).
+IICTL_BIN="${IICTL_BIN:-/usr/local/bin/iictl}"
+[[ -x "$IICTL_BIN" ]] || IICTL_BIN="iictl"
+
+DEFAULT_BUNDLE="$HOME/illogical-impulse-config.tar.gz"
+
+_usage() {
+  cat <<EOF
+${C_B}iictl config${C_0} — export/import the reversible setup (the portable edge)
+
+usage:
+  iictl config export [path]        bundle ledger + choices (default: $DEFAULT_BUNDLE)
+  iictl config import <path> [-n]   replay the bundle through the per-verb engines
+
+  -n, --dry-run   (import) print what WOULD be replayed, make zero changes
+
+Bundles are plain tar.gz of the TSV ledger + *.choice files — no jq. Importing
+records new ledger entries so the imported state is itself revertible.
+EOF
+}
+
+# ── export ───────────────────────────────────────────────────────────────────
+cmd_export() {
+  local out="${1:-$DEFAULT_BUNDLE}"
+  [[ -f "$II_LEDGER" ]] || warn "no ledger at $II_LEDGER — exporting an empty setup"
+  command -v tar >/dev/null || die "tar missing"
+  # Collect the manifest: the ledger + every per-user choice file. Tar them
+  # relative to the state dir so import can extract into a scratch dir cleanly.
+  local items=() base bn
+  base="$(basename "$II_STATE_DIR")"
+  if [[ -d "$II_STATE_DIR" ]]; then
+    [[ -f "$II_LEDGER" ]] && items+=("$base/$(basename "$II_LEDGER")")
+    for f in "$II_STATE_DIR"/*.choice; do
+      [[ -e "$f" ]] || break
+      items+=("$base/$(basename "$f")")
+    done
+  fi
+  (( ${#items[@]} )) || die "nothing to export (no ledger or choice files in $II_STATE_DIR)"
+  # -C the PARENT of the state dir so the archive holds `illogical-impulse/…`.
+  tar -czf "$out" -C "$(dirname "$II_STATE_DIR")" "${items[@]}" \
+    || die "could not write bundle: $out"
+  ok "exported $(printf '%s\n' "${items[@]}" | wc -l) item(s) → $out"
+  echo "  carry it to another install and run: iictl config import $out"
+}
+
+# ── import ─────────────────────────────────────────────────────────────────
+# Replay a ledger row through its per-verb engine. Only kinds with a known,
+# present iictl verb are replayed; unknown/absent verbs are reported and skipped
+# (the user can install the owning feature, then re-import). Each replayed verb
+# records its OWN fresh ledger entry on the target via the normal engine path.
+_replay_row() {
+  # $1=kind $2=target $3=packages ; DRY governs whether we actually run.
+  local kind="$1" target="$2"
+  case "$kind" in
+    pack)
+      # target is `pack:<name>`; the pack engine installs it (+ records a row).
+      local name="${target#pack:}"
+      [[ -n "$name" && "$name" != "$target" ]] || { warn "malformed pack row: $target"; return 0; }
+      if (( DRY )); then echo "  would: iictl pack install $name"; return 0; fi
+      if "$IICTL_BIN" pack list >/dev/null 2>&1; then
+        echo "  replay: iictl pack install $name"
+        "$IICTL_BIN" pack install "$name" || warn "pack install failed: $name (continuing)"
+      else
+        warn "pack engine unavailable — skipping $name"
+      fi
+      ;;
+    shell|theme|nvim|webapp)
+      # Single-choice domains: `iictl <kind> set <target>` is the convention.
+      # Replay only if the verb's plugin is present on the target (domains land
+      # in sibling PRs); otherwise report and skip rather than fail the import.
+      if (( DRY )); then echo "  would: iictl $kind set $target"; return 0; fi
+      if "$IICTL_BIN" "$kind" --help >/dev/null 2>&1 || "$IICTL_BIN" help 2>/dev/null | grep -qE "^[[:space:]]*$kind"; then
+        echo "  replay: iictl $kind set $target"
+        "$IICTL_BIN" "$kind" set "$target" || warn "$kind set $target failed (continuing)"
+      else
+        warn "verb '$kind' not installed on this system — skipping (install it, then re-import)"
+      fi
+      ;;
+    channel)
+      if (( DRY )); then echo "  would: iictl update --channel $target"; return 0; fi
+      echo "  replay: iictl update --channel $target (no fetch — records channel)"
+      # We do NOT trigger a full update on import; just record the channel intent
+      # is left to the user. Skipped to avoid surprise network/setup on import.
+      warn "channel rows are informational on import — run 'iictl update --channel $target' yourself"
+      ;;
+    *)
+      # group/service/file/lua-block etc. are install-time / mutator rows whose
+      # replay belongs to their own engines; importing them blindly is unsafe.
+      (( DRY )) && echo "  skip:  kind=$kind target=$target (not a replayable user choice)"
+      ;;
+  esac
+}
+
+cmd_import() {
+  _not_root
+  local bundle="" a
+  for a in "$@"; do
+    case "$a" in
+      -n|--dry-run) DRY=1 ;;
+      -*) die "unknown option: $a" ;;
+      *) bundle="$a" ;;
+    esac
+  done
+  [[ -n "$bundle" ]] || die "import needs a bundle path (usage: iictl config import <path>)"
+  [[ -f "$bundle" ]] || die "no such bundle: $bundle"
+  command -v tar >/dev/null || die "tar missing"
+
+  local scratch; scratch="$(mktemp -d)" || die "mktemp failed"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$scratch'" EXIT
+  tar -xzf "$bundle" -C "$scratch" || die "could not unpack bundle: $bundle"
+
+  # Find the ledger inside the extracted tree (one level under the state-dir name).
+  local led; led="$(find "$scratch" -type f -name "$(basename "$II_LEDGER")" 2>/dev/null | head -1)"
+  [[ -n "$led" ]] || die "bundle has no ledger ($(basename "$II_LEDGER"))"
+
+  echo "${C_B}>> importing setup from $bundle${C_0}"
+  (( DRY )) && echo "  (dry-run — no changes)"
+  # Replay in FORWARD order (the order actions were originally taken). Parse the
+  # TSV by hand with cut — kind=col2, target=col3, packages=col4 — no jq.
+  local replayed=0 line kind target pkgs
+  while IFS= read -r line; do
+    [[ -z "$line" || "$line" == \#* ]] && continue
+    kind="$(printf '%s' "$line" | cut -f2)"
+    target="$(printf '%s' "$line" | cut -f3)"
+    pkgs="$(printf '%s' "$line" | cut -f4)"
+    _replay_row "$kind" "$target" "$pkgs"
+    replayed=$((replayed+1))
+  done < "$led"
+
+  echo
+  if (( DRY )); then
+    ok "dry-run complete — $replayed ledger row(s) inspected"
+  else
+    ok "import complete — replayed actions are recorded in this system's ledger ('iictl revert-all' undoes them)"
+  fi
+}
+
+DRY=0
+sub="${1:-}"; shift || true
+case "$sub" in
+  export) cmd_export "$@" ;;
+  import) cmd_import "$@" ;;
+  -h|--help|help|"") _usage ;;
+  *) die "unknown subcommand: $sub (try: iictl config --help)" ;;
+esac
