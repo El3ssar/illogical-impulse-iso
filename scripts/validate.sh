@@ -1022,6 +1022,157 @@ else
   _v_ok "recolour watcher is off by default (no theme-recolor fence baked into skel execs.lua) (THEME-01d)"
 fi
 
+step "Quickshell widget framework (#20)"
+# Bug-class guards for the additive widget framework (issue #20 / PROPOSAL §8):
+# the shared _lib, the dev-dashboard, the iictl.d/widget plugin, the command-
+# palette actions, and the Iron-Law seams (read-only colours, mutator-only fences,
+# no upstream-category dupes, no rebuilt-upstream widget, no upstream import).
+_WGT_BASE="usr/share/illogical-impulse/widgets"
+_WGT_DIR="$AIROOTFS/$_WGT_BASE"
+# (a) the shared _lib (Theme + Panel + qmldir) is baked.
+_wgt_lib_bad=0
+for _f in _lib/Theme.qml _lib/Panel.qml _lib/qmldir; do
+  [[ -f "$_WGT_DIR/$_f" ]] || { _v_fail "widget framework: missing $_WGT_BASE/$_f"; _wgt_lib_bad=1; }
+done
+(( _wgt_lib_bad == 0 )) && _v_ok "widget _lib baked (Theme.qml + Panel.qml + qmldir)"
+# (b) upstream-state-path coupling: Theme.qml must READ the generated colors.json
+#     STATE path (the same one Directories.qml calls generatedMaterialThemePath).
+#     A drift here silently un-themes every widget.
+_THEME_QML="$_WGT_DIR/_lib/Theme.qml"
+if [[ -f "$_THEME_QML" ]]; then
+  grep -q 'generated/colors.json' "$_THEME_QML" \
+    && _v_ok "Theme.qml watches the generated colors.json STATE path (upstream-state coupling)" \
+    || _v_fail "Theme.qml does not reference generated/colors.json — widgets won't re-theme (upstream-state path drift)"
+  # READ-ONLY bug-class guard: Theme.qml must NEVER write the upstream STATE file.
+  # FileView's reload()/text()/onLoaded are reads; a write would be a redirect/
+  # writeAdapter/setText into the colors path. Forbid any obvious writer.
+  if grep -Eq 'writeAdapter|\.write\(|setText|FileViewWriteAdapter' "$_THEME_QML"; then
+    _v_fail "Theme.qml appears to WRITE the colours STATE file — it is upstream-owned, READ-ONLY (only switchwall/matugen may write it)"
+  else
+    _v_ok "Theme.qml only READS colors.json (no write path — upstream STATE stays read-only)"
+  fi
+fi
+# (c) the first baked widget is the dev-dashboard (a surface upstream LACKS) — and
+#     NO widget rebuilds something upstream already ships.
+[[ -f "$_WGT_DIR/devdash/shell.qml" ]] \
+  && _v_ok "dev-dashboard widget baked (devdash/shell.qml) — the v1 reference widget" \
+  || _v_fail "devdash/shell.qml missing — the first baked widget must be the dev-dashboard (#20)"
+_wgt_dup=0
+if [[ -d "$_WGT_DIR" ]]; then
+  shopt -s nullglob
+  for _wd in "$_WGT_DIR"/*/; do
+    _wn="$(basename "$_wd")"
+    case "$_wn" in
+      pomodoro|stopwatch|timer|notes|scratchpad|sticky*|clipboard|cliphist|colorpicker|colorpick*)
+        _v_fail "widget '$_wn' duplicates an upstream surface (TimerService/notes/Cliphist/hyprpicker) — do NOT rebuild it (#20)"
+        _wgt_dup=1 ;;
+    esac
+  done
+  shopt -u nullglob
+fi
+(( _wgt_dup == 0 )) && _v_ok "no widget rebuilds an upstream surface (no pomodoro/notes/clipboard/colorpicker dir)"
+# (d) the dev-dashboard imports NOTHING from upstream's quickshell/ii tree (the
+#     standalone seam). Its only local import is the shared ../_lib.
+_DEVDASH_QML="$_WGT_DIR/devdash/shell.qml"
+if [[ -f "$_DEVDASH_QML" ]]; then
+  if grep -Eq 'import[[:space:]]+(qs\.|"[^"]*quickshell/ii)' "$_DEVDASH_QML"; then
+    _v_fail "devdash/shell.qml imports upstream's quickshell/ii tree — widgets must be standalone (zero qs.* imports) (#20)"
+  else
+    _v_ok "devdash/shell.qml is standalone (no upstream quickshell/ii import)"
+  fi
+fi
+# (e) the iictl.d/widget plugin: exists + specifically passes the plugin contract
+#     (generic +x/shebang/bash -n/#help is also asserted in the plugin-arch step).
+_WGT_PLUGIN="$AIROOTFS/usr/local/lib/ii/iictl.d/widget"
+if [[ ! -f "$_WGT_PLUGIN" ]]; then
+  _v_fail "iictl.d/widget not staged (#20) — the widget verb is missing"
+else
+  _wgp_ok=1
+  [[ -x "$_WGT_PLUGIN" ]] || { _v_fail "iictl.d/widget not executable"; _wgp_ok=0; }
+  [[ "$(head -c2 "$_WGT_PLUGIN")" == "#!" ]] || { _v_fail "iictl.d/widget has no shebang"; _wgp_ok=0; }
+  bash -n "$_WGT_PLUGIN" 2>/dev/null || { _v_fail "iictl.d/widget syntax error"; _wgp_ok=0; }
+  grep -qE '^#help:[[:space:]]' "$_WGT_PLUGIN" || { _v_fail "iictl.d/widget missing #help: header"; _wgp_ok=0; }
+  (( _wgp_ok )) && _v_ok "iictl.d/widget staged (exec + shebang + bash -n + #help:)"
+  _wgp_code="$(grep -vE '^[[:space:]]*#' "$_WGT_PLUGIN")"
+  # (e1) registry is a directory scan, not N hardcoded cases (so #24 folds in).
+  grep -q 'II_WIDGET_DIR' <<<"$_wgp_code" \
+    && _v_ok "iictl.d/widget enumerates a directory-scan registry (not hardcoded cases)" \
+    || _v_fail "iictl.d/widget has no II_WIDGET_DIR registry scan — widgets would be hardcoded"
+  # (e2) custom/*.lua writes go ONLY through the shared fenced mutator — never a
+  #      raw redirect/tee/sed into a custom/*.lua slot (the fence bug-class guard).
+  grep -q 'ii_lua_block_write' <<<"$_wgp_code" && grep -q 'ii_lua_block_remove' <<<"$_wgp_code" \
+    && _v_ok "iictl.d/widget fences custom/*.lua via the shared ii_lua_block_write/remove mutator" \
+    || _v_fail "iictl.d/widget does not use ii_lua_block_write/remove — autostart/keybind blocks must be sentinel-fenced via the shared mutator"
+  if grep -qE '(>>?|tee|sed -i)[^|;&]*custom/[^[:space:]]*\.lua' <<<"$_wgp_code"; then
+    _v_fail "iictl.d/widget writes a custom/*.lua slot raw — use ii_lua_block_write/remove only"
+  else
+    _v_ok "iictl.d/widget never writes custom/*.lua raw (mutator-only)"
+  fi
+  # (e3) it writes ONLY the sanctioned custom/{execs,keybinds}.lua slots — never an
+  #      upstream rsync --delete tree (skel-shadow class). Comments stripped already.
+  if grep -qE '(quickshell/ii|hypr/hyprland|/matugen/|fish/config\.fish|zshrc\.d)' <<<"$_wgp_code"; then
+    _v_fail "iictl.d/widget references an upstream rsync --delete tree — fences live ONLY in custom/{execs,keybinds}.lua"
+  else
+    _v_ok "iictl.d/widget touches no sync-deleted upstream tree (fences confined to custom/*.lua)"
+  fi
+  # (e4) the leader keybind is DECONFLICTED: upstream binds SUPER+W (browser), so a
+  #      bare 'SUPER + W' leader would collide. Assert the plugin's leader is not it.
+  if grep -qE 'II_WIDGET_LEADER[:=][^}]*"SUPER \+ W"' <<<"$_wgp_code" \
+     || grep -qE 'II_WIDGET_LEADER="SUPER \+ W"' "$_WGT_PLUGIN"; then
+    _v_fail "iictl.d/widget claims a bare 'SUPER + W' leader — upstream binds SUPER+W to the browser; deconflict it (#20)"
+  else
+    _v_ok "iictl.d/widget leader keybind is deconflicted (not bare SUPER+W, which upstream owns)"
+  fi
+fi
+# (f) the markers live under the same $XDG_STATE_HOME/illogical-impulse namespace
+#     as the welcome card (not a ~/.config/quickshell/ii-* sibling, one typo from
+#     the rsync --delete tree).
+if [[ -f "$_WGT_PLUGIN" ]]; then
+  grep -q 'illogical-impulse/widgets' "$_WGT_PLUGIN" \
+    && _v_ok "widget enable-markers live under \$XDG_STATE_HOME/illogical-impulse/widgets (safe namespace)" \
+    || _v_fail "iictl.d/widget markers are not under the illogical-impulse state namespace"
+fi
+# (g) command-palette actions: each *.sh is exec + shebang + bash -n clean, and
+#     NONE duplicates an upstream palette category (clipboard/emoji/math/web/shell).
+_ACT_DIR="$AIROOTFS/etc/skel/.config/illogical-impulse/actions"
+if [[ -d "$_ACT_DIR" ]]; then
+  _act_n=0 _act_bad=0
+  shopt -s nullglob
+  for _a in "$_ACT_DIR"/*.sh; do
+    _act_n=$((_act_n+1))
+    _abn="$(basename "$_a")"
+    [[ -x "$_a" ]] || { _v_fail "action $_abn not executable (launcher execDetach's it directly)"; _act_bad=1; }
+    [[ "$(head -c2 "$_a")" == "#!" ]] || { _v_fail "action $_abn has no shebang"; _act_bad=1; }
+    bash -n "$_a" 2>/dev/null || { _v_fail "action $_abn syntax error"; _act_bad=1; }
+    case "$_abn" in
+      clipboard*|clip*|emoji*|math*|calc*|websearch*|web-search*|search*|shellcommand*|shell-command*|shell*)
+        _v_fail "action $_abn duplicates an upstream palette category (clipboard/emoji/math/web/shell already in SearchBar.qml) — actions add DISTRO verbs only (#20)"
+        _act_bad=1 ;;
+    esac
+  done
+  shopt -u nullglob
+  if (( _act_n == 0 )); then
+    _v_warn "no command-palette actions staged (expected at least devdash-toggle/doctor/update-system)"
+  elif (( _act_bad == 0 )); then
+    _v_ok "$_act_n command-palette action(s): exec + shebang + bash -n, no upstream-category dupe"
+  fi
+  # The devdash toggle action must wire to the widget verb (the seam the issue names).
+  [[ -f "$_ACT_DIR/devdash-toggle.sh" ]] && grep -q 'iictl widget toggle devdash' "$_ACT_DIR/devdash-toggle.sh" \
+    && _v_ok "actions/devdash-toggle.sh dispatches to 'iictl widget toggle devdash'" \
+    || _v_fail "actions/devdash-toggle.sh missing or does not call 'iictl widget toggle devdash'"
+else
+  _v_fail "command-palette actions dir not staged at skel/.config/illogical-impulse/actions/ (#20)"
+fi
+# (h) the framework must NOT bake a widget fence into the skel custom/*.lua — it is
+#     written at RUNTIME by `iictl widget enable` (dormant/vanilla until opt-in).
+for _sl in "$AIROOTFS/etc/skel/.config/hypr/custom/execs.lua" "$AIROOTFS/etc/skel/.config/hypr/custom/keybinds.lua"; do
+  [[ -f "$_sl" ]] || continue
+  if grep -qF -- '-- >>> illogical-impulse widgets' "$_sl"; then
+    _v_fail "a widget fence is baked into skel $(basename "$_sl") — it must be written at runtime by 'iictl widget enable' (dormant by default) (#20)"
+  fi
+done
+_v_ok "no widget fence baked into skel custom/*.lua (framework is dormant until 'iictl widget enable')"
+
 step "reversibility round-trip e2e test (TEST-02)"
 # The static checks above assert the reversibility STRUCTURE; the e2e test
 # (tests/revert-roundtrip.sh + its in-container payload) DEMONSTRATES it — seed

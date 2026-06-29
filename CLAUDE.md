@@ -154,6 +154,8 @@ build/ out/                    # generated
 | Choose/change the Neovim distro (reversible) | `iictl nvim set <lazyvim\|astronvim\|nvchad\|kickstart\|plain\|restore>` — drop-in `scripts/runtime-lib/iictl.d/nvim`; baked default is vanilla nvim (empty `~/.config/nvim`, the unowned seam), clones a distro ONLINE at a pinned rev, `.ii-distro`-stamped + ledger-recorded, `--force` to replace a non-stamped config; `iictl nvim restore`/`iictl revert-all` returns to bare. NOTHING nvim is baked into the ISO. |
 | Curated default web apps for `iictl webapp seed` / change the webapp launcher | `overlay/airootfs/usr/share/illogical-impulse/webapps/defaults.list` (`<name>\|<url>[\|icon]`, opt-in) + `scripts/runtime-lib/iictl.d/webapp` (Brave `--app` `.desktop` in unowned `~/.local/share/applications/`; accent rule fenced ONLY into `~/.config/hypr/custom/rules.lua` via `ii_lua_block_write`; fallback icon `webapps/fallback.png`) |
 | Curated app-group installer (picker) | `scripts/runtime-lib/iictl.d/install` — thin picker over `packages/optional/*.list` that delegates to the **online** pack engine (`iictl pack install <group>`; official repos + AUR — never a stash / `[ii-extra]`) |
+| Add a Quickshell desktop widget (framework, #20) | `overlay/airootfs/usr/share/illogical-impulse/widgets/<name>/shell.qml` (+ `<name>.json` meta, optional `cards/*.sh` helpers) — a **standalone** `qs -p` config composing `widgets/_lib/{Theme,Panel}.qml`, with **ZERO** `quickshell/ii` imports (clone `welcome/shell.qml`). The registry is a dir scan, so it auto-registers. `iictl widget enable/disable/toggle/list` (`scripts/runtime-lib/iictl.d/widget`) manages per-user markers under `~/.local/state/illogical-impulse/widgets/` + a sentinel-fenced autostart block (`custom/execs.lua`) + the `SUPER+ALT+W` leader submap (`custom/keybinds.lua`), both via the shared mutator (ledger-recorded). `_lib/Theme.qml` watches upstream's generated `colors.json` READ-ONLY. Do NOT rebuild upstream surfaces (pomodoro/notes/clipboard/colorpicker). |
+| Add a command-palette action (distro verb, #20) | `overlay/skel-distro/.config/illogical-impulse/actions/<name>.sh` (executable, shebanged) — upstream's `LauncherSearch.qml` auto-loads `~/.config/illogical-impulse/actions/*.sh` via a `FolderListModel` and runs each with `Quickshell.execDetached`; the display name is the filename **without** `.sh`. Distro verbs ONLY — never duplicate an upstream palette category (clipboard/emoji/math/web-search/shell-command). `~/.config/illogical-impulse/` is the UNOWNED seam; never edit `LauncherSearch.qml`/`SearchBar.qml`. |
 | Update channels (stable=pinned `DOTS_COMMIT` / edge=HEAD) | `cmd_update` in `scripts/runtime/iictl` (edits LOCAL to that built-in) + `CHANNEL=stable` in the `scripts/prepare.d/70-assets.sh` release stamp; the stable pin is the stamp's `DOTS_COMMIT`, bumped via `just update` — `scripts/validate.sh` asserts stamp pin == submodule HEAD (anti-rot) |
 | Add a one-time migration (Omarchy-style) | a baked `overlay/airootfs/usr/share/illogical-impulse/migrations/NNNN-name.sh` (sourced by the `iictl migrate` drop-in; reversible via the shared mutators; applied high-water mark in `$XDG_STATE_HOME/illogical-impulse/migrations.applied`) — see that dir's README |
 | Edit the offline quickstart (`iictl docs`) | `overlay/airootfs/usr/share/illogical-impulse/docs/quickstart.md` (printed by the `iictl docs` drop-in) |
@@ -334,6 +336,21 @@ Don't "simplify" these away — each cost real debugging time:
   / prefers `--find-links` the wheelhouse (offline) before any online path.
   `validate.sh` guards both halves (INST-04). Don't restore the unconditional
   purge or make `iictl venv` online-only.
+- **Widget framework: `SUPER+W` is taken upstream; fences are runtime-only, not
+  baked into skel** → the Quickshell widget framework (#20) reaches the user via a
+  leader keybind. Issue #20 proposed `SUPER+W`, but upstream `keybinds.lua` already
+  binds `SUPER+W` to the browser, so `iictl widget` claims the deconflicted
+  `SUPER+ALT+W` instead (audit-before-reserve). Crucially the autostart block
+  (`custom/execs.lua`) and the leader submap (`custom/keybinds.lua`) are written at
+  RUNTIME by `iictl widget enable` through the shared `ii_lua_block_write` mutator
+  (ledger-recorded) — they are **deliberately NOT seeded into `/etc/skel`**: the
+  framework is dormant/vanilla until the user opts in, and a static skel
+  `keybinds.lua` would SHADOW upstream's non-empty stub (the "Edit user keybinds"
+  bind) — an Iron-Law violation. `validate.sh` guards that no widget fence is baked
+  into skel and that every fence write goes through the mutator (#20). The card
+  helper logic lives in real `widgets/devdash/cards/*.sh` files (bash -n lintable),
+  not embedded in QML, so escaping never silently breaks a card. Don't bake the
+  fences or change the leader back to bare `SUPER+W`.
 - **`sudo -u` in the Calamares chroot can't allocate a pty** → modern sudo runs
   the command in a PTY (`Defaults use_pty`), but the Calamares target chroot has
   no `/dev/pts`, so every `sudo -u "$NEW_USER" …` in `ii-post-install` dies with
