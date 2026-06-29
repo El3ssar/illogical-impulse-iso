@@ -1495,6 +1495,30 @@ else
   fi
 fi
 
+step "Calamares-chroot user drops use runuser, not sudo (INST-05)"
+# Bug-class (real install, root cause of the INST-04 incident): modern sudo runs
+# the command in a PTY (Defaults use_pty), but the Calamares target chroot has no
+# /dev/pts, so every `sudo -u "$NEW_USER" …` dies with "unable to allocate pty:
+# No such device" — silently (fail-soft) skipping the Quickshell venv build AND
+# the revert ledger records. mkarchiso's arch-chroot mounts /dev/pts so
+# chroot.sh's sudo -u is fine; the Calamares chroot does not, so ii-post-install
+# and ii-verify MUST drop to the user via runuser (util-linux; allocates no PTY,
+# needs no sudoers/PAM-auth). Comments stripped so the rule's prose can't trip
+# the grep. (chroot.sh is intentionally NOT checked — it runs under arch-chroot.)
+for _csf in ii-post-install ii-verify; do
+  _CSF="$AIROOTFS/usr/local/bin/$_csf"
+  [[ -f "$_CSF" ]] || _CSF="$ROOT/scripts/runtime/$_csf"
+  if [[ ! -f "$_CSF" ]]; then
+    _v_fail "$_csf missing — INST-05 guard can't run"
+    continue
+  fi
+  if grep -vE '^[[:space:]]*#' "$_CSF" | grep -qE '\bsudo[[:space:]]+-u\b'; then
+    _v_fail "$_csf uses 'sudo -u' in the Calamares chroot — sudo can't allocate a pty (no /dev/pts) and the drop is silently skipped; use runuser (INST-05)"
+  else
+    _v_ok "$_csf drops to the user without 'sudo -u' (runuser — no pty needed in the chroot) (INST-05)"
+  fi
+done
+
 step "historic-bug / Iron-Law coverage (IMMUNE-01)"
 # Cluster of small guards for documented historic bug-classes + Iron-Law
 # invariants that previously had NO validate.sh check, so a regression shipped

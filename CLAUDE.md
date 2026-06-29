@@ -308,7 +308,8 @@ Don't "simplify" these away — each cost real debugging time:
   `ii-post-install` via `ii-ensure-venv` off the baked wheelhouse. The whole
   offline mechanism is sound (managed-python discovery, wheelhouse, import all
   verified end-to-end under empty-cache/no-network conditions), BUT that step is
-  fail-soft (`try`) — a transient install hiccup can leave the venv broken — and
+  fail-soft (`try`) — so an install-time failure (the sudo-pty bug below, INST-05)
+  could leave the venv broken — and
   `ii-verify` used to `rm -rf /usr/share/ii-python-wheels` + delete
   `ii-ensure-venv` UNCONDITIONALLY, never checking the venv. So a one-off failure
   became permanent and recoverable only online (and `iictl venv` was itself
@@ -321,6 +322,20 @@ Don't "simplify" these away — each cost real debugging time:
   / prefers `--find-links` the wheelhouse (offline) before any online path.
   `validate.sh` guards both halves (INST-04). Don't restore the unconditional
   purge or make `iictl venv` online-only.
+- **`sudo -u` in the Calamares chroot can't allocate a pty** → modern sudo runs
+  the command in a PTY (`Defaults use_pty`), but the Calamares target chroot has
+  no `/dev/pts`, so every `sudo -u "$NEW_USER" …` in `ii-post-install` dies with
+  `sudo: unable to allocate pty: No such device` and rc=1 — silently (fail-soft)
+  skipping the Quickshell venv build (the root cause of the INST-04 incident on
+  a real install) AND both revert ledger records (first-run-welcome marker +
+  welcome exec-hook fence, so `iictl revert-all` couldn't undo them). It worked
+  at BUILD time only because mkarchiso's `arch-chroot` mounts `/dev/pts`;
+  `chroot.sh`'s `sudo -u liveuser` is therefore fine and is deliberately left
+  as-is. `ii-post-install` and `ii-verify` (its venv self-heal) now drop to the
+  user via **`runuser -u "$NEW_USER" --`** (util-linux; allocates no PTY, needs
+  no sudoers/PAM-auth) instead, carrying the user env explicitly. `validate.sh`
+  fails on any `sudo -u` in those two Calamares-chroot scripts (INST-05). Don't
+  reintroduce `sudo -u` there — use runuser.
 
 ## 6a. Known limitations (documented stances, not yet implemented)
 

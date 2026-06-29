@@ -240,8 +240,10 @@ if [[ -n "$NEW_USER" ]]; then
   elif [[ -x /usr/local/bin/ii-ensure-venv ]]; then
     T "  ..    Quickshell venv broken — attempting one offline rebuild"
     # Rebuild AS the user (venvs bake $HOME absolute paths) — mirrors ii-post-
-    # install's invocation. The wheelhouse is still present (purge runs below).
-    sudo -u "$NEW_USER" env \
+    # install. Use runuser, NOT sudo -u: this runs in the Calamares chroot, which
+    # has no /dev/pts, and sudo's default use_pty then dies with "unable to
+    # allocate pty" (INST-05). The wheelhouse is still present (purge runs below).
+    runuser -u "$NEW_USER" -- env \
       HOME="$H" XDG_CONFIG_HOME="$H/.config" \
       XDG_STATE_HOME="$H/.local/state" XDG_CACHE_HOME="$H/.cache" \
       UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-/usr/share/uv/python}" \
