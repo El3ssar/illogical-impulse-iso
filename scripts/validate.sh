@@ -1450,6 +1450,51 @@ else
   fi
 fi
 
+step "broken venv stays offline-recoverable (INST-04)"
+# Bug-class: the Quickshell venv is built fail-soft by ii-post-install, so a
+# transient install hiccup can leave it broken. ii-verify USED to purge the
+# offline recovery means (the wheelhouse + ii-ensure-venv) UNCONDITIONALLY, with
+# no venv check — so a broken venv was recoverable ONLY online via `iictl venv`,
+# itself online-only. Guard both halves: (a) ii-verify checks the venv import and
+# GATES the wheelhouse/ii-ensure-venv purge on it (self-heals offline, else keeps
+# them), and (b) iictl venv is offline-capable (delegates to ii-ensure-venv /
+# uses the baked wheelhouse). Comments stripped first so this prose can neither
+# satisfy nor trip the code greps.
+_IV4="$AIROOTFS/usr/local/bin/ii-verify"
+[[ -f "$_IV4" ]] || _IV4="$ROOT/scripts/runtime/ii-verify"
+if [[ ! -f "$_IV4" ]]; then
+  _v_fail "ii-verify missing — INST-04 guard can't run"
+else
+  _iv4_code="$(grep -vE '^[[:space:]]*#' "$_IV4")"
+  # (a1) it imports materialyoucolor/PIL to tell a broken venv from a working one.
+  grep -q 'import materialyoucolor' <<<"$_iv4_code" \
+    && _v_ok "ii-verify checks the Quickshell venv import before the purge (INST-04)" \
+    || _v_fail "ii-verify never imports materialyoucolor/PIL — it can't tell a broken venv from a working one before wiping the wheelhouse (INST-04)"
+  # (a2) the wheelhouse + ii-ensure-venv purge is GATED, not unconditional: the
+  #      gate var both skips ii-ensure-venv (continue) and guards the wheels rm.
+  if grep -q 'KEEP_VENV_RECOVERY' <<<"$_iv4_code" \
+     && grep -qE 'KEEP_VENV_RECOVERY.*continue' <<<"$_iv4_code"; then
+    _v_ok "ii-verify gates the wheelhouse/ii-ensure-venv purge on a working venv (keeps offline recovery) (INST-04)"
+  else
+    _v_fail "ii-verify purges the wheelhouse/ii-ensure-venv unconditionally — a broken venv is stranded on online-only recovery (INST-04)"
+  fi
+fi
+# (b) iictl venv must be offline-capable: delegate to ii-ensure-venv (the
+#     wheelhouse builder) or pass --find-links at the baked wheelhouse — not a
+#     bare online `uv pip install`.
+_IICTL4="$AIROOTFS/usr/local/bin/iictl"
+[[ -f "$_IICTL4" ]] || _IICTL4="$ROOT/scripts/runtime/iictl"
+if [[ ! -f "$_IICTL4" ]]; then
+  _v_fail "iictl missing — INST-04 guard (b) can't run"
+else
+  _iictl4_code="$(grep -vE '^[[:space:]]*#' "$_IICTL4")"
+  if grep -q 'ii-ensure-venv' <<<"$_iictl4_code" || grep -q 'ii-python-wheels' <<<"$_iictl4_code"; then
+    _v_ok "iictl venv is offline-capable (delegates to ii-ensure-venv / uses the wheelhouse) (INST-04)"
+  else
+    _v_fail "iictl venv is online-only (no ii-ensure-venv / wheelhouse path) — a broken venv with no network can't be repaired (INST-04)"
+  fi
+fi
+
 step "historic-bug / Iron-Law coverage (IMMUNE-01)"
 # Cluster of small guards for documented historic bug-classes + Iron-Law
 # invariants that previously had NO validate.sh check, so a regression shipped

@@ -127,11 +127,38 @@ cmd_update() {
 cmd_venv() {
   _not_root
   command -v uv >/dev/null || die "uv missing — pacman -S uv"
-  [[ -f "$REQS" ]] || die "$REQS missing"
   echo "${C_B}>> rebuilding Quickshell venv${C_0}"
+  # Arch ships no python 3.12, so uv must resolve a managed CPython 3.12 from
+  # /usr/share/uv/python — set the dir ourselves rather than relying on profile.d
+  # (so this works from any shell, e.g. the welcome card's non-login console).
+  export UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-/usr/share/uv/python}"
   rm -rf "$VENV"
+  # Prefer the canonical offline-capable builder when it survived install
+  # (ii-verify keeps it when the venv couldn't be repaired): it installs from the
+  # baked wheelhouse with an online fallback, so recovery works WITHOUT network.
+  if [[ -x /usr/local/bin/ii-ensure-venv ]]; then
+    /usr/local/bin/ii-ensure-venv || die "venv rebuild failed"
+    ok "venv rebuilt at $VENV"
+    return
+  fi
+  # Fallback (healthy install: ii-ensure-venv + wheelhouse purged). Still prefer
+  # the wheelhouse if it happens to be present, else go online.
+  [[ -f "$REQS" ]] || die "$REQS missing"
   uv venv --prompt .venv "$VENV" -p 3.12 || die "uv venv failed"
-  VIRTUAL_ENV="$VENV" uv pip install -r "$REQS" || die "wheel install failed"
+  local pipargs=( --python "$VENV/bin/python" -r "$REQS" )
+  local wheels=/usr/share/ii-python-wheels
+  if [[ -d "$wheels" ]] && compgen -G "$wheels/*.whl" >/dev/null; then
+    echo "   using offline wheelhouse at $wheels"
+    pipargs+=( --offline --find-links "$wheels" )
+  fi
+  if ! uv pip install "${pipargs[@]}"; then
+    if [[ " ${pipargs[*]} " == *" --offline "* ]]; then
+      echo "   offline install failed — retrying online"
+      uv pip install --python "$VENV/bin/python" -r "$REQS" || die "wheel install failed"
+    else
+      die "wheel install failed"
+    fi
+  fi
   "$VENV/bin/python" -c 'import materialyoucolor, PIL' || die "venv sanity import failed"
   ok "venv rebuilt at $VENV"
 }

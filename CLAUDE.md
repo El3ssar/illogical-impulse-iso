@@ -302,6 +302,25 @@ Don't "simplify" these away — each cost real debugging time:
   by a `validate.sh` lint over `scripts/runtime/` + `scripts/prepare.d/` (use
   `var=$((var + 1))`); the two stale occurrences (`60-boot.sh`, `ii-verify`) were
   converted — IMMUNE-01.
+- **Broken Quickshell venv stranded on online-only recovery** → the venv
+  (`~/.local/state/quickshell/.venv`, Pillow + materialyoucolor on a uv-managed
+  CPython 3.12 from `/usr/share/uv/python`) is built at install by
+  `ii-post-install` via `ii-ensure-venv` off the baked wheelhouse. The whole
+  offline mechanism is sound (managed-python discovery, wheelhouse, import all
+  verified end-to-end under empty-cache/no-network conditions), BUT that step is
+  fail-soft (`try`) — a transient install hiccup can leave the venv broken — and
+  `ii-verify` used to `rm -rf /usr/share/ii-python-wheels` + delete
+  `ii-ensure-venv` UNCONDITIONALLY, never checking the venv. So a one-off failure
+  became permanent and recoverable only online (and `iictl venv` was itself
+  online-only, relying on profile.d for `UV_PYTHON_INSTALL_DIR`). `ii-verify` now
+  GATES that purge on the venv: it runs the `import materialyoucolor, PIL` check,
+  attempts one offline rebuild via `ii-ensure-venv`, and on continued failure
+  KEEPS the wheelhouse + `ii-ensure-venv` (a broken venv is a `warn`, never a hard
+  FAIL — the system still boots; only first-boot colour gen is affected). `iictl
+  venv` now sets `UV_PYTHON_INSTALL_DIR` itself and delegates to `ii-ensure-venv`
+  / prefers `--find-links` the wheelhouse (offline) before any online path.
+  `validate.sh` guards both halves (INST-04). Don't restore the unconditional
+  purge or make `iictl venv` online-only.
 
 ## 6a. Known limitations (documented stances, not yet implemented)
 

@@ -217,6 +217,47 @@ if [[ -n "$NEW_USER" ]]; then
                                       || fail "$NEW_USER missing quickshell config (skel not copied)"
 fi
 
+# ── Quickshell venv: verify, self-heal offline, keep recovery on failure ────
+# The venv (~/.local/state/quickshell/.venv) is built by ii-post-install off the
+# offline wheelhouse. That step is fail-soft, so a transient install hiccup can
+# leave it broken — and the purge below would then delete the ONLY offline
+# recovery means (the wheelhouse + ii-ensure-venv), stranding the user on
+# online-only `iictl venv`. So GATE the purge on the venv: if it's broken, try
+# one offline rebuild here; if it STILL fails, KEEP the wheelhouse + ii-ensure-
+# venv (skip them in the purge) and warn. A broken venv is NOT a hard FAIL — the
+# system still boots (greetd, shell, apps all work); only first-boot colour
+# generation is affected, and that's user-fixable. Failing would abort the whole
+# install over it (INST-04).
+KEEP_VENV_RECOVERY=0
+if [[ -n "$NEW_USER" ]]; then
+  VENV="$H/.local/state/quickshell/.venv"
+  # Check as root (read-only; -B so no root-owned __pycache__ lands in the user's
+  # tree). The venv files are world-readable, so this is faithful to the doctor.
+  _venv_ok() { [[ -x "$VENV/bin/python" ]] \
+    && "$VENV/bin/python" -B -c 'import materialyoucolor, PIL' 2>/dev/null; }
+  if _venv_ok; then
+    pass "Quickshell venv (Pillow + materialyoucolor)"
+  elif [[ -x /usr/local/bin/ii-ensure-venv ]]; then
+    T "  ..    Quickshell venv broken — attempting one offline rebuild"
+    # Rebuild AS the user (venvs bake $HOME absolute paths) — mirrors ii-post-
+    # install's invocation. The wheelhouse is still present (purge runs below).
+    sudo -u "$NEW_USER" env \
+      HOME="$H" XDG_CONFIG_HOME="$H/.config" \
+      XDG_STATE_HOME="$H/.local/state" XDG_CACHE_HOME="$H/.cache" \
+      UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-/usr/share/uv/python}" \
+      /usr/local/bin/ii-ensure-venv 2>&1 | sed 's/^/[ii-verify]     /'
+    if _venv_ok; then
+      fix "rebuilt Quickshell venv offline"
+    else
+      KEEP_VENV_RECOVERY=1
+      T "  warn  Quickshell venv still broken — kept offline recovery (wheelhouse + ii-ensure-venv) for a later rebuild (the doctor will say how)"
+    fi
+  else
+    KEEP_VENV_RECOVERY=1
+    T "  warn  Quickshell venv broken and ii-ensure-venv absent — kept wheelhouse for a later rebuild"
+  fi
+fi
+
 # ── summary + ISO-only purge ───────────────────────────────────────────────
 T ""
 (( ${#FIX[@]}  > 0 )) && { T "repairs:"; for r in "${FIX[@]}";  do T "  + $r"; done; }
@@ -228,13 +269,20 @@ if (( ${#FAIL[@]} == 0 )); then
   for b in ii-post-install ii-prepare-bootloader ii-finish-systemd-boot ii-verify \
            ii-build-wheelhouse ii-ensure-venv ii-session ii-launch-installer ii-live-welcome \
            ii-autoinstall; do
+    # Keep ii-ensure-venv when the venv couldn't be repaired, so the user can
+    # rebuild offline from the (also-kept) wheelhouse via `iictl venv`.
+    if [[ "$b" == ii-ensure-venv ]] && (( KEEP_VENV_RECOVERY )); then continue; fi
     rm -f "/usr/local/bin/$b"
   done
   # Purge ISO-only lib helpers by NAME — keep iictl.d/ and ledger.sh, which the
   # installed-system iictl framework depends on (PROPOSAL §4 Pillar 0). Never
   # blanket-rm the dir: rmdir below removes it only if nothing survives there.
   rm -f /usr/local/lib/ii/session-offline.sh
-  rm -rf /usr/share/ii-python-wheels
+  if (( KEEP_VENV_RECOVERY )); then
+    T "keeping /usr/share/ii-python-wheels + ii-ensure-venv for offline venv recovery"
+  else
+    rm -rf /usr/share/ii-python-wheels
+  fi
   rmdir --ignore-fail-on-non-empty /usr/local/lib/ii 2>/dev/null || true
   T "done — installed system is clean (greetd → /usr/bin/start-hyprland directly)"
   exit 0
