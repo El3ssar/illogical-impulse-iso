@@ -1,0 +1,36 @@
+# antidote — zsh plugin source resolver (#48). Sourced (NOT executed) by
+# sources.sh / the iictl plugins manager. Defines the ii_source_antidote_*
+# contract; add/remove/current fall through to the shared manifest helpers
+# (an antidote entry IS a plain manifest line, so no override is needed).
+#
+# An antidote "entry" is a bundle line as it appears in the plugins file
+# (~/.config/zsh/ii-plugins.txt), which `antidote load` reads directly:
+#
+#     <user/repo> [annotations...]
+#
+# e.g. `zsh-users/zsh-autosuggestions`, `zsh-users/zsh-syntax-highlighting`,
+# `ohmyzsh/ohmyzsh path:plugins/git`. The candidate set is a curated shortlist of
+# the high-value bundles antidote users reach for first (the same four the
+# PROPOSAL §5 curated bundle names) — the user types any other `user/repo`
+# through the `git` source, so this list is a convenience, not a ceiling.
+#
+# Adding a NEW ecosystem is one new file beside this one; nothing here is
+# hardcoded into the manager.
+
+# ii_source_antidote_candidates — print candidate entries, one per line. Each
+# line is the EXACT manifest line to add (source-agnostic add/remove take it
+# verbatim). Curated shortlist; extend freely.
+ii_source_antidote_candidates() {
+  cat <<'EOF'
+zsh-users/zsh-autosuggestions
+zsh-users/zsh-syntax-highlighting
+zsh-users/zsh-completions
+zsh-users/zsh-history-substring-search
+Aloxaf/fzf-tab
+romkatv/zsh-defer
+EOF
+}
+
+# add/remove/current intentionally omitted → sources.sh dispatches to the shared
+# ii_manifest_add / ii_manifest_remove / ii_manifest_current. An antidote bundle
+# line needs no special handling beyond exact-line manifest ops.

@@ -29,6 +29,21 @@ install -Dm 0644 "$SCRIPTS/runtime-lib/ledger.sh" \
                  "$BUILD/airootfs/usr/local/lib/ii/ledger.sh"
 install -Dm 0644 "$SCRIPTS/runtime-lib/mutator.sh" \
                  "$BUILD/airootfs/usr/local/lib/ii/mutator.sh"
+# sources.sh — the multi-source list-manager substrate (#48): manifest helpers,
+# drop-in source discovery/dispatch, and the baseline reversibility recorder. A
+# sourced lib (0644) on the survive-path so the installed system's `iictl
+# plugins` works (kept by ii-verify, like ledger.sh/mutator.sh).
+install -Dm 0644 "$SCRIPTS/runtime-lib/sources.sh" \
+                 "$BUILD/airootfs/usr/local/lib/ii/sources.sh"
+# sources.d/ — the drop-in source resolvers (antidote/ohmyzsh/git …). SOURCED
+# fragments (0644, like pack hooks — never executed), so a new ecosystem is one
+# file and mkarchiso's +x mode-strip can never disarm them. Auto-discovered.
+install -d "$BUILD/airootfs/usr/local/lib/ii/sources.d"
+for _src in "$SCRIPTS/runtime-lib/sources.d/"*; do
+  [[ -f "$_src" ]] || continue
+  install -Dm 0644 "$_src" \
+    "$BUILD/airootfs/usr/local/lib/ii/sources.d/$(basename "$_src")"
+done
 install -d "$BUILD/airootfs/usr/local/lib/ii/iictl.d"
 for _plugin in "$SCRIPTS/runtime-lib/iictl.d/"*; do
   [[ -f "$_plugin" ]] || continue   # skips the dir if it holds only the dotfile .keep
@@ -39,4 +54,4 @@ install -Dm 0755 "$SCRIPTS/chroot.sh" "$BUILD/airootfs/root/customize_airootfs.s
 # Referenced from profiledef file_permissions; populated by 40-packages.
 : > "$BUILD/airootfs/root/aur-packages.txt"
 ok "$(ls "$SCRIPTS/runtime" | wc -l) runtime scripts + chroot hook staged"
-ok "iictl framework staged ($(find "$BUILD/airootfs/usr/local/lib/ii/iictl.d" -maxdepth 1 -type f | wc -l) iictl.d/ plugin(s) + header + ledger + mutator)"
+ok "iictl framework staged ($(find "$BUILD/airootfs/usr/local/lib/ii/iictl.d" -maxdepth 1 -type f | wc -l) iictl.d/ plugin(s) + header + ledger + mutator + $(find "$BUILD/airootfs/usr/local/lib/ii/sources.d" -maxdepth 1 -type f 2>/dev/null | wc -l) source resolver(s))"

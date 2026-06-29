@@ -1,0 +1,226 @@
+#!/usr/bin/env bash
+#help: plugins	manage zsh plugins from multiple sources (antidote/ohmyzsh/git)
+#spec: plugins	Zsh plugins
+# plugins — the reusable MULTI-SOURCE list manager (#48), the first consumer of
+# the #47 `list` control + source-resolver hook interface. It presents one shared
+# chooser (CLI now via `iictl tweak plugins`; the #14 GUI later, same spec) over
+# an ii-OWNED manifest, with candidates pulled from pluggable, drop-in source
+# resolvers (antidote bundles, Oh My Zsh plugins, raw git repos — "including but
+# not limited to ohmyzsh"). Adding a NEW ecosystem is one file in sources.d/ — no
+# edit here, no renderer change (the iictl.d/ model applied to sources).
+#
+# Manifest: ~/.config/zsh/ii-plugins.txt — the SAME file #15 has `antidote load`
+# read. It is an ii-namespaced, UNOWNED/excluded slot (.config/zsh is not an
+# upstream-shipped path and is not in upstream's rsync --delete set), so writing
+# it never touches an upstream-owned path. The antidote load line no-ops when the
+# manifest is absent, so deleting it ⇒ vanilla.
+#
+# Reversible: every add/remove is preceded by ii_manifest_baseline, which records
+# ONE ledger row (skel-shadow restore of a curated baseline, or a `file` row that
+# removes an ours-from-scratch manifest) the first time the manifest is touched —
+# so `iictl revert-all` (or `iictl plugins --revert`) restores the curated
+# baseline. The mutation itself routes through the shared manifest helpers; no
+# bespoke writer, no second fzf/skim picker (the picker is iictl-tui).
+#
+# OUT OF SCOPE here (owned elsewhere, per #48): the `.zshrc`/antidote LOADING
+# wiring + the shell `set` chooser (#15, which consumes this manager for its
+# plugin picker); the chooser contract + iictl-tui renderer + the `list` control
+# itself (#47); the Quickshell GUI (#14).
+
+set -u
+
+# Shared header (colors, ok/bad/warn/die, _not_root, ledger_*) + the multi-source
+# substrate (manifest helpers, source discovery/dispatch, baseline recorder).
+# sources.sh sources ledger.sh itself; double-source is safe.
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+source "${II_LIB:-/usr/local/lib/ii}/sources.sh"
+
+# The ii-owned zsh plugin manifest (overridable for the no-root unit test).
+II_PLUGINS_MANIFEST="${II_PLUGINS_MANIFEST:-$HOME/.config/zsh/ii-plugins.txt}"
+IICTL_D="${II_LIB:-/usr/local/lib/ii}/iictl.d"
+
+# ── JSON helpers (dependency-free — no jq; mirrors iictl.d/pack) ──────────────
+_json_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; printf '%s' "$s"; }
+
+# print stdin lines → compact JSON array of {"value","label"} option objects.
+_json_options() {
+  local first=1 line out='['
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    (( first )) || out+=','
+    out+="{\"value\":\"$(_json_escape "$line")\",\"label\":\"$(_json_escape "$line")\"}"
+    first=0
+  done
+  out+=']'; printf '%s' "$out"
+}
+
+# print stdin lines → compact JSON array of strings (for `current[]`).
+_json_strings() {
+  local first=1 line out='['
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    (( first )) || out+=','
+    out+="\"$(_json_escape "$line")\""
+    first=0
+  done
+  out+=']'; printf '%s' "$out"
+}
+
+# ── subcommands ──────────────────────────────────────────────────────────────
+
+# cmd_candidates <source> — print the candidate set for <source> as a JSON array
+# of {value,label} options (the #47 `candidates` argv contract; iictl-tui runs
+# `iictl plugins candidates <source>` per source, %s-substituted). Each candidate
+# value IS the manifest line to add, so the apply argv stay source-agnostic.
+cmd_candidates() {
+  local source="${1:-}"
+  [[ -n "$source" ]] || die "usage: iictl plugins candidates <source>"
+  ii_source_exists "$source" || die "unknown source '$source' (see: iictl plugins sources)"
+  _ii_source_call "$source" candidates "$II_PLUGINS_MANIFEST" | _json_options
+  printf '\n'
+}
+
+# cmd_sources — list the available source names (drop-in discovered; no hardcoded
+# list). Bare prints a human list; --json prints a JSON array of names.
+cmd_sources() {
+  if [[ "${1:-}" == "--json" ]]; then
+    ii_sources_list | _json_strings; printf '\n'; return 0
+  fi
+  echo "${C_B}plugin sources${C_0} ($II_SOURCES_D):"
+  local s any=0
+  while IFS= read -r s; do
+    [[ -n "$s" ]] || continue
+    printf '  %s%s%s\n' "$C_B" "$s" "$C_0"; any=1
+  done < <(ii_sources_list)
+  (( any )) || echo "  (no source resolvers staged)"
+}
+
+# cmd_list — show the current manifest entries (the installed plugins).
+cmd_list() {
+  if [[ "${1:-}" == "--json" ]]; then
+    ii_manifest_current "$II_PLUGINS_MANIFEST" | _json_strings; printf '\n'; return 0
+  fi
+  echo "${C_B}zsh plugins${C_0} ($II_PLUGINS_MANIFEST):"
+  local line any=0
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    printf '  • %s\n' "$line"; any=1
+  done < <(ii_manifest_current "$II_PLUGINS_MANIFEST")
+  (( any )) || echo "  (no plugins yet — add with: iictl plugins add <source> <entry>)"
+}
+
+# _resolve_add_args — accept either `<source> <entry>` OR a bare `<entry>` (then
+# the source is inferred: a git ref/url → git; an antidote `path:`/bundle line →
+# the manifest is written verbatim via the generic `git` normalizer fallback).
+# Echoes "<source>\t<entry>". A bare entry with no recognisable source defaults to
+# the `git` resolver (the open-ended raw-repo path), which normalizes URLs and
+# passes user/repo through unchanged.
+_resolve_add_args() {
+  local a="${1:-}" b="${2:-}"
+  if [[ -n "$b" ]] && ii_source_exists "$a"; then
+    printf '%s\t%s\n' "$a" "$b"
+  elif [[ -n "$a" ]]; then
+    printf '%s\t%s\n' git "$a"        # bare entry → raw-git resolver (normalizes)
+  else
+    return 1
+  fi
+}
+
+# cmd_add [source] <entry> — add <entry> to the manifest via <source>'s resolver
+# (ledger-baselined first, so the change is reversible). Idempotent.
+cmd_add() {
+  _not_root
+  local pair source entry
+  pair="$(_resolve_add_args "$@")" || die "usage: iictl plugins add [<source>] <entry>"
+  source="${pair%%$'\t'*}"; entry="${pair#*$'\t'}"
+  [[ -n "$entry" ]] || die "usage: iictl plugins add [<source>] <entry>"
+  # Record the baseline BEFORE the first mutation so even this add is reversible.
+  ii_manifest_baseline "$II_PLUGINS_MANIFEST"
+  if _ii_source_call "$source" add "$II_PLUGINS_MANIFEST" "$entry"; then
+    ok "added '$entry' (via $source) — antidote load picks it up; reversible via: iictl plugins --revert"
+  else
+    die "failed to add '$entry' via source '$source'"
+  fi
+}
+
+# cmd_remove [source] <entry> — drop <entry> from the manifest (idempotent). The
+# baseline is recorded too, so a remove-then-revert restores the curated set.
+cmd_remove() {
+  _not_root
+  local pair source entry
+  pair="$(_resolve_add_args "$@")" || die "usage: iictl plugins remove [<source>] <entry>"
+  source="${pair%%$'\t'*}"; entry="${pair#*$'\t'}"
+  [[ -n "$entry" ]] || die "usage: iictl plugins remove [<source>] <entry>"
+  ii_manifest_baseline "$II_PLUGINS_MANIFEST"
+  if _ii_source_call "$source" remove "$II_PLUGINS_MANIFEST" "$entry"; then
+    ok "removed '$entry' (via $source) — reversible via: iictl plugins --revert"
+  else
+    die "failed to remove '$entry' via source '$source'"
+  fi
+}
+
+# cmd_revert — per-feature inverse: peel exactly this manager's ledger rows via
+# the SINGLE shared replay owner (BLUEPRINT §3 "domains must NOT re-implement
+# ledger replay"). Our baseline row's target IS the manifest path, so the shared
+# per-feature filter (exact/prefix match on F_target) selects exactly it.
+cmd_revert() {
+  _not_root
+  local ra="$IICTL_D/revert-all"
+  if command -v iictl >/dev/null 2>&1; then
+    exec iictl revert-all "$II_PLUGINS_MANIFEST"
+  elif [[ -x "$ra" ]]; then
+    exec "$ra" "$II_PLUGINS_MANIFEST"
+  else
+    die "revert-all engine not found ($ra) — restore the manifest baseline manually, or delete $II_PLUGINS_MANIFEST"
+  fi
+}
+
+# cmd_spec — emit the #47 chooser-contract spec for this domain. ONE source-driven
+# `list` control: sources = the drop-in resolvers (Tab cycles them in iictl-tui),
+# candidates = `iictl plugins candidates %s` (resolved per source), current = the
+# manifest entries, apply_add/apply_remove = source-agnostic add/remove of %v (the
+# candidate value IS the manifest line — see sources.sh). The renderer reads this,
+# draws it, and applies picks by running these argv back through this very plugin,
+# so the round-trip drives the TUI with ZERO new mutation paths.
+cmd_spec() {
+  local current sources
+  current="$(ii_manifest_current "$II_PLUGINS_MANIFEST" | _json_strings)"
+  sources="$(ii_sources_list | _json_strings)"
+  printf '{"domain":"plugins","title":"Zsh plugins","controls":[{"id":"plugins","type":"list","label":"Installed plugins","current":%s,"sources":%s,"candidates":["plugins","candidates","%%s"],"apply_add":["plugins","add","%%v"],"apply_remove":["plugins","remove","%%v"]}]}\n' \
+    "$current" "$sources"
+}
+
+cmd_usage() {
+  cat <<EOF
+${C_B}iictl plugins${C_0} — manage zsh plugins from multiple pluggable sources
+
+The plugin list lives in an ii-owned manifest ($II_PLUGINS_MANIFEST), read by
+\`antidote load\`. Candidates come from drop-in source resolvers (antidote
+bundles, Oh My Zsh plugins, raw git repos — add a new ecosystem by dropping one
+file in sources.d/). Every add/remove is ledger-recorded, so a revert restores
+the curated baseline.
+
+usage:
+  iictl plugins list [--json]              show the current plugins
+  iictl plugins sources [--json]           list the available sources
+  iictl plugins candidates <source>        JSON candidates for <source> (#47 argv)
+  iictl plugins --spec                      emit the iictl-tui chooser spec (JSON)
+  iictl plugins add    [<source>] <entry>  add a plugin (bare entry → git source)
+  iictl plugins remove [<source>] <entry>  remove a plugin
+  iictl plugins --revert                    restore the curated baseline (ledger)
+
+Interactive picker: ${C_B}iictl tweak plugins${C_0} (the shared iictl-tui renderer).
+EOF
+}
+
+case "${1:-help}" in
+  list)             shift; cmd_list       "$@" ;;
+  sources)          shift; cmd_sources    "$@" ;;
+  candidates)       shift; cmd_candidates "$@" ;;
+  --spec|spec)      shift; cmd_spec       "$@" ;;
+  add)              shift; cmd_add        "$@" ;;
+  remove|rm)        shift; cmd_remove     "$@" ;;
+  --revert)         shift; cmd_revert     "$@" ;;
+  help|-h|--help)   cmd_usage ;;
+  *)                die "unknown subcommand: $1 (try: iictl plugins help)" ;;
+esac

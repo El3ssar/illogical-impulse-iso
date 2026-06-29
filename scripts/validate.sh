@@ -1294,6 +1294,142 @@ if [[ -d "$_TUI_LIB/iictl.d" ]]; then
   (( _spec_bad == 0 )) && _v_ok "every #spec: advertiser answers --spec (tweak listing is truthful)"
 fi
 
+step "iictl plugins multi-source list manager (#48)"
+# Bug-class guards for the reusable multi-source list manager (#48): the iictl
+# plugins verb + the sources.sh substrate + the antidote/ohmyzsh/git resolver
+# drop-ins. It sits behind #47's `list` control and edits an ii-OWNED manifest;
+# the Iron-Law-critical invariants are (a) the manifest target is an unowned/
+# ii-namespaced path (never an upstream-owned one), (b) sources are drop-in
+# discovered (no hardcoded list — a new ecosystem is one file), (c) every
+# add/remove routes through the shared ledger (no bespoke writer), and (d) the
+# resolvers + substrate parse cleanly. The single-picker guard (no second
+# fzf/skim) and the spec advertise↔answer coupling are already enforced for every
+# iictl.d/ plugin by the "#47" step above (which auto-covers `plugins`).
+_PL="$AIROOTFS/usr/local/lib/ii/iictl.d/plugins"
+_SRCLIB="$AIROOTFS/usr/local/lib/ii/sources.sh"
+_SRCD="$AIROOTFS/usr/local/lib/ii/sources.d"
+if [[ ! -f "$_PL" || ! -f "$_SRCLIB" ]]; then
+  _v_fail "iictl.d/plugins and/or sources.sh not staged — the multi-source list manager is missing (#48)"
+else
+  # (a) the substrate parses + is staged on the survive-path (kept by ii-verify,
+  #     like ledger.sh/mutator.sh, so the installed system's manager works).
+  bash -n "$_SRCLIB" 2>/dev/null \
+    && _v_ok "sources.sh substrate staged + bash -n clean" \
+    || _v_fail "sources.sh has a syntax error — the list manager substrate won't load"
+
+  # (b) MANIFEST is an ii-owned/UNOWNED path (the skel-shadow invariant): the
+  #     manager must never write an upstream-owned path. Assert the configured
+  #     manifest sits under an ii-namespaced/unowned slot (.config/zsh — NOT the
+  #     rsync --delete'd .config/zshrc.d, NOT any upstream-shipped file). Derived
+  #     from the literal default in the plugin so a future retarget is caught.
+  _pl_code="$(grep -vE '^[[:space:]]*#' "$_PL")"
+  _manifest_def="$(grep -oE 'II_PLUGINS_MANIFEST:-[^}]*' "$_PL" | head -n1 | sed 's/^II_PLUGINS_MANIFEST:-//')"
+  if [[ "$_manifest_def" == *'.config/zsh/'* && "$_manifest_def" != *'.config/zshrc.d/'* ]]; then
+    _v_ok "plugins manifest defaults to an ii-owned/unowned slot (\$HOME/.config/zsh/…, not the rsync --delete'd zshrc.d)"
+  else
+    _v_fail "plugins manifest default ('$_manifest_def') is not the ii-owned .config/zsh slot — it must not be an upstream-owned/rsync-deleted path (skel-shadow invariant, #48)"
+  fi
+  # Cross-check against the same upstream rsync --delete dir set the skel-shadow
+  # lint uses: the manifest's skel-relative dir must NOT be one of them.
+  case "$_manifest_def" in
+    *'.config/quickshell/'*|*'.config/matugen/'*|*'.config/fish/'*|\
+    *'.config/zshrc.d/'*|*'.config/hypr/hyprland/'*|*'.config/fontconfig/'*)
+      _v_fail "plugins manifest lands in an upstream rsync --delete dir — wiped on 'iictl update' (#48)" ;;
+    *) _v_ok "plugins manifest is outside every upstream rsync --delete dir (survives 'iictl update')" ;;
+  esac
+
+  # (c) every manifest mutation routes through the shared ledger: the manager must
+  #     call ii_manifest_baseline BEFORE add/remove (so even the first edit is
+  #     reversible), and must NOT hand-write a ledger row or open-code the file
+  #     restore (it delegates revert to the single shared revert-all engine).
+  grep -q 'ii_manifest_baseline' <<<"$_pl_code" \
+    && _v_ok "iictl plugins records the manifest baseline (ii_manifest_baseline) before mutating — first edit is reversible" \
+    || _v_fail "iictl plugins never calls ii_manifest_baseline — an add/remove would be unrevertable (#48)"
+  grep -q 'ledger_record' <<<"$_pl_code" \
+    && _v_fail "iictl plugins calls ledger_record directly — recording must go through the shared sources.sh baseline recorder, not a bespoke writer (#48)" \
+    || _v_ok "iictl plugins records nothing itself (delegates to sources.sh ii_manifest_baseline)"
+  grep -qE 'revert-all|iictl[[:space:]]+revert' <<<"$_pl_code" \
+    && _v_ok "iictl plugins --revert delegates to the single shared revert-all engine (no re-implemented replay)" \
+    || _v_fail "iictl plugins does not delegate revert to revert-all — domains must NOT re-implement ledger replay (#48)"
+  # sources.sh's baseline recorder must reuse EXISTING revert-all inverses
+  # (skel-shadow restore / file rm), never invent a new ledger kind revert-all
+  # can't dispatch.
+  _src_code="$(grep -vE '^[[:space:]]*#' "$_SRCLIB")"
+  if grep -qE 'ledger_record[[:space:]]+(skel-shadow|file)' <<<"$_src_code"; then
+    _v_ok "sources.sh baseline reuses existing revert-all inverses (skel-shadow restore / file rm) — no new ledger kind"
+  else
+    _v_fail "sources.sh baseline does not record a skel-shadow/file row — revert-all could not restore the curated baseline (#48)"
+  fi
+
+  # (d) sources are DROP-IN discovered: no hardcoded source list in the manager or
+  #     substrate (a new ecosystem must be exactly one file). The manager must
+  #     enumerate via ii_sources_list and dispatch via _ii_source_call — it must
+  #     not switch/case on literal source names.
+  grep -q 'ii_sources_list' <<<"$_pl_code" \
+    && _v_ok "iictl plugins enumerates sources via ii_sources_list (drop-in discovery, no hardcoded list)" \
+    || _v_fail "iictl plugins does not use ii_sources_list — sources would not be drop-in discoverable (#48)"
+  if grep -qE 'case[[:space:]]+"?\$(source|src)"?[[:space:]]+in' <<<"$_pl_code"; then
+    _v_fail "iictl plugins switch/cases on literal source names — sources must be drop-in, not hardcoded (#48)"
+  else
+    _v_ok "iictl plugins hardcodes no source name (dispatch is purely drop-in via _ii_source_call)"
+  fi
+
+  # (e) the resolver drop-ins: each is a sourced fragment (NO shebang/+x needed —
+  #     like pack hooks) that bash -n parses and defines ii_source_<name>_candidates
+  #     (the one mandatory hook; add/remove/current fall through to the shared
+  #     manifest helpers). At least the three #48 resolvers ship.
+  if [[ ! -d "$_SRCD" ]]; then
+    _v_fail "sources.d/ resolver dir not staged — no plugin sources available (#48)"
+  else
+    _res_n=0; _res_bad=0
+    for _r in "$_SRCD"/*; do
+      [[ -f "$_r" ]] || continue
+      _rn="$(basename "$_r")"
+      _res_n=$((_res_n+1))
+      bash -n "$_r" 2>/dev/null || { _v_fail "sources.d/$_rn syntax error (sourced fragment — would break 'iictl plugins')"; _res_bad=$((_res_bad+1)); }
+      grep -qE "^[[:space:]]*ii_source_${_rn}_candidates[[:space:]]*\(\)" "$_r" \
+        || { _v_fail "sources.d/$_rn missing ii_source_${_rn}_candidates() — the one mandatory resolver hook (#48)"; _res_bad=$((_res_bad+1)); }
+    done
+    for _want in antidote ohmyzsh git; do
+      [[ -f "$_SRCD/$_want" ]] || { _v_fail "sources.d/$_want resolver not staged — #48 requires antidote/ohmyzsh/git"; _res_bad=$((_res_bad+1)); }
+    done
+    (( _res_bad == 0 )) && _v_ok "$_res_n source resolver(s) staged: bash -n clean + each defines ii_source_<name>_candidates (antidote/ohmyzsh/git present)"
+  fi
+
+  # (f) live reference emitter: `iictl plugins --spec` must produce a valid #47
+  #     chooser spec (a source-driven `list` control), proving the contract
+  #     end-to-end on this very plugin — same schema validator the pack emitter
+  #     uses. No root/network: run against a throwaway lib+manifest fixture.
+  if command -v python3 >/dev/null 2>&1 && [[ -n "${_SPEC_PY:-}" ]]; then
+    if [[ -x "$_PL" ]]; then
+      _pl_fix="$(mktemp -d)"
+      mkdir -p "$_pl_fix/lib/sources.d" "$_pl_fix/home/.config/zsh" "$_pl_fix/state"
+      # minimal substrate the plugin sources at runtime
+      for _need in iictl-common.sh ledger.sh sources.sh; do
+        cp "$AIROOTFS/usr/local/lib/ii/$_need" "$_pl_fix/lib/$_need" 2>/dev/null
+      done
+      cp "$_SRCD"/* "$_pl_fix/lib/sources.d/" 2>/dev/null
+      printf 'zsh-users/zsh-autosuggestions\n' > "$_pl_fix/home/.config/zsh/ii-plugins.txt"
+      if _pl_spec="$(II_LIB="$_pl_fix/lib" II_SOURCES_D="$_pl_fix/lib/sources.d" \
+                     HOME="$_pl_fix/home" XDG_STATE_HOME="$_pl_fix/state" \
+                     II_PLUGINS_MANIFEST="$_pl_fix/home/.config/zsh/ii-plugins.txt" \
+                     bash "$_PL" --spec 2>/dev/null)" \
+         && printf '%s' "$_pl_spec" | python3 -c "$_SPEC_PY" 2>/dev/null \
+         && grep -q '"type":"list"' <<<"$_pl_spec" \
+         && grep -q '"sources":\[' <<<"$_pl_spec"; then
+        _v_ok "iictl plugins --spec emits a valid source-driven list chooser spec (reference consumer, end-to-end, #48)"
+      else
+        _v_fail "iictl plugins --spec output fails the chooser-contract schema or is not a source-driven list (#48)"
+      fi
+      rm -rf "$_pl_fix"
+    else
+      _v_fail "iictl.d/plugins not executable — the --spec reference emitter can't run (#48)"
+    fi
+  else
+    _v_warn "skipped iictl plugins --spec schema check (python3 unavailable or schema not set up)"
+  fi
+fi
+
 step "live mkinitcpio"
 MK="$AIROOTFS/etc/mkinitcpio.conf.d/archiso.conf"
 for h in base udev archiso block filesystems; do
