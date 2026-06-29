@@ -1,0 +1,25 @@
+# role-backend — a thin COMPOSITE bundle for backend/service work (FETCHED-
+# ONLINE, never baked). Composes primitives' members directly (no `#meta:requires`
+# in the engine; pacman --needed dedupes). KEEP THIS SMALL.
+#
+# Source packs it mirrors:
+#   • lang-go      → go, gopls, delve          (a common backend runtime)
+#   • lang-python  → python-pipx, ruff         (the other common backend runtime;
+#                                               uv is already baked)
+#   • dev-cli      → httpie, xh                (API testing)
+# Backend devs reach for containers too, but that stays its own `containers` pack
+# (it has a rootless side effect) — a role bundle composes pure package members,
+# not another pack's hooks.
+#meta:type role
+go
+gopls
+delve
+python-pipx
+ruff
+httpie
+xh
+
+# Opt-in mise-managed runtimes for the two backend languages (same directives as
+# the lang-go / lang-python primitives).
+mise:go
+mise:python

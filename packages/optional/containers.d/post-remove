@@ -1,0 +1,44 @@
+# containers.d/post-remove — sourced (NOT executed) by the iictl pack engine
+# BEFORE it removes the recorded package set on `iictl pack remove containers`
+# (iictl.d/pack:cmd_remove). The symmetric inverse of containers.d/post-add: it
+# undoes the rootless podman enablement (if --rootless was used at install). Runs
+# with ledger_*/colors in scope; must be idempotent (a tooling-only install left
+# nothing to undo → this is a clean no-op) and reference no upstream-owned path.
+#
+# It reads the rows post-add recorded (kind=user-unit / kind=linger, restore_hint
+# pack=containers) so it disables EXACTLY what was enabled, in the right user
+# scope. revert-all then prunes those rows (its linger/user-unit inverse cases),
+# so a plain `iictl revert-all` reaches the same vanilla state.
+
+_undone=0
+
+# (1) Disable any rootless user podman socket this pack enabled.
+while IFS=$'\t' read -r _ts _kind _unit _pkgs _paths _hint; do
+  [[ "${_kind:-}" == user-unit ]] || continue
+  case " $_hint " in *" pack=$PACK_NAME "*) ;; *) continue ;; esac
+  # user=<u> token (space-separated, order-independent) — extract by scan.
+  _u=""
+  for _tok in $_hint; do [[ "$_tok" == user=* ]] && _u="${_tok#user=}"; done
+  [[ -n "$_u" && -n "$_unit" ]] || continue
+  echo ">> containers: disabling rootless $_unit for $_u"
+  if [[ "$(id -un)" == "$_u" ]]; then
+    systemctl --user stop "$_unit"    >/dev/null 2>&1 || true
+    systemctl --user disable "$_unit" >/dev/null 2>&1 || warn "systemctl --user disable $_unit failed"
+  else
+    systemctl --user --machine="$_u@.host" stop "$_unit"    >/dev/null 2>&1 || true
+    systemctl --user --machine="$_u@.host" disable "$_unit" >/dev/null 2>&1 || warn "systemctl --user disable $_unit failed"
+  fi
+  _undone=$((_undone + 1))
+done < <(ledger_query user-unit)
+
+# (2) Disable login lingering this pack enabled.
+while IFS=$'\t' read -r _ts _kind _user _pkgs _paths _hint; do
+  [[ "${_kind:-}" == linger ]] || continue
+  case " $_hint " in *" pack=$PACK_NAME "*) ;; *) continue ;; esac
+  [[ -n "$_user" ]] || continue
+  echo ">> containers: disabling login lingering for $_user"
+  loginctl disable-linger "$_user" >/dev/null 2>&1 || warn "loginctl disable-linger $_user failed"
+  _undone=$((_undone + 1))
+done < <(ledger_query linger)
+
+(( _undone == 0 )) && echo ">> containers: nothing rootless to undo (tooling-only install)"

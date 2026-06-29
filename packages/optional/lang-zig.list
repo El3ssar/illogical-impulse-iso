@@ -1,0 +1,8 @@
+# lang-zig — Zig developer toolchain (FETCHED-ONLINE, never baked). The Zig
+# compiler + the Zig Language Server, both official-repo. No mise: directive —
+# the official `zig` package tracks the current release and mise's Zig support is
+# less established than for the GC'd runtimes, so the system package is the
+# straightforward path here. `iictl pack remove lang-zig` -Rns's the set.
+#meta:type lang
+zig
+zls

@@ -1,0 +1,9 @@
+# lang-deno — Deno JavaScript/TypeScript runtime (FETCHED-ONLINE, never baked).
+# The official `deno` package installs the runtime; an OPT-IN `mise:deno`
+# directive is offered for mise-managed version pinning. `iictl pack remove
+# lang-deno` undoes both.
+#meta:type lang
+deno
+
+# Opt-in mise-managed Deno runtime (engine runs `mise use -g deno`; inverse on remove).
+mise:deno

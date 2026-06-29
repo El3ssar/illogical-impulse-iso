@@ -1,0 +1,24 @@
+# ai-dev — local AI development stack (FETCHED-ONLINE, never baked). Ollama (the
+# local LLM server) plus terminal AI coding clients. The members listed here are
+# the CLIENTS + the BASE ollama package; the CORRECT ollama variant for the
+# machine's GPU is chosen at install time by PCI detection in ai-dev.d/post-add
+# (NVIDIA → ollama-cuda, AMD → ollama-rocm, otherwise plain ollama) — that
+# detection MUST live in the hook, where PCI is real, NOT in this manifest.
+#
+# `ollama` is listed as the official-repo baseline so the pack is never empty and
+# a machine with no discrete GPU still gets a working server; the hook installs
+# the matching accelerated variant ON TOP for NVIDIA/AMD. `aider-chat` is AUR
+# (the engine bootstraps paru for it); `aichat` is official-repo.
+#
+# AI provider wiring: the upstream Quickshell AI service (Super+I) AUTO-DISCOVERS
+# running local Ollama models at runtime (services/Ai.qml → show-installed-ollama
+# -models.sh queries `localhost:11434`); it reads its config from the synced
+# ~/.config/quickshell/ii tree, which is rsync --delete territory we must NEVER
+# write. There is no verifiable user-owned provider file outside that tree to
+# point at ollama, so per PROPOSAL §7's audit fix the hook installs ollama +
+# clients and prints a documented manual-setup hint instead of writing a provider
+# file. Pull a model (`ollama pull …`) and the Super+I picker lists it.
+#meta:type dev
+ollama
+aider-chat
+aichat
