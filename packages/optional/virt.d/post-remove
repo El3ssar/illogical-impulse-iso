@@ -1,0 +1,15 @@
+# virt/post-remove — SOURCED by the iictl pack engine BEFORE the recorded
+# package set is removed. Inverse of post-add: remove the invoking user from the
+# `libvirt` group via gpasswd -d (privileged). The matching kind=group ledger row
+# is pruned by the shared revert engine's pack:virt sweep (the engine stamped the
+# pack tag onto it via II_PACK_TAG). libvirtd was never enabled by the pack, so
+# there is nothing to disable; waydroid (if opted in) is in the kind=pack row and
+# removed by the shared engine. set -e is NOT in effect; hooks are SOURCED at
+# subshell top level → `local` is illegal. Idempotent (no-op if not a member).
+
+_ii_user="$(id -un)"
+if id -nG "$_ii_user" 2>/dev/null | tr ' ' '\n' | grep -qx libvirt; then
+  _sudo gpasswd -d "$_ii_user" libvirt >/dev/null 2>&1 \
+    && echo ">> virt: removed '$_ii_user' from the libvirt group" \
+    || echo "!! virt: could not remove '$_ii_user' from the libvirt group" >&2
+fi

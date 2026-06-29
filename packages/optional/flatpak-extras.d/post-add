@@ -1,0 +1,55 @@
+# flatpak-extras/post-add — SOURCED by the iictl pack engine AFTER its single
+# repo member (`flatpak`, already baked) is confirmed present. Hooks are SOURCED
+# at the engine's subshell top level (NOT inside a function) → `local` is
+# illegal; the engine's helpers (incl. _pack_meta, _sudo, the ledger) are in
+# scope. set -e is NOT in effect.
+#
+# This pack's apps are FLATHUB APP-IDS declared as `#meta:app <id>` lines in
+# flatpak-extras.list (NOT plain pacman members), so the engine never tries to
+# pacman/paru them. This hook:
+#   1. adds the Flathub remote idempotently (flatpak remote-add --if-not-exists),
+#      and RECORDS it in the ledger via an ii-owned marker file (a kind=file
+#      owned path) so the addition is tracked + swept by revert-all pack:; the
+#      remote itself is removed on `--purge-remote` (see post-remove), and
+#   2. installs each #meta:app id from Flathub.
+# System-level flatpak (--system) is used so the apps are available to all users;
+# that needs root, hence _sudo. Removal is in post-remove (uninstall apps; remove
+# the remote only when II_FLATPAK_PURGE_REMOTE=1 is set).
+
+command -v flatpak >/dev/null 2>&1 || { echo "!! flatpak-extras: flatpak not installed — aborting" >&2; return 0 2>/dev/null || exit 0; }
+
+# ── 1. Flathub remote (idempotent) + ledger record via an ii-owned marker ────
+_ii_fp_remote=flathub
+_sudo flatpak remote-add --system --if-not-exists "$_ii_fp_remote" \
+  https://dl.flathub.org/repo/flathub.flatpakrepo \
+  || { echo "!! flatpak-extras: could not add the $_ii_fp_remote remote" >&2; return 0 2>/dev/null || exit 0; }
+
+# Record the remote addition. Flatpak remotes are not plain files the kind=file
+# inverse can rm, so the genuine removal lives in post-remove (--purge-remote
+# gated). We still RECORD it — via an ii-owned marker file — so `iictl doctor`
+# sees it and `revert-all pack:flatpak-extras` sweeps the row; the marker's path
+# is the owned path, and its hint names the remote for post-remove to read.
+_ii_fp_marker_dir=/etc/illogical-impulse/flatpak
+_ii_fp_marker="$_ii_fp_marker_dir/remote-$_ii_fp_remote"
+if ! _sudo test -e "$_ii_fp_marker"; then
+  _sudo install -d -m 0755 "$_ii_fp_marker_dir"
+  printf '%s\n' "$_ii_fp_remote" | _sudo tee "$_ii_fp_marker" >/dev/null
+  bash -c 'source "${II_LIB:-/usr/local/lib/ii}/ledger.sh"; ledger_record file "'"$_ii_fp_marker"'" "'"${II_PACK_TAG:-}"'" "$(ledger_escape_path "'"$_ii_fp_marker"'")" "flatpak remote='"$_ii_fp_remote"' (--purge-remote to delete the remote on revert)"'
+  echo ">> flatpak-extras: added + recorded the $_ii_fp_remote remote"
+fi
+
+# ── 2. install the curated #meta:app ids from Flathub ────────────────────────
+_ii_fp_apps=()
+while IFS= read -r _ii_app; do
+  [[ -n "$_ii_app" ]] && _ii_fp_apps+=("$_ii_app")
+done < <(_pack_meta "$PACK_LIST" app)
+
+if (( ${#_ii_fp_apps[@]} == 0 )); then
+  echo ">> flatpak-extras: no #meta:app ids declared — remote added, nothing to install"
+else
+  echo ">> flatpak-extras: installing ${#_ii_fp_apps[@]} Flathub app(s)…"
+  _ii_fp_conf=(-y); [[ -t 0 ]] && _ii_fp_conf=()
+  _sudo flatpak install --system "${_ii_fp_conf[@]}" "$_ii_fp_remote" "${_ii_fp_apps[@]}" \
+    || echo "!! flatpak-extras: one or more Flathub apps failed to install" >&2
+fi
+echo "   undo with: iictl pack remove flatpak-extras   (add II_FLATPAK_PURGE_REMOTE=1 to also drop the $_ii_fp_remote remote)"

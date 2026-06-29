@@ -1,0 +1,56 @@
+# backup/post-add — SOURCED by the iictl pack engine AFTER the backup members
+# install online (engine helpers in scope; pack tag exported). Hooks are SOURCED
+# at the engine's subshell top level (NOT inside a function) → `local` is
+# illegal; set -e is NOT in effect.
+#
+# Writes an ADDITIVE systemd-boot loader entry (ii-snapshots.conf) into the ESP
+# — a SEPARATE .conf beside upstream's entries, never an edit of theirs — that
+# points at the btrfs-snapshot boot helper, but ONLY when root is btrfs (the
+# default install FS — verified in overlay/calamares/modules/partition.conf, but
+# gated here at RUNTIME with `findmnt -no FSTYPE /`). The entry is recorded as a
+# kind=file owned path so `iictl pack remove backup` / `iictl revert-all` removes
+# it; on a non-btrfs root it is simply not written. This mirrors the loader-entry
+# layout ii-finish-systemd-boot already uses ($ESP/loader/entries/*.conf).
+
+# ── runtime btrfs gate ───────────────────────────────────────────────────────
+_ii_rootfs="$(findmnt -no FSTYPE / 2>/dev/null || true)"
+if [[ "$_ii_rootfs" != btrfs ]]; then
+  echo ">> backup: root filesystem is '${_ii_rootfs:-unknown}', not btrfs — skipping the snapshot boot entry (tools still installed)"
+  return 0 2>/dev/null || exit 0
+fi
+
+# ── locate the ESP (mirror ii-finish-systemd-boot's discovery) ───────────────
+_ii_esp=""
+if command -v bootctl >/dev/null 2>&1; then
+  _ii_esp="$(bootctl --print-esp-path 2>/dev/null || true)"
+fi
+if [[ -z "$_ii_esp" || ! -d "$_ii_esp" ]]; then
+  for _ii_cand in /boot/efi /efi /boot; do
+    [[ -d "$_ii_cand/loader/entries" ]] && { _ii_esp="$_ii_cand"; break; }
+  done
+fi
+if [[ -z "$_ii_esp" || ! -d "$_ii_esp" ]]; then
+  echo "!! backup: could not locate the ESP — snapshot boot entry not written (tools still installed)" >&2
+  return 0 2>/dev/null || exit 0
+fi
+
+_ii_entry="$_ii_esp/loader/entries/ii-snapshots.conf"
+if _sudo test -e "$_ii_entry"; then
+  echo ">> backup: $_ii_entry already present — leaving it as-is"
+else
+  _sudo install -d "$_ii_esp/loader/entries"
+  # ADDITIVE entry — a menu hint pointing the user at snapper-rollback /
+  # btrfs-assistant. It carries no kernel/initrd line (it is not a bootable
+  # kernel entry), so systemd-boot lists it as a non-default informational item;
+  # the real rollback is driven from snapper-rollback / btrfs-assistant in the
+  # session. We never touch upstream's kernel entries.
+  _sudo tee "$_ii_entry" >/dev/null <<'ENTRY'
+# ii-snapshots.conf — Illogical Impulse btrfs snapshot menu hint (backup pack).
+# DISTRO-OWNED, ADDITIVE, removable: created by `iictl pack install backup` and
+# deleted by `iictl pack remove backup` / `iictl revert-all`. It does NOT modify
+# any upstream loader entry. Use snapper-rollback / btrfs-assistant to roll back.
+title    Illogical Impulse — btrfs snapshots (use snapper-rollback / btrfs-assistant)
+ENTRY
+  bash -c 'source "${II_LIB:-/usr/local/lib/ii}/ledger.sh"; ledger_record file "'"$_ii_entry"'" "'"${II_PACK_TAG:-}"'" "$(ledger_escape_path "'"$_ii_entry"'")" "additive btrfs snapshot loader entry"'
+  echo ">> backup: wrote additive snapshot loader entry $_ii_entry (root is btrfs)"
+fi

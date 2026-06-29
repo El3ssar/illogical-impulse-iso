@@ -1,0 +1,42 @@
+# security/post-add — SOURCED by the iictl pack engine AFTER the security
+# members install online (engine helpers in scope; pack tag exported). Hooks are
+# SOURCED at the engine's subshell top level (NOT inside a function) → `local` is
+# illegal; set -e is NOT in effect.
+#
+# DELIBERATELY ENABLES NOTHING (§14): a firewall or mesh daemon coming up
+# silently on install could lock the user out or change their network posture
+# without consent. This hook only:
+#   • drops an ii-OWNED, conservative ufw default-policy ruleset (a NEW
+#     distro-owned file, recorded as a kind=file owned path so revert rm's it —
+#     never an in-place edit of a vendor config), and
+#   • PRINTS the enable hints (mirroring ii-post-install's fail-soft posture).
+# The user enables exactly the firewall/VPN they want from the printed hints.
+
+# ── ii-owned ruleset (additive file; recorded; removed on post-remove) ───────
+# A documentation/policy fragment the user can apply with a single `ufw` import.
+# Lives under an ii-namespaced path so it can never collide with a vendor file.
+_ii_rules_dir=/etc/illogical-impulse/security
+_ii_ufw_rules="$_ii_rules_dir/ufw-default.rules"
+if pacman -Qq ufw >/dev/null 2>&1 && ! _sudo test -e "$_ii_ufw_rules"; then
+  _sudo install -d -m 0755 "$_ii_rules_dir"
+  _sudo tee "$_ii_ufw_rules" >/dev/null <<'RULES'
+# ii ufw default policy (security pack) — DISTRO-OWNED, additive, removable.
+# Created by `iictl pack install security`, deleted by `iictl pack remove
+# security` / `iictl revert-all`. NOT applied automatically (no service is
+# enabled by the pack). To apply a sane laptop/desktop default:
+#     sudo ufw default deny incoming
+#     sudo ufw default allow outgoing
+#     sudo ufw enable
+RULES
+  bash -c 'source "${II_LIB:-/usr/local/lib/ii}/ledger.sh"; ledger_record file "'"$_ii_ufw_rules"'" "'"${II_PACK_TAG:-}"'" "$(ledger_escape_path "'"$_ii_ufw_rules"'")" "ii-owned ufw default ruleset"'
+  echo ">> security: wrote ii-owned ufw ruleset at $_ii_ufw_rules (not applied automatically)"
+fi
+
+# ── enable hints (NOTHING is enabled) ────────────────────────────────────────
+echo ">> security: installed — NO services were enabled (you choose). Hints:"
+echo "     ufw:        sudo ufw enable                    (see $_ii_ufw_rules)"
+echo "     firewalld:  sudo systemctl enable --now firewalld"
+echo "     opensnitch: sudo systemctl enable --now opensnitchd   (then run the GUI)"
+echo "     tailscale:  sudo systemctl enable --now tailscaled && sudo tailscale up"
+echo "     sbctl:      sbctl status                       (Secure Boot is unsupported by default; see README)"
+echo "   undo everything with: iictl pack remove security"

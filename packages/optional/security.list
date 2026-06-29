@@ -1,0 +1,23 @@
+# security — privacy/security tooling pack (#25, PROPOSAL §14). Firewalls,
+# per-app outbound control, password + hardware-token management, Secure Boot
+# tooling, and mesh/VPN clients. Installed ONLINE on demand (official repos via
+# pacman) — nothing baked or stashed (design pivot #42); only this name-list
+# rides in the image as TEXT.
+#
+# SERVICES ARE NOT AUTO-ENABLED (§14). A firewall or mesh daemon that came up
+# silently on install could lock the user out or change the network posture
+# without consent. post-add installs the members, drops any ii-OWNED ruleset
+# files (additive, never an in-place vendor edit), and PRINTS enable hints
+# (mirroring ii-post-install's fail-soft `try` posture) — it records NOTHING as
+# enabled. post-remove removes the ii-owned rulesets. ufw and firewalld are both
+# offered; the user picks one and enables it from the printed hint.
+#meta:type security
+ufw
+firewalld
+opensnitch
+keepassxc
+yubikey-manager
+yubikey-personalization
+sbctl
+tailscale
+wireguard-tools

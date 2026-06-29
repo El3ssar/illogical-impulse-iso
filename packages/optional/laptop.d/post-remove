@@ -1,0 +1,39 @@
+# laptop/post-remove — SOURCED by the iictl pack engine BEFORE the recorded
+# package set is removed (engine helpers in scope). Inverse of post-add, in
+# reverse order so a service/file is undone before its package goes away:
+#   1. disable whichever power service we enabled (ii_service_disable, run as
+#      root via the re-sourced mutator; the matching kind=service ledger row is
+#      pruned by the shared revert engine's pack:laptop sweep);
+#   2. delete the ii-OWNED fprintd PAM drop-in (privileged rm; the kind=file
+#      ledger row's own rm -f then no-ops on the already-gone file);
+#   3. strip the sentinel-fenced power-widget launch line (ii_lua_block_remove,
+#      user-owned, no sudo).
+# All idempotent — every step no-ops if its target is already gone. set -e is
+# NOT in effect. Hooks are SOURCED at subshell top level → `local` is illegal.
+
+_ii_mut_root() {   # _ii_mut_root <mutator-fn> [args…] — run a mutator as root
+  _sudo env HOME="$HOME" XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}" \
+    II_LIB="${II_LIB:-/usr/local/lib/ii}" \
+    bash -c 'source "${II_LIB}/mutator.sh"; fn="$1"; shift; "$fn" "$@"' _ "$@"
+}
+
+# 1. disable every power service the pack might have enabled (idempotent — a unit
+#    that was never enabled is left untouched by ii_service_disable's prior-state
+#    check). We don't know which one was chosen, so cover the trio safely.
+for _ii_unit in power-profiles-daemon.service tlp.service auto-cpufreq.service; do
+  if systemctl is-enabled "$_ii_unit" >/dev/null 2>&1; then
+    _ii_mut_root ii_service_disable "$_ii_unit" \
+      || echo "!! laptop: disabling $_ii_unit failed" >&2
+  fi
+done
+
+# 2. delete the ii-owned PAM drop-in (privileged; never touched a vendor file).
+_ii_pam_dropin=/etc/pam.d/ii-fprintd
+if _sudo test -e "$_ii_pam_dropin"; then
+  _sudo rm -f "$_ii_pam_dropin" \
+    && echo ">> laptop: removed ii-owned fprintd PAM drop-in $_ii_pam_dropin" \
+    || echo "!! laptop: could not remove $_ii_pam_dropin" >&2
+fi
+
+# 3. strip the sentinel-fenced power-widget launch line (user-owned).
+ii_lua_block_remove "$HOME/.config/hypr/custom/execs.lua" laptop

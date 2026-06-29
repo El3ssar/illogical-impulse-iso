@@ -1,0 +1,27 @@
+# gaming/post-add — SOURCED (not executed) by the iictl pack engine AFTER the
+# gaming members install online, with the engine's helpers in scope (mutators,
+# ledger, _sudo) and the pack tag exported (II_PACK_TAG=pack:gaming) so the
+# fenced-block row is swept on `iictl pack remove gaming`. set -e is NOT in
+# effect (the engine subshell-fences this fragment); guard everything explicitly.
+#
+# The only side effect: write the sentinel-fenced game-mode toggle widget launch
+# line into the user's ~/.config/hypr/custom/execs.lua via ii_lua_block_write
+# (the ONE sanctioned writer for a custom/*.lua slot). The launch line is GUARDED
+# behind the widget QML's presence — the widget itself is framework work and is
+# NOT shipped by this pack (§14 audit fix d), so the exec only fires when a
+# game-mode widget actually exists, and non-pack users never get a dead launcher.
+# This is a user-owned file write — no root/sudo needed.
+
+_gaming_execs="$HOME/.config/hypr/custom/execs.lua"
+
+# Guard the launch behind the widget's presence at *runtime* (the QML lands via a
+# future framework drop). hl.exec_cmd shells out, so a missing binary just no-ops
+# the test; the widget is launched only when its launcher is on PATH.
+ii_lua_block_write "$_gaming_execs" gaming <<'LUA'
+-- gaming pack — game-mode toggle widget launcher. The widget QML is framework
+-- work (not shipped by this pack); only launch it when present so a missing
+-- widget never errors. Removed by `iictl pack remove gaming` (post-remove).
+hl.on("hyprland.start", function()
+    hl.exec_cmd("sh -c 'command -v ii-game-mode-widget >/dev/null 2>&1 && exec ii-game-mode-widget'")
+end)
+LUA
