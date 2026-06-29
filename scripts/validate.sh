@@ -340,6 +340,70 @@ grep -qE '^\s*- (netinstall|packages)\s*(#.*)?$' "$SETTINGS" \
   && _v_fail "settings.conf still references the removed selection flow" \
   || _v_ok "settings.conf has no selection-screen leftovers"
 
+# ── iictl webapp + install drop-ins (#21) ────────────────────────────────────
+# The webapp launcher + curated app-group picker. The generic plugin-lint
+# (exec/shebang/bash -n/#help) for EVERY iictl.d/ drop-in is asserted in the
+# "iictl.d/ plugin architecture" step; here we assert these two SPECIFICALLY
+# exist and pass it, plus the baked manifest + fallback icon, plus the
+# accent-rule-LOCATION bug-class guard (the "never write a sync-deleted dir"
+# class): the webapp accent rule must target ONLY ~/.config/hypr/custom/rules.lua
+# — never an upstream rsync --delete tree (quickshell/ii, hypr/hyprland, matugen,
+# fish/config.fish, zshrc.d), which `iictl update` wipes.
+_IID="$AIROOTFS/usr/local/lib/ii/iictl.d"
+for _drop in webapp install; do
+  _p="$_IID/$_drop"
+  if [[ ! -f "$_p" ]]; then
+    _v_fail "iictl.d/$_drop not staged (#21) — the $_drop verb is missing"
+    continue
+  fi
+  _ok=1
+  [[ -x "$_p" ]] || { _v_fail "iictl.d/$_drop not executable"; _ok=0; }
+  [[ "$(head -c2 "$_p")" == "#!" ]] || { _v_fail "iictl.d/$_drop has no shebang"; _ok=0; }
+  bash -n "$_p" 2>/dev/null || { _v_fail "iictl.d/$_drop syntax error"; _ok=0; }
+  grep -qE '^#help:[[:space:]]' "$_p" || { _v_fail "iictl.d/$_drop missing #help: header"; _ok=0; }
+  (( _ok )) && _v_ok "iictl.d/$_drop staged (exec + shebang + bash -n + #help:)"
+done
+# install MUST delegate to the ONLINE pack engine (iictl pack install), NOT an
+# on-ISO stash or [ii-extra] (PR #42 pivot: optional packs are fetched online).
+_INST="$_IID/install"
+if [[ -f "$_INST" ]]; then
+  _inst_code="$(grep -vE '^[[:space:]]*#' "$_INST")"
+  grep -q 'pack install' <<<"$_inst_code" \
+    && _v_ok "iictl install delegates to the online pack engine (iictl pack install)" \
+    || _v_fail "iictl install does not call 'iictl pack install' — it must wrap the #6 online pack engine"
+  if grep -qE 'ii-extra|pacman-ii-[a-z]+\.conf|/usr/share/illogical-impulse/[a-z]*stash|repo-add' <<<"$_inst_code"; then
+    _v_fail "iictl install references an on-ISO stash / [ii-extra] — optional packs are fetched ONLINE (PR #42); never an offline stash"
+  else
+    _v_ok "iictl install uses no on-ISO stash / [ii-extra] (online-only, per PR #42)"
+  fi
+fi
+# Baked, opt-in manifest + generic fallback icon for `iictl webapp seed`/`add`.
+[[ -f "$AIROOTFS/usr/share/illogical-impulse/webapps/defaults.list" ]] \
+  && _v_ok "webapps/defaults.list baked (opt-in curated seed list)" \
+  || _v_fail "webapps/defaults.list missing — iictl webapp seed has no manifest"
+[[ -s "$AIROOTFS/usr/share/illogical-impulse/webapps/fallback.png" ]] \
+  && _v_ok "webapps/fallback.png baked (generic webapp icon)" \
+  || _v_fail "webapps/fallback.png missing/empty — iictl webapp add has no fallback icon"
+# Accent-rule-LOCATION bug-class guard. Comments stripped first so the file's own
+# documentation of the rule (which legitimately NAMES the forbidden trees to warn
+# itself away from them) can neither satisfy nor trip the code check.
+_WAPP="$_IID/webapp"
+if [[ -f "$_WAPP" ]]; then
+  _wapp_code="$(grep -vE '^[[:space:]]*#' "$_WAPP")"
+  if grep -qE '(quickshell/ii|hypr/hyprland|/matugen/|fish/config\.fish|zshrc\.d)' <<<"$_wapp_code"; then
+    _v_fail "iictl.d/webapp writes into an upstream rsync --delete tree (quickshell/ii, hypr/hyprland, matugen, fish/config.fish, zshrc.d) — the accent rule must live ONLY in custom/rules.lua"
+  else
+    _v_ok "iictl.d/webapp touches no sync-deleted upstream tree (accent rule confined to custom/rules.lua)"
+  fi
+  grep -q 'custom/rules.lua' <<<"$_wapp_code" \
+    && _v_ok "iictl.d/webapp targets the sanctioned custom/rules.lua slot for accent rules" \
+    || _v_fail "iictl.d/webapp never references custom/rules.lua — the accent rule has no sanctioned slot"
+  # The fence write MUST go through the shared mutator, never a bespoke append.
+  grep -q 'ii_lua_block_write' <<<"$_wapp_code" \
+    && _v_ok "iictl.d/webapp fences the accent rule via the shared ii_lua_block_write mutator" \
+    || _v_fail "iictl.d/webapp does not use ii_lua_block_write — accent rules must be sentinel-fenced via the shared mutator"
+fi
+
 step "iictl update flags + embedded welcome"
 # Bug-class guards for the 'iictl update --noask' fix + the embedded welcome:
 #   • iictl must NOT pass the dropped '--noask' to upstream ./setup (it now
