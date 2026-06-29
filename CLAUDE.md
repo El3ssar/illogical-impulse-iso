@@ -83,8 +83,11 @@ scripts/
     ├── iictl-common.sh        # shared iictl/plugin header (colors, ok/die, ledger, plugin contract)
     ├── ledger.sh              # append-only TSV state ledger (record/query/owned_paths; the reversibility manifest)
     ├── mutator.sh             # idempotent reversible ledger-recording primitives (service/group/chsh/lua-block fence/conflicts)
-    └── iictl.d/<cmd>          # ★ iictl drop-in subcommands (pack/revert-all/tweak/about…) — one file per verb, zero core edits
+    ├── sources.sh             # multi-source list-manager substrate (#48): manifest helpers + drop-in source discovery/dispatch + baseline reversibility recorder
+    ├── sources.d/<name>       # ★ source resolvers (antidote/ohmyzsh/git…) — SOURCED fragments defining ii_source_<name>_candidates(+add/remove/current); one file = one ecosystem, no hardcoded list
+    └── iictl.d/<cmd>          # ★ iictl drop-in subcommands (pack/revert-all/tweak/plugins/about…) — one file per verb, zero core edits
                                #   tweak = thin bridge → the baked iictl-tui ratatui renderer (over each domain's --spec)
+                               #   plugins = the #48 multi-source list manager over the ii-owned ~/.config/zsh/ii-plugins.txt manifest
 tools/                         # manual: gen-assets.sh, resolve-deps.py
 upstream/illogical-impulse     # dots submodule — DO NOT EDIT
 build/ out/                    # generated
@@ -149,6 +152,8 @@ build/ out/                    # generated
 | Post-install / bootloader / verify logic | `scripts/runtime/ii-*` |
 | Add an iictl subcommand (drop-in) | `scripts/runtime-lib/iictl.d/<cmd>` (exec; `source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"` + a `#help:` line) → staged to `/usr/local/lib/ii/iictl.d/` |
 | Give a domain an interactive configurator (TUI) | the domain's `iictl.d/<cmd>` emits `--spec` (the 3-control chooser contract: `choice`/`list`/`toggle`; see BLUEPRINT §"iictl chooser contract") + a `#spec:` header; the baked `iictl-tui` (ratatui) renders it via `iictl tweak <domain>`. The renderer mutates nothing — it shells back to the domain's `iictl` verbs, so the ledger still owns reversibility. |
+| Add a NEW plugin-source ecosystem (antidote/ohmyzsh/git…) | `scripts/runtime-lib/sources.d/<name>` — a SOURCED bash fragment defining `ii_source_<name>_candidates` (mandatory; prints candidate manifest lines) and optionally `_add`/`_remove`/`_current` (else they fall through to the shared `ii_manifest_*` helpers in `sources.sh`). Auto-discovered — no edit to `iictl.d/plugins` or the `iictl-tui` renderer. |
+| Manage zsh plugins (add/remove from any source) | `iictl plugins {list,sources,candidates,add,remove,--spec,--revert}` or `iictl tweak plugins` (the shared chooser); the ii-owned manifest is `~/.config/zsh/ii-plugins.txt` (`scripts/runtime-lib/iictl.d/plugins`, #48) |
 | Change/extend the `iictl-tui` renderer | `overlay/aur-pkgbuilds/iictl-tui/crate/` (Rust/ratatui; built by prebuild → `[ii-extra]`, baked via `packages/base.list`) |
 | Pipeline step | `scripts/prepare.d/NN-*.sh` |
 | Default wallpaper / wordmark | `overlay/assets/` (then `just assets`) |
