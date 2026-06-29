@@ -7,6 +7,9 @@
 # installs the right variant from the on-ISO stash (packages/nvidia.list).
 
 # CLI quality-of-life stack
+# bash-completion loads our /usr/share/bash-completion/completions/iictl on the
+# installed system (fish/zsh load their vendor completions natively).
+bash-completion
 btop
 eza
 bat
