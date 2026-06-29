@@ -291,7 +291,7 @@ if [[ -n "$NEW_USER" ]]; then
   H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
   if [[ -n "$H" && -d "$H" ]] && type ii_systemd_running &>/dev/null; then
     if ii_systemd_running && command -v kwriteconfig6 &>/dev/null; then
-      try "kdeglobals Darkly" sudo -u "$NEW_USER" kwriteconfig6 \
+      try "kdeglobals Darkly" runuser -u "$NEW_USER" -- env HOME="$H" kwriteconfig6 \
         --file kdeglobals --group KDE --key widgetStyle Darkly
     else
       try "kdeglobals Darkly (offline)" ii_set_kde_widget_style "$NEW_USER" "$H" Darkly
@@ -313,18 +313,22 @@ fi
 # /etc/skel. Color generation, kitty theming, etc. are NOT pre-rendered: on
 # first login `iictl welcome --auto` runs switchwall.sh in a real Hyprland
 # session (it replaces upstream's FirstRunExperience — suppressed just below).
+# Drop to the user with runuser, NOT sudo -u: this whole script runs in the
+# Calamares chroot (no /dev/pts), where sudo's default use_pty dies with
+# "unable to allocate pty" — silently skipping the venv build (INST-05). All
+# `runuser -u "$NEW_USER" --` drops below carry the user env explicitly.
 if [[ -n "$NEW_USER" ]]; then
   H=$(getent passwd "$NEW_USER" | cut -d: -f6 || true)
   VENV="$H/.local/state/quickshell/.venv"
   if [[ -n "$H" && -d "$H" && -x /usr/local/bin/ii-ensure-venv ]]; then
-    try "ii-ensure-venv $NEW_USER" sudo -u "$NEW_USER" env \
+    try "ii-ensure-venv $NEW_USER" runuser -u "$NEW_USER" -- env \
       HOME="$H" XDG_CONFIG_HOME="$H/.config" \
       XDG_STATE_HOME="$H/.local/state" XDG_CACHE_HOME="$H/.cache" \
       UV_PYTHON_INSTALL_DIR="${UV_PYTHON_INSTALL_DIR:-/usr/share/uv/python}" \
       /usr/local/bin/ii-ensure-venv
   fi
   if [[ -x "$VENV/bin/python" ]]; then
-    sudo -u "$NEW_USER" env HOME="$H" "$VENV/bin/python" -c 'import materialyoucolor, PIL' 2>/dev/null \
+    runuser -u "$NEW_USER" -- env HOME="$H" "$VENV/bin/python" -c 'import materialyoucolor, PIL' 2>/dev/null \
       && T "  ok    Quickshell venv (Pillow + materialyoucolor)" \
       || T "  CRIT  Quickshell venv missing Pillow/materialyoucolor — first-boot color gen will fail"
   else
@@ -359,7 +363,7 @@ if [[ -n "$NEW_USER" ]]; then
     # skel-provided copy is reversible too — the old `! -e` guard skipped this
     # once skel started seeding the file.
     if [[ -e "$FRUN" && -r /usr/local/lib/ii/ledger.sh ]]; then
-      try "ledger: first-run welcome override" sudo -u "$NEW_USER" env \
+      try "ledger: first-run welcome override" runuser -u "$NEW_USER" -- env \
         HOME="$H" XDG_STATE_HOME="$H/.local/state" \
         bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record file first-run-welcome "" "$(ledger_escape_path "$HOME/.local/state/quickshell/user/first_run.txt")" "rm to restore upstream first-run welcome"'
     fi
@@ -383,7 +387,7 @@ if [[ -n "$NEW_USER" ]]; then
     EXECS="$H/.config/hypr/custom/execs.lua"
     if [[ -r "$EXECS" && -r /usr/local/lib/ii/ledger.sh ]] \
        && grep -qxF -- '-- >>> illogical-impulse welcome' "$EXECS"; then
-      try "ledger: welcome exec-hook fence" sudo -u "$NEW_USER" env \
+      try "ledger: welcome exec-hook fence" runuser -u "$NEW_USER" -- env \
         HOME="$H" XDG_STATE_HOME="$H/.local/state" \
         bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record lua-block "$HOME/.config/hypr/custom/execs.lua" "" "$(ledger_escape_path "$HOME/.config/hypr/custom/execs.lua")" welcome'
     fi
