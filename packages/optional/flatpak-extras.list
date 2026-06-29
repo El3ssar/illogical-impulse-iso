@@ -1,0 +1,25 @@
+# flatpak-extras — curated Flathub applications pack (#25, PROPOSAL §14). A small
+# set of popular apps that are best consumed as sandboxed Flatpaks rather than
+# from the repos. `flatpak` itself is ALREADY baked (goodies.list), so this pack
+# only wires up the Flathub remote and installs the curated app-ids — nothing is
+# baked or stashed (design pivot #42); only this name-list rides in the image as
+# TEXT.
+#
+# #meta:type flatpak marks this as a Flatpak pack. The Flathub APP-IDS are
+# declared as `#meta:app <id>` lines (NOT plain members) so the pack engine does
+# NOT try to pacman/paru them — its package phase sees a single, already-present
+# real member (`flatpak`), records an empty resolved set, and hands off to the
+# post-add hook. post-add `flatpak remote-add`s Flathub idempotently, records the
+# remote in the ledger (an ii-owned marker file under owned paths), and installs
+# each #meta:app id. post-remove uninstalls the app-ids; it removes the Flathub
+# remote ONLY when `--purge-remote` is passed (default: leave it, other apps may
+# use it).
+#meta:type flatpak
+# Curated Flathub app-ids (installed by post-add; flatpak is the only repo member):
+#meta:app com.spotify.Client
+#meta:app md.obsidian.Obsidian
+#meta:app com.discordapp.Discord
+#meta:app org.signal.Signal
+#meta:app com.bitwarden.desktop
+#meta:app io.github.flattool.Warehouse
+flatpak

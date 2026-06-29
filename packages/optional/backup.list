@@ -1,0 +1,20 @@
+# backup — btrfs snapshot + backup tooling pack (#25, PROPOSAL §14). The default
+# install filesystem is btrfs (overlay/calamares/modules/partition.conf sets
+# `filesystem: "btrfs"` for root and home; mount.conf defines the @ / @home
+# subvolumes), and snapper + snap-pac are ALREADY baked in goodies.list, so this
+# pack adds the GUI + rollback + offsite-backup layer on top. Installed ONLINE on
+# demand (official repos via pacman, AUR via paru) — nothing baked or stashed
+# (design pivot #42); only this name-list rides in the image as TEXT.
+#
+# post-add writes an ADDITIVE systemd-boot loader entry (ii-snapshots.conf) into
+# the ESP — but ONLY when root is btrfs (a RUNTIME `findmnt -no FSTYPE /` check;
+# btrfs is the default, so the common case). The entry is a SEPARATE .conf
+# recorded as an owned path; upstream's loader entries are never touched.
+# post-remove deletes ii-snapshots.conf (the package set + path row are reverted
+# by the engine). On a non-btrfs install the entry is simply not written.
+#meta:type backup
+btrfs-assistant
+restic
+borg
+# snapper-rollback — AUR (built at runtime via paru):
+snapper-rollback

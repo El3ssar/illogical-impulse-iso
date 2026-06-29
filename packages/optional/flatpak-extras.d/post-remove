@@ -1,0 +1,38 @@
+# flatpak-extras/post-remove — SOURCED by the iictl pack engine BEFORE its repo
+# member is removed. Inverse of post-add: uninstall the curated Flathub app-ids,
+# then remove the Flathub remote ONLY when opted in. Hooks are SOURCED at the
+# engine's subshell top level (NOT inside a function) → `local` is illegal; the
+# engine's _pack_meta/_sudo/ledger helpers are in scope. set -e is NOT in effect.
+#
+# The Flathub remote is LEFT IN PLACE by default — other apps the user installed
+# independently may rely on it. Pass II_FLATPAK_PURGE_REMOTE=1 to also delete it:
+#     II_FLATPAK_PURGE_REMOTE=1 iictl pack remove flatpak-extras
+# When purged, the ii-owned marker file (the kind=file ledger row) is removed too
+# (the row's own rm -f then no-ops); otherwise the marker is left so the recorded
+# remote keeps reflecting reality.
+
+command -v flatpak >/dev/null 2>&1 || return 0 2>/dev/null || exit 0
+_ii_fp_remote=flathub
+
+# ── 1. uninstall the curated #meta:app ids ───────────────────────────────────
+_ii_fp_apps=()
+while IFS= read -r _ii_app; do
+  [[ -n "$_ii_app" ]] && _ii_fp_apps+=("$_ii_app")
+done < <(_pack_meta "$PACK_LIST" app)
+if (( ${#_ii_fp_apps[@]} > 0 )); then
+  echo ">> flatpak-extras: uninstalling ${#_ii_fp_apps[@]} Flathub app(s)…"
+  _sudo flatpak uninstall --system -y "${_ii_fp_apps[@]}" 2>/dev/null \
+    || echo "!! flatpak-extras: some apps were not installed (or failed to uninstall) — continuing" >&2
+fi
+
+# ── 2. remove the remote only on --purge-remote (II_FLATPAK_PURGE_REMOTE=1) ──
+_ii_fp_marker=/etc/illogical-impulse/flatpak/remote-$_ii_fp_remote
+if [[ -n "${II_FLATPAK_PURGE_REMOTE:-}" ]]; then
+  echo ">> flatpak-extras: --purge-remote → removing the $_ii_fp_remote remote"
+  _sudo flatpak remote-delete --system --force "$_ii_fp_remote" 2>/dev/null \
+    || echo "!! flatpak-extras: could not delete the $_ii_fp_remote remote" >&2
+  _sudo rm -f "$_ii_fp_marker" 2>/dev/null || true
+  _sudo rmdir /etc/illogical-impulse/flatpak 2>/dev/null || true
+else
+  echo ">> flatpak-extras: leaving the $_ii_fp_remote remote in place (II_FLATPAK_PURGE_REMOTE=1 to drop it)"
+fi

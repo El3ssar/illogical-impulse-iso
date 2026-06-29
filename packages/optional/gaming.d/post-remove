@@ -1,0 +1,9 @@
+# gaming/post-remove — SOURCED by the iictl pack engine BEFORE the recorded
+# package set is removed (engine helpers in scope). Inverse of post-add: strip
+# the sentinel-fenced game-mode widget launch line from the user's execs.lua via
+# ii_lua_block_remove (the ONE sanctioned stripper), leaving upstream's empty
+# stub and any user lines byte-for-byte intact. The lua-block ledger row itself
+# is pruned by the shared revert engine when it sweeps pack:gaming. User-owned
+# file — no root/sudo needed. Idempotent: a no-op if the block is already gone.
+
+ii_lua_block_remove "$HOME/.config/hypr/custom/execs.lua" gaming

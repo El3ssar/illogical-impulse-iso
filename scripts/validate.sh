@@ -17,8 +17,10 @@ _v_fail() { printf '   %sFAIL%s %s\n' "$C_R" "$C_0" "$*" >&2
             FAIL=$((FAIL+1)); fails+=("$*"); }
 
 # Pillar-6 reversibility lint — the structural checks not already inline below
-# (skel-shadow collision, optional-list validity, pack-hook hygiene, PII guard,
-# and the skel-upstream precondition). Sourced here, invoked as its own step
+# (skel-shadow collision, optional-list validity, pack-hook hygiene, the #25
+# pack Iron-Law guards [no multilib toggle / fenced custom/*.lua writes only /
+# btrfs-gated snapshot entry / no in-place vendor edit / no upstream-owned path],
+# PII guard, and the skel-upstream precondition). Sourced here, invoked as its step
 # further down; reuses the _v_* tallies above. Checks 2/3/5 of Pillar 6 already
 # live inline in their own steps (see tools/lint-additive.sh header for the map).
 # shellcheck source=../tools/lint-additive.sh
@@ -2306,10 +2308,12 @@ fi
 step "additive/reversibility lint"
 # Pillar 6 (the structural checks): skel-upstream precondition + skel-shadow
 # collision, packages/optional/*.list validity (no double-bake), pack
-# post-add/post-remove hook hygiene (bash -n + mutator inverse symmetry,
-# IMMUNE-03), and the PII guard. '|| true' so an unexpected non-zero can't abort
-# before the summary (the FAIL tally, not lint_additive's return code, is what
-# gates the build).
+# post-add/post-remove hook hygiene (bash -n + post-add↔post-remove pairing +
+# mutator inverse symmetry, IMMUNE-03), the #25 pack Iron-Law guards (no multilib
+# toggle / fenced custom/*.lua writes only / btrfs-gated snapshot entry / no
+# in-place vendor edit / no upstream-owned path), and the PII guard. '|| true' so
+# an unexpected non-zero can't abort before the summary (the FAIL tally, not
+# lint_additive's return code, is what gates the build).
 lint_additive || true
 
 step "docs drift guard (DOC-01)"
