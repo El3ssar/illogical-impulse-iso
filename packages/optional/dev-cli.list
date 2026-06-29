@@ -1,0 +1,22 @@
+# dev-cli — modern developer command-line utilities (FETCHED-ONLINE, never
+# baked). A curated set of fast, ergonomic CLI tools that complement the baked
+# baseline (ripgrep/fd/fzf/bat/eza/lazygit already ship). All members are
+# official-repo, so they install via pacman with no AUR build. `iictl pack
+# remove dev-cli` -Rns's exactly this set.
+#
+# httpie ships as the official `httpie` package (the proposal's "python-httpie
+# (httpie)" — `httpie` is the correct repo name; `python-httpie` is not a real
+# package). All others are official-repo Rust/Go CLIs.
+#meta:type dev
+difftastic
+gitui
+hyperfine
+tokei
+sd
+dust
+procs
+bottom
+xh
+httpie
+mkcert
+pre-commit

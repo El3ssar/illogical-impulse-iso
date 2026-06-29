@@ -1,0 +1,84 @@
+# ai-dev.d/post-add — sourced (NOT executed) by the iictl pack engine after a
+# successful `iictl pack install ai-dev` (iictl.d/pack:_run_hook). Runs with the
+# engine's _sudo/colors/warn, the ledger_* helpers and the shared mutators
+# (ii_service_enable) in scope, plus PACK_NAME and II_PACK_TAG (=pack:ai-dev,
+# stamped onto recorded side-effect rows). Idempotent; every side effect has a
+# symmetric inverse in ai-dev.d/post-remove. References no upstream-owned path.
+#
+# Two jobs:
+#   (1) Install the GPU-accelerated ollama variant matching the machine's real
+#       hardware. The base `ollama` (CPU) is a manifest member the engine already
+#       installed; here we PCI-detect a discrete GPU and layer the accelerated
+#       variant ON TOP (ollama-cuda for NVIDIA, ollama-rocm for AMD). The detect
+#       MUST live in the hook (PCI is real on the target) — never in the manifest.
+#       It mirrors ii-post-install's /sys/bus/pci walk (vendor + 0x03* display
+#       class): NVIDIA vendor 0x10de → cuda, AMD/ATI vendor 0x1002 → rocm.
+#   (2) Enable + start the ollama system service (ii_service_enable → ledger-
+#       recorded, reversed by post-remove's ii_service_disable) and print the
+#       documented manual provider-setup hint. We do NOT write any AI provider
+#       file: the upstream Quickshell AI service (services/Ai.qml) auto-discovers
+#       running local Ollama models at runtime (show-installed-ollama-models.sh →
+#       localhost:11434) and reads its config from the synced ~/.config/quickshell
+#       /ii tree, which is rsync --delete territory we must NEVER touch. There is
+#       no verifiable user-owned provider file outside that tree, so per PROPOSAL
+#       §7's audit fix we install + enable ollama and document manual setup.
+
+# ── (1) PCI-detect the discrete GPU vendor (mirror ii-post-install) ──────────
+# Walk /sys/bus/pci, keep only display-class (0x03*) devices, collect vendor ids.
+_gpu_vendor=""
+shopt -s nullglob
+for _d in /sys/bus/pci/devices/*; do
+  case "$(cat "$_d/class" 2>/dev/null)" in 0x03*) ;; *) continue ;; esac
+  _v="$(cat "$_d/vendor" 2>/dev/null)"
+  case "$_v" in
+    0x10de) _gpu_vendor=nvidia; break ;;   # NVIDIA wins if present
+    0x1002) [[ -z "$_gpu_vendor" ]] && _gpu_vendor=amd ;;  # AMD/ATI
+  esac
+done
+shopt -u nullglob
+
+case "$_gpu_vendor" in
+  nvidia) _ollama_variant=ollama-cuda ;;
+  amd)    _ollama_variant=ollama-rocm ;;
+  *)      _ollama_variant="" ;;            # no discrete GPU → plain ollama is enough
+esac
+
+if [[ -n "$_ollama_variant" ]]; then
+  echo ">> ai-dev: $_gpu_vendor GPU detected — installing accelerated $_ollama_variant"
+  _aiconfirm=(); [[ -t 0 ]] || _aiconfirm=(--noconfirm)
+  if _sudo pacman -S --needed "${_aiconfirm[@]}" "$_ollama_variant" >/dev/null 2>&1; then
+    # Record the variant so post-remove / revert-all -Rns it WITH the pack (the
+    # base `ollama` member is already in the kind=pack row; record the variant in
+    # its own pack row so it is torn down too). The pack tag goes in the target so
+    # revert-all's pack: filter matches.
+    ledger_record pack "pack:$PACK_NAME" "$_ollama_variant" "" "members=post-add gpu=$_gpu_vendor"
+  else
+    warn "ai-dev: installing $_ollama_variant failed — falling back to the CPU 'ollama' the engine already installed"
+  fi
+else
+  echo ">> ai-dev: no discrete NVIDIA/AMD GPU detected — using CPU 'ollama' (already installed)"
+fi
+
+# ── (2) enable + start the ollama service (reversible via the shared mutator) ─
+if type ii_service_enable >/dev/null 2>&1; then
+  ii_service_enable ollama.service || warn "ai-dev: ii_service_enable ollama.service failed"
+else
+  warn "ai-dev: shared mutator unavailable — enable ollama manually: sudo systemctl enable --now ollama.service"
+fi
+# Best-effort start so the Super+I picker can see models immediately (start is not
+# an enable; no ledger row — the enable above is the reversible state).
+_sudo systemctl start ollama.service >/dev/null 2>&1 || true
+
+# ── documented manual provider-setup hint (no provider file is written) ──────
+cat <<'HINT'
+>> ai-dev installed: ollama (+ GPU variant if detected), aider-chat, aichat.
+   Local AI in the Quickshell shell (Super+I) is AUTO-DISCOVERED once ollama is
+   running and has a model pulled — no provider file is written (the AI widget's
+   config lives in the upstream-synced shell config tree, which the distro never
+   edits). To finish setup:
+       ollama pull llama3.2        # or any model from https://ollama.com/library
+   then open Super+I and pick the local model. The terminal clients work now:
+       aichat 'hello'              # uses http://localhost:11434
+       aider --model ollama/llama3.2
+   Remove everything with:  iictl pack remove ai-dev
+HINT

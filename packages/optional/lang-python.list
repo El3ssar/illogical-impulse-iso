@@ -1,0 +1,15 @@
+# lang-python — Python developer toolchain (FETCHED-ONLINE, never baked). `uv`
+# (the fast installer/resolver) is already in the baked dev baseline
+# (packages/goodies.list), so this pack adds the per-application installer and the
+# linter/formatter, plus an OPT-IN `mise:python` runtime directive for a
+# mise-managed interpreter alongside the system python. All members are
+# official-repo. `iictl pack remove lang-python` undoes the directive and -Rns's
+# the members.
+#meta:type lang
+python-pipx
+ruff
+
+# Opt-in mise-managed Python runtime (engine runs `mise use -g python`; inverse
+# on remove). uv stays the primary project tool; mise is for whole-interpreter
+# version management for users who want it.
+mise:python

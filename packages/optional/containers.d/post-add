@@ -1,0 +1,73 @@
+# containers.d/post-add — sourced (NOT executed) by the iictl pack engine after a
+# successful `iictl pack install containers …` (iictl.d/pack:_run_hook). It runs
+# with the ledger_* helpers, the shared mutators, and the engine's colors/warn in
+# scope, and sees PACK_NAME, PACK_LIST, II_PACK_FLAGS (the trailing install flags,
+# space-joined) and II_PACK_TAG (=pack:<name>, stamped onto recorded rows so
+# `iictl revert-all pack:containers` sweeps them). It must be idempotent and leave
+# every change reversible by the symmetric containers.d/post-remove.
+#
+# Default (no flag): pure tooling — the orchestration CLIs are already installed
+# by the engine; there is NOTHING to do, so the hook is a no-op and records no
+# side effect. The container ENGINES (docker/podman/compose) are baked baseline.
+#
+# `--rootless`: opt the invoking user into rootless podman. Rootless podman keys
+# on the USER systemd socket plus login lingering (Podman docs: `systemctl --user
+# enable podman.socket` + `loginctl enable-linger <user>`). Both are user-scoped,
+# so the system-scoped shared mutator (ii_service_enable) does not apply; we do
+# the enable directly and ledger-record each step (kind=user-unit / kind=linger,
+# pack-tagged via II_PACK_TAG) so the symmetric post-remove undoes EXACTLY these,
+# and `iictl pack remove containers` restores vanilla. We never touch any
+# upstream-owned path.
+
+case " ${II_PACK_FLAGS:-} " in
+  *" --rootless "*) ;;
+  *)
+    echo ">> containers: tooling-only install (pass --rootless to enable rootless podman)"
+    return 0 2>/dev/null || exit 0
+    ;;
+esac
+
+# Identify the real (non-root) user to enable rootless podman for. The engine runs
+# install as the user (_not_root), so SUDO_USER is unset and $USER is right; fall
+# back to the logname/uid lookup defensively.
+_cu="${SUDO_USER:-${USER:-$(id -un 2>/dev/null)}}"
+if [[ -z "$_cu" || "$_cu" == root ]]; then
+  warn "containers --rootless: cannot resolve a non-root user — skipping rootless enablement"
+  return 0 2>/dev/null || exit 0
+fi
+
+echo ">> containers --rootless: enabling rootless podman for $_cu"
+
+# (1) Login lingering so the user systemd instance runs without an active login
+# (idempotent — enable-linger is a no-op if already on). Record it pack-tagged so
+# post-remove / revert-all can disable it.
+if loginctl show-user "$_cu" 2>/dev/null | grep -q '^Linger=yes'; then
+  : # already lingering — nothing to record
+else
+  if loginctl enable-linger "$_cu" >/dev/null 2>&1; then
+    ledger_record linger "$_cu" "${II_PACK_TAG:-}" "" "pack=$PACK_NAME"
+  else
+    warn "containers --rootless: loginctl enable-linger $_cu failed (continuing)"
+  fi
+fi
+
+# (2) The user podman socket. Enable it in the user manager (idempotent — record
+# only if we actually flip it from not-enabled). `--machine=<user>@.host` lets us
+# drive the user manager even though the engine may run under sudo's wheel-nopasswd
+# without a user bus; fall back to a plain `systemctl --user` when we ARE the user.
+_uctl() {
+  if [[ "$(id -un)" == "$_cu" ]]; then systemctl --user "$@"
+  else systemctl --user --machine="$_cu@.host" "$@"; fi
+}
+if [[ "$(_uctl is-enabled podman.socket 2>/dev/null)" == enabled ]]; then
+  : # already enabled
+else
+  if _uctl enable podman.socket >/dev/null 2>&1; then
+    ledger_record user-unit "podman.socket" "${II_PACK_TAG:-}" "" "pack=$PACK_NAME user=$_cu"
+    _uctl start podman.socket >/dev/null 2>&1 || true   # best-effort; not recorded (start is not enable)
+  else
+    warn "containers --rootless: systemctl --user enable podman.socket failed for $_cu (continuing)"
+  fi
+fi
+
+echo ">> containers --rootless: done — rootless podman socket active for $_cu (DOCKER_HOST/unix socket at \$XDG_RUNTIME_DIR/podman/podman.sock)"

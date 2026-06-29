@@ -193,7 +193,15 @@ _lint_optional_lists() {
     done < "$pkglist"
   fi
 
-  local l name lbad
+  # #19 step 10(d): rsync --delete'd upstream-owned config trees a pack manifest
+  # OR hook must never write to / reference (it would be wiped on 'iictl update'
+  # or clobber upstream). Substring match — any occurrence in a manifest line or a
+  # hook body is a fail. Mirrors the mutator's refusal set + PROPOSAL §3 row 4.
+  local upstream_paths=(
+    'quickshell/ii' 'matugen' 'fish/config.fish' 'zshrc.d' 'hypr/hyprland'
+  )
+
+  local l name lbad tool up
   for l in "${lists[@]}"; do
     lbad=0
     while IFS= read -r ln; do
@@ -203,6 +211,17 @@ _lint_optional_lists() {
         # well-formed: '#meta:<key>' or '#meta:<key> <value...>' (key = [a-z]+)
         if [[ ! "$ln" =~ ^#meta:[a-z][a-z]*([[:space:]].*)?$ ]]; then
           _v_fail "optional/$(basename "$l"): malformed #meta line: '$ln' (expect '#meta:<key> [value]')"
+          lbad=$((lbad+1))
+        fi
+        continue
+      fi
+      # #19: `mise:<tool>[@<version>]` runtime directive (PROPOSAL §7). The engine
+      # parses these as `mise use -g <tool>`, NOT pacman packages, so validate the
+      # directive grammar here and DO NOT treat the token as a package name.
+      if [[ "$ln" == 'mise:'* ]]; then
+        tool="${ln#mise:}"; tool="${tool%%#*}"; tool="${tool//[[:space:]]/}"
+        if [[ ! "$tool" =~ ^[A-Za-z0-9][A-Za-z0-9._+-]*(@[A-Za-z0-9][A-Za-z0-9._+-]*)?$ ]]; then
+          _v_fail "optional/$(basename "$l"): malformed mise directive: '$ln' (expect 'mise:<tool>[@<version>]')"
           lbad=$((lbad+1))
         fi
         continue
@@ -219,8 +238,54 @@ _lint_optional_lists() {
         lbad=$((lbad+1))
       fi
     done < "$l"
-    (( lbad == 0 )) && _v_ok "optional/$(basename "$l"): valid manifest, no baked members"
+    # 10(d): no upstream-owned path in a NON-comment manifest line (a package or
+    # mise: line). Explanatory '#' comments naming the tree to say "we don't touch
+    # it" are allowed; an actual member/directive pointing at it is not.
+    for up in "${upstream_paths[@]}"; do
+      if grep -vE '^[[:space:]]*#' "$l" | grep -Fq "$up"; then
+        _v_fail "optional/$(basename "$l"): references upstream-owned path '$up' in a member/directive line — packs must never write/reference the rsync --delete'd tree (#19 step 10d)"
+        lbad=$((lbad+1))
+      fi
+    done
+    (( lbad == 0 )) && _v_ok "optional/$(basename "$l"): valid manifest (names/mise:/#meta:), no baked member, no upstream path"
   done
+
+  # #19 step 10(c): ai-dev's GPU PCI detection MUST live in the hook (PCI is real
+  # on the target), NOT in the manifest. Assert the manifest carries no PCI walk /
+  # variant token and the post-add hook does. Only runs when ai-dev is authored.
+  local aidev="$optdir/ai-dev.list" aidev_hook="$optdir/ai-dev.d/post-add"
+  if [[ -f "$aidev" ]]; then
+    # Scan NON-comment lines only: a comment explaining "the variant is chosen in
+    # the hook" is fine; an actual `ollama-cuda` member or a PCI walk is not.
+    if grep -vE '^[[:space:]]*#' "$aidev" | grep -Eq 'sys/bus/pci|0x10de|0x1002|ollama-cuda|ollama-rocm'; then
+      _v_fail "optional/ai-dev.list: carries a GPU PCI-detect / ollama-cuda|rocm MEMBER — that detection belongs in ai-dev.d/post-add (PCI is real on the target), not the manifest (#19 step 10c)"
+    else
+      _v_ok "optional/ai-dev.list: no PCI-detect member in the manifest (correct — it lives in the hook) (#19 step 10c)"
+    fi
+    if [[ -f "$aidev_hook" ]]; then
+      if grep -q 'sys/bus/pci' "$aidev_hook" && grep -Eq 'ollama-cuda|ollama-rocm' "$aidev_hook"; then
+        _v_ok "optional/ai-dev.d/post-add: PCI-detects the GPU and selects the ollama variant in the hook (#19 step 10c)"
+      else
+        _v_fail "optional/ai-dev.d/post-add: missing the /sys/bus/pci GPU walk + ollama-cuda|rocm selection — ai-dev cannot pick the accelerated variant (#19 step 10c)"
+      fi
+    else
+      _v_fail "optional/ai-dev.d/post-add missing — ai-dev declares GPU-gated variants with no hook to install them (#19 step 10c)"
+    fi
+  fi
+
+  # #19 step 10(d) cont.: hook bodies must also reference no upstream-owned path.
+  local hd hf
+  shopt -s nullglob
+  for hf in "$optdir"/*.d/post-add "$optdir"/*.d/post-remove; do
+    for up in "${upstream_paths[@]}"; do
+      # The ai-dev hook legitimately NAMES the upstream tree in a comment to
+      # explain why it does NOT write it; allow it only inside comment lines.
+      if grep -Fq "$up" "$hf" && grep -vE '^[[:space:]]*#' "$hf" | grep -Fq "$up"; then
+        _v_fail "optional/$(basename "$(dirname "$hf")")/$(basename "$hf"): code references upstream-owned path '$up' — hooks must never write the rsync --delete'd tree (#19 step 10d)"
+      fi
+    done
+  done
+  shopt -u nullglob
   return 0
 }
 

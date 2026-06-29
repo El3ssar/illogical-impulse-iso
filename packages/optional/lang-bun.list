@@ -1,0 +1,10 @@
+# lang-bun — Bun JavaScript runtime + toolkit (FETCHED-ONLINE, never baked). The
+# official `bun` package installs the runtime; an OPT-IN `mise:bun` directive is
+# also offered for users who want mise to manage the Bun version alongside it. A
+# member-light pack: one official-repo package plus the opt-in runtime directive.
+# `iictl pack remove lang-bun` undoes both.
+#meta:type lang
+bun
+
+# Opt-in mise-managed Bun runtime (engine runs `mise use -g bun`; inverse on remove).
+mise:bun

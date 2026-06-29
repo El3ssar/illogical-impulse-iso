@@ -1,0 +1,23 @@
+# ai-dev.d/post-remove — sourced (NOT executed) by the iictl pack engine BEFORE
+# it removes the recorded package set on `iictl pack remove ai-dev`
+# (iictl.d/pack:cmd_remove). The symmetric inverse of ai-dev.d/post-add: stop +
+# disable the ollama service we enabled, so removal restores vanilla. The GPU
+# variant + base ollama + clients are torn down by the engine's offline-safe
+# `pacman -Rns` of the recorded pack set (this hook runs first). Idempotent;
+# references no upstream-owned path.
+#
+# We deliberately do NOT delete ~/.ollama (the user's pulled models) — that is
+# user data, not a distro side effect; the Iron Law restores OUR changes, not the
+# user's downloaded content. A user who wants the disk space back removes it
+# explicitly. No AI provider file was ever written, so there is nothing to delete.
+
+# RAW, NON-RECORDING inverse (revert-all convention: an undo never appends a
+# fresh ledger row). post-add's ii_service_enable recorded the reversible
+# kind=service row; this is its plain `systemctl disable` inverse. Using the
+# recording ii_service_disable here would append an un-pack-tagged service-disable
+# row that a later global revert-all would wrongly re-enable from. Stop first so
+# the disable doesn't race a running unit. (The recorded enable row is pruned by
+# the `revert-all pack:ai-dev` that cmd_remove execs right after this hook.)
+_sudo systemctl stop ollama.service    >/dev/null 2>&1 || true
+_sudo systemctl disable ollama.service >/dev/null 2>&1 || warn "ai-dev: systemctl disable ollama.service failed"
+echo ">> ai-dev: ollama service disabled (pulled models in ~/.ollama are kept — remove manually if unwanted)"

@@ -1,0 +1,8 @@
+# lang-ruby — Ruby developer toolchain (FETCHED-ONLINE, never baked). The Ruby
+# runtime is opt-in and mise-managed (the `mise:ruby` directive), matching the
+# "bake no language runtimes" stance (PROPOSAL §7/§13). No pacman members — mise
+# delivers the interpreter under its user-owned ~/.config/mise + data dir, so a
+# `iictl pack remove lang-ruby` cleanly undoes the directive and leaves nothing
+# baked behind.
+#meta:type lang
+mise:ruby

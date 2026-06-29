@@ -45,8 +45,10 @@ _sudo() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
 
 # ── manifest parsing ─────────────────────────────────────────────────────────
 # _pack_members <listfile> — echo the package-name members, one per line
-# (blank lines, ordinary comments and #meta: lines stripped; trailing inline
-# comments removed). Mirrors 40-packages.sh's manifest reader.
+# (blank lines, ordinary comments, #meta: lines AND `mise:` directive lines
+# stripped; trailing inline comments removed). Mirrors 40-packages.sh's manifest
+# reader. A `mise:` line is a RUNTIME directive (parsed by _pack_mise), NOT a
+# pacman package — it must never reach the pacman/paru classifier (PROPOSAL §7).
 _pack_members() {
   local f="$1" line name
   [[ -f "$f" ]] || return 0
@@ -54,8 +56,28 @@ _pack_members() {
     line="${line%$'\r'}"
     [[ -z "${line//[[:space:]]/}" ]] && continue   # blank
     [[ "$line" == '#'* ]] && continue              # comment OR #meta:
+    [[ "$line" == 'mise:'* ]] && continue          # mise: runtime directive (see _pack_mise)
     name="${line%%#*}"; name="${name//[[:space:]]/}"
     [[ -n "$name" ]] && printf '%s\n' "$name"
+  done < "$f"
+}
+
+# _pack_mise <listfile> — echo each `mise:<tool>[@<version>]` directive's TOOL
+# argument (the bare `<tool>` or `<tool>@<version>` token), one per line. These
+# are the language RUNTIMES a lang-* pack opts the user into; the engine applies
+# each as `mise use -g <tool>` at install and the inverse `mise use -gu <tool>`
+# at removal (PROPOSAL §7 "framework pack engine handles both line syntaxes").
+# This writes NO shell-activation line — `mise activate` is the shell domain's
+# job; here we only register a global tool version under mise's user-owned
+# ~/.config/mise. Trailing inline comments are stripped.
+_pack_mise() {
+  local f="$1" line tool
+  [[ -f "$f" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ "$line" == 'mise:'* ]] || continue
+    tool="${line#mise:}"; tool="${tool%%#*}"; tool="${tool//[[:space:]]/}"
+    [[ -n "$tool" ]] && printf '%s\n' "$tool"
   done < "$f"
 }
 
@@ -135,6 +157,10 @@ _run_hook() {
   local hook="$II_OPTDIR/$PACK_NAME.d/$PACK_PHASE"
   [[ -r "$hook" ]] || return 0
   echo "${C_B}>> running '$PACK_NAME' $PACK_PHASE hook${C_0}"
+  # II_PACK_FLAGS — any trailing `iictl pack install` flags (e.g. --rootless),
+  # space-joined, for the hook to grep. Empty for post-remove and for flag-less
+  # installs; exported so the sourced-in-a-subshell hook inherits it.
+  export II_PACK_FLAGS="${II_PACK_FLAGS:-}"
   # REV-04: stamp the pack tag onto every side-effect row the post-add hook
   # records through the shared mutators (service/group/chsh/lua-block). The
   # mutators copy II_PACK_TAG into the ledger row's packages column; revert-all's
@@ -228,21 +254,29 @@ cmd_spec() {
 }
 
 cmd_install() {
-  local name="${1:-}"
-  [[ -n "$name" ]] || die "usage: iictl pack install <pack>"
+  local name="${1:-}"; shift || true
+  [[ -n "$name" ]] || die "usage: iictl pack install <pack> [flags…]"
   _not_root
   local listfile="$II_OPTDIR/$name.list"
   [[ -f "$listfile" ]] || die "unknown pack '$name' (see: iictl pack list)"
+
+  # Trailing flags (e.g. `iictl pack install containers --rootless`) are handed to
+  # the pack's post-add hook via II_PACK_FLAGS — a space-joined, opaque-to-the-
+  # engine string the hook greps for its own opt-in toggles. The engine itself
+  # interprets none of them (a pack with no flags sees an empty string), so this
+  # stays additive: existing packs are unaffected.
+  local PACK_FLAGS="$*"
 
   if _pack_installed "$name"; then
     warn "pack '$name' is already installed (iictl pack remove $name to undo)"
     return 0
   fi
 
-  local members=() conflicts=() official=() aur=() m
+  local members=() conflicts=() mise=() official=() aur=() m
   mapfile -t members   < <(_pack_members   "$listfile")
   mapfile -t conflicts < <(_pack_conflicts "$listfile")
-  (( ${#members[@]} > 0 )) || die "pack '$name' lists no members"
+  mapfile -t mise      < <(_pack_mise      "$listfile")
+  (( ${#members[@]} > 0 || ${#mise[@]} > 0 )) || die "pack '$name' lists no members"
 
   # CONFLICT GATE — runs BEFORE any pacman transaction, so a conflicting pack is
   # refused with no half-applied state (the laptop power-tool mutual exclusion).
@@ -298,10 +332,20 @@ cmd_install() {
   # it) can never leave the installed members unrecorded.
   _record_pack "$name" "$(_resolved_since)" "${members[*]}"
 
+  # mise: runtime directives — register each opted-in toolchain GLOBALLY via
+  # `mise use -g <tool>` and ledger-record it so removal/revert undoes exactly
+  # the directives this pack added (PROPOSAL §7). Runs AFTER the package phase
+  # (so a mise pulled in as a member, though it is baseline-baked, is present)
+  # and AFTER the kind=pack row (atomicity, REV-03). No shell-activation line is
+  # written — that is the shell domain's job; this only writes mise's own
+  # user-owned ~/.config/mise.
+  _apply_mise "$name" "${mise[@]}"
+
   # Optional post-add hook (services/groups/fenced custom/*.lua via the shared
   # mutators — each ledger-records its own inverse). Subshell-fenced (_run_hook):
   # a stray exit/die cannot abort the engine now that the pack row is recorded.
-  _run_hook "$name" post-add
+  # II_PACK_FLAGS carries any trailing `iictl pack install` flags to the hook.
+  II_PACK_FLAGS="$PACK_FLAGS" _run_hook "$name" post-add
 
   # Re-snapshot AFTER post-add: a hook may pull extra packages. Capture any net-new
   # ones into a SECOND kind=pack row so `revert-all pack:<name>` -Rns's them too
@@ -334,6 +378,41 @@ _record_pack() {
   local name="$1" resolved="$2" tag="$3"
   ledger_record pack "pack:$name" "$resolved" "" "members=$tag"
 }
+
+# _apply_mise <pack> <tool...> — register each `mise:` runtime directive globally
+# via `mise use -g <tool>` and ledger-record ONE kind=mise row per tool so removal
+# and revert-all undo exactly the directives this pack added (PROPOSAL §7's
+# "record the directive set"). The row's target is the tool token, restore_hint is
+# the pack name, and the pack tag (II_PACK_TAG, set only around the engine's
+# install flow — see below) goes in the otherwise-unused packages column so
+# `revert-all pack:<name>` sweeps it WITH the pack (mirrors the REV-04 mutator
+# convention). mise is baseline-baked; if it is somehow absent we warn (fail-soft)
+# rather than abort — the package members already landed and are recorded.
+_apply_mise() {
+  local name="$1"; shift || true
+  (( $# > 0 )) || return 0
+  if ! command -v mise >/dev/null 2>&1; then
+    warn "mise not found — skipping the '$name' mise: runtime directives ($*); install mise then: mise use -g <tool>"
+    return 0
+  fi
+  local tool tag="pack:$name"
+  for tool in "$@"; do
+    [[ -n "$tool" ]] || continue
+    echo "${C_B}>> mise use -g $tool${C_0} (opt-in runtime for '$name')"
+    if mise use -g "$tool" >/dev/null 2>&1; then
+      ledger_record mise "$tool" "$tag" "" "pack=$name"
+    else
+      warn "mise use -g $tool failed — runtime not registered (continuing; pack members already installed)"
+    fi
+  done
+}
+
+# NB: the INVERSE of a kind=mise row (`mise use -gu <tool>`) lives in the single
+# ledger-replay owner — revert-all's _revert_row `mise)` case — NOT here. cmd_remove
+# delegates to `iictl revert-all pack:<name>`, whose per-feature filter sweeps the
+# pack-tagged mise rows (the pack tag sits in the packages column) and applies that
+# inverse, so the user-owned ~/.config/mise entry is undone and the row pruned with
+# the pack. No domain re-implements ledger replay (BLUEPRINT §3).
 
 cmd_remove() {
   local name="${1:-}"

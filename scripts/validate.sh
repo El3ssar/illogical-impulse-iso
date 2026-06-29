@@ -1192,6 +1192,29 @@ else
   fi
 fi
 
+# (f) mise: runtime-directive wiring (#19). lang-* packs mix pacman names with
+# `mise:<tool>` directive lines the engine applies as `mise use -g` and reverses
+# as `mise use -gu`; the directive token must NEVER reach the pacman/paru
+# classifier. Guard the three load-bearing halves so a future engine edit can't
+# silently regress the lang packs into "mise:rust treated as a package".
+if [[ -f "$PK" ]]; then
+  _pk_code3="$(grep -vE '^[[:space:]]*#' "$PK")"
+  # _pack_members must skip `mise:` lines (else they are sent to pacman -Si).
+  grep -qE "mise:" <<<"$_pk_code3" \
+    && _v_ok "pack engine parses mise: runtime directives (kept out of the pacman classifier) (#19)" \
+    || _v_fail "pack engine never references mise: — mise:<tool> lines would be mis-classified as packages (#19)"
+  # the engine applies `mise use -g` (install) somewhere.
+  grep -qE 'mise[[:space:]]+use[[:space:]]+-g' <<<"$_pk_code3" \
+    && _v_ok "pack engine applies mise: directives via 'mise use -g' (#19)" \
+    || _v_fail "pack engine declares no 'mise use -g' application for mise: directives (#19)"
+  # the inverse lives in revert-all (the single ledger-replay owner), not the engine.
+  if [[ -f "$RA" ]]; then
+    grep -qE 'mise[[:space:]]+use[[:space:]]+-gu' <<<"$_ra_code" \
+      && _v_ok "revert-all reverses mise: directives via 'mise use -gu' (kind=mise inverse) (#19)" \
+      || _v_fail "revert-all has no 'mise use -gu' inverse — a mise: directive would not be reversible (#19)"
+  fi
+fi
+
 step "pack removal robustness — shared deps + side-effect sweep (REV-04)"
 # REV-04: two real failure modes in `iictl pack remove`.
 #   (a) The recorded set is members + the deps they pulled. The old revert-all
