@@ -579,6 +579,85 @@ else
   _v_fail "iictl.d/ plugin dir not staged under usr/local/lib/ii/"
 fi
 
+step "update channels + migrations + docs + config (#27)"
+# This feature adds channel-pinned updates (stable=recorded DOTS_COMMIT,
+# edge=HEAD) plus three drop-ins. The generic plugin lint (exec/shebang/bash -n/
+# #help) is already asserted above; these add the feature-specific bug-class
+# guards.
+#
+# (a) ANTI-ROT — the stable pin must equal the submodule HEAD at build time.
+# DOTS_COMMIT in the built release stamp IS the stable channel pin (iictl update
+# checks it out). If the stamp ever drifts from the submodule the pin "rots" —
+# stable would track a commit the ISO was never built from. 70-assets.sh derives
+# it from `git -C $DOTS rev-parse --short HEAD`, so they must match here.
+_REL_STAMP="$AIROOTFS/etc/$DISTRO_ID/release"
+if [[ ! -f "$_REL_STAMP" ]]; then
+  _v_fail "release stamp not staged ($_REL_STAMP) — anti-rot pin check can't run"
+else
+  _stamp_pin="$(awk -F= '/^DOTS_COMMIT=/{print $2; exit}' "$_REL_STAMP")"
+  _sub_head="$(git -C "$DOTS" rev-parse --short HEAD 2>/dev/null)"
+  if [[ -z "$_stamp_pin" ]]; then
+    _v_fail "release stamp has no DOTS_COMMIT — the stable pin is missing"
+  elif [[ -z "$_sub_head" ]]; then
+    _v_warn "could not read submodule HEAD ($DOTS) — anti-rot pin check skipped"
+  elif [[ "$_stamp_pin" == "$_sub_head" ]]; then
+    _v_ok "stable pin honest: stamp DOTS_COMMIT ($_stamp_pin) == submodule HEAD (#27 anti-rot)"
+  else
+    _v_fail "stable pin ROT: stamp DOTS_COMMIT ($_stamp_pin) != submodule HEAD ($_sub_head) — re-run just prepare after a submodule bump"
+  fi
+  # (b) the stamp must carry CHANNEL= (the channel marker iictl reads/flips).
+  grep -q '^CHANNEL=' "$_REL_STAMP" \
+    && _v_ok "release stamp carries CHANNEL= (channel marker present)" \
+    || _v_fail "release stamp missing CHANNEL= — iictl update channels have no marker (#27)"
+fi
+# (c) cmd_update must implement the channel switch (localized to the built-in).
+_IICTL_BIN="$AIROOTFS/usr/local/bin/iictl"
+if [[ -f "$_IICTL_BIN" ]]; then
+  grep -q -- '--channel' "$_IICTL_BIN" \
+    && _v_ok "iictl cmd_update implements --channel (stable|edge)" \
+    || _v_fail "iictl has no --channel handling — update channels missing (#27)"
+else
+  _v_fail "iictl not staged — cannot check the channel extension"
+fi
+# (d) the three new drop-ins exist (generic lint covers exec/shebang/bash -n/
+# #help; here we assert presence so a missing verb fails loudly).
+for _v27 in migrate docs config; do
+  _p27="$AIROOTFS/usr/local/lib/ii/iictl.d/$_v27"
+  [[ -f "$_p27" && -x "$_p27" ]] \
+    && _v_ok "iictl.d/$_v27 staged + executable (#27)" \
+    || _v_fail "iictl.d/$_v27 missing/not executable — the $_v27 verb won't resolve (#27)"
+done
+# (e) baked content: migrations dir + offline quickstart, distro-owned /usr/share.
+_MIGDIR="$AIROOTFS/usr/share/$DISTRO_ID/migrations"
+[[ -d "$_MIGDIR" ]] \
+  && _v_ok "migrations dir baked ($_MIGDIR)" \
+  || _v_fail "migrations dir not baked at $_MIGDIR (#27)"
+_QSTART="$AIROOTFS/usr/share/$DISTRO_ID/docs/quickstart.md"
+[[ -f "$_QSTART" ]] \
+  && _v_ok "offline quickstart baked ($_QSTART)" \
+  || _v_fail "docs/quickstart.md not baked at $_QSTART (#27)"
+# (f) UPSTREAM-PATH GUARD — none of the new files may write an upstream-owned
+# path. Channel/pin/migration/config state lives ONLY in distro-owned
+# /etc/$DISTRO_ID/release + /usr/share/$DISTRO_ID/ and user-owned
+# $XDG_STATE_HOME/illogical-impulse/. The upstream-owned rice config dirs
+# (~/.config/{quickshell/ii,hypr/hyprland,matugen,zshrc.d}) must never be a write
+# TARGET. Match write idioms ('> path', 'tee path', 'install … path',
+# 'sed -i … path') against those dirs; comments stripped first so the doc prose
+# can't trip it.
+_u_bad=0
+for _f27 in "$AIROOTFS/usr/local/lib/ii/iictl.d/migrate" \
+            "$AIROOTFS/usr/local/lib/ii/iictl.d/docs" \
+            "$AIROOTFS/usr/local/lib/ii/iictl.d/config" \
+            "$_IICTL_BIN"; do
+  [[ -f "$_f27" ]] || continue
+  _code27="$(grep -vE '^[[:space:]]*#' "$_f27")"
+  if grep -qE '(>>?|tee|install|cp|mv|sed -i)[^|&;]*\.config/(quickshell/ii|hypr/hyprland|matugen|zshrc\.d)' <<<"$_code27"; then
+    _v_fail "$(basename "$_f27") writes an upstream-owned rice path (.config/{quickshell/ii,hypr,matugen,zshrc.d}) — #27 forbids it"
+    _u_bad=$((_u_bad+1))
+  fi
+done
+(( _u_bad == 0 )) && _v_ok "channels/migrate/docs/config write no upstream-owned path (#27 additive guard)"
+
 step "revert-all reversibility engine"
 # revert-all (#4) replays the ledger in REVERSE to restore vanilla upstream. Its
 # bug-class guard (Iron Rule): it MUST strip fenced custom/*.lua blocks through

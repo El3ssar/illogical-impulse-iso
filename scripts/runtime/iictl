@@ -30,7 +30,7 @@ fi
 
 # Built-in command help — harvested by cmd_help (verb<TAB>one-line). Plugins add
 # their own #help: lines; keep this the only block of them in this file.
-#help: update	update the dots (./setup); --system upgrades repos+AUR first
+#help: update	update the dots (./setup); --channel stable|edge, --system upgrades repos+AUR first
 #help: doctor	health checks (venv, greetd, boot, pacman)
 #help: venv	rebuild the Quickshell python venv
 #help: welcome	show the distro welcome card (also: bare `iictl`; --auto: first-boot)
@@ -88,8 +88,58 @@ cmd_version() {
   command -v Hyprland >/dev/null && echo "  HYPRLAND=$(Hyprland --version 2>/dev/null | head -1 | awk '{print $2}')"
 }
 
+# _release_get <KEY> — echo the value of KEY=… from the release stamp ("" if
+# absent). Channel + pin live ONLY in the distro-owned stamp, never upstream.
+_release_get() { awk -F= -v k="$1" '$1==k{print $2; exit}' "$RELEASE_FILE" 2>/dev/null; }
+
+# _release_set_channel <stable|edge> — rewrite the CHANNEL= line in the
+# root-owned release stamp in place (adding it if a pre-#27 stamp lacked it).
+# Root-write gated via sudo, mirroring how the rest of iictl reaches root.
+# Reversible by definition: switching back rewrites the one line. No upstream
+# file is touched — only this distro-owned stamp.
+_release_set_channel() {
+  local want="$1" prev
+  [[ -f "$RELEASE_FILE" ]] || { warn "no $RELEASE_FILE — channel not persisted"; return 0; }
+  prev="$(_release_get CHANNEL)"; prev="${prev:-stable}"
+  [[ "$prev" == "$want" ]] && return 0
+  local tmp; tmp="$(mktemp)" || { warn "mktemp failed — channel not persisted"; return 0; }
+  if grep -q '^CHANNEL=' "$RELEASE_FILE"; then
+    sed "s/^CHANNEL=.*/CHANNEL=$want/" "$RELEASE_FILE" > "$tmp"
+  else
+    cat "$RELEASE_FILE" > "$tmp"; printf 'CHANNEL=%s\n' "$want" >> "$tmp"
+  fi
+  sudo install -m 0644 "$tmp" "$RELEASE_FILE" && rm -f "$tmp" \
+    || { rm -f "$tmp"; warn "could not write $RELEASE_FILE — channel not persisted"; return 0; }
+  # Record the prior value so `iictl revert-all` can restore the channel marker.
+  ledger_record channel "$want" "" "" "release=$RELEASE_FILE prev=$prev"
+}
+
 cmd_update() {
   _not_root
+  # Channels (#27): stable (default) pins to the recorded DOTS_COMMIT — the
+  # build-time submodule HEAD baked into the release stamp by 70-assets.sh; edge
+  # tracks upstream HEAD. The channel is a single line in the distro-owned
+  # release stamp; switching writes only that stamp (fully reversible). Both feed
+  # the SAME upstream ./setup — the channel only governs WHICH commit is checked
+  # out first. Edits stay LOCAL to cmd_update so this merges cleanly with sibling
+  # PRs touching other iictl functions.
+  local system=0 channel="" want="" a
+  for a in "$@"; do
+    case "$a" in
+      --system)  system=1 ;;
+      --channel) want="__next__" ;;
+      stable|edge) [[ "$want" == "__next__" ]] && { channel="$a"; want=""; } || die "unexpected argument: $a" ;;
+      --channel=stable|--channel=edge) channel="${a#--channel=}" ;;
+      *) die "unknown option: $a (usage: iictl update [--channel stable|edge] [--system])" ;;
+    esac
+  done
+  [[ "$want" == "__next__" ]] && die "--channel needs an argument: stable|edge"
+  # Active channel = the explicit flag, else the persisted stamp value, else the
+  # locked default (stable). An explicit flag persists the new channel.
+  local active="${channel:-$(_release_get CHANNEL)}"; active="${active:-stable}"
+  [[ "$active" == stable || "$active" == edge ]] || die "invalid channel: $active (stable|edge)"
+  [[ -n "$channel" ]] && _release_set_channel "$channel"
+
   # No controlling terminal (e.g. the welcome card's embedded console, which has
   # no way to answer a [Y/n] prompt) → run fully non-interactively. From a real
   # terminal we stay interactive so the user can review the upgrade. Upstream's
@@ -97,7 +147,7 @@ cmd_update() {
   # regardless; this only governs OUR paru/pacman -Syu calls below.
   local CONFIRM=()
   [[ -t 0 ]] || CONFIRM=(--noconfirm)
-  if [[ "${1:-}" == "--system" ]]; then
+  if (( system )); then
     echo "${C_B}>> full system upgrade (repos + AUR via paru)${C_0}"
     if command -v paru >/dev/null; then
       paru -Syu "${CONFIRM[@]}" || die "system upgrade failed"
@@ -106,14 +156,32 @@ cmd_update() {
       sudo pacman -Syu "${CONFIRM[@]}" || die "system upgrade failed"
     fi
   fi
-  echo "${C_B}>> updating Illogical Impulse dots (upstream ./setup)${C_0}"
+  echo "${C_B}>> updating Illogical Impulse dots (channel=$active, upstream ./setup)${C_0}"
   command -v git >/dev/null || die "git missing — pacman -S git"
-  if [[ -d "$DOTS_CACHE/.git" ]]; then
-    git -C "$DOTS_CACHE" fetch --depth=1 origin && \
-    git -C "$DOTS_CACHE" reset --hard origin/HEAD || die "dots fetch failed"
+  if [[ "$active" == stable ]]; then
+    # Stable: check out the recorded pin EXACTLY. The pin may be an older commit
+    # than HEAD, so a depth-1 HEAD clone would not contain it — fetch full so the
+    # commit resolves. We unshallow an existing shallow cache as needed.
+    local pin; pin="$(_release_get DOTS_COMMIT)"
+    [[ -n "$pin" ]] || die "no DOTS_COMMIT in $RELEASE_FILE — cannot resolve the stable pin (try: --channel edge)"
+    if [[ -d "$DOTS_CACHE/.git" ]]; then
+      git -C "$DOTS_CACHE" fetch origin || die "dots fetch failed"
+    else
+      mkdir -p "$(dirname "$DOTS_CACHE")"
+      git clone "$DOTS_REPO" "$DOTS_CACHE" || die "dots clone failed"
+    fi
+    git -C "$DOTS_CACHE" checkout -q --detach "$pin" \
+      || die "could not check out stable pin $pin — is the recorded commit reachable?"
+    echo "${C_B}>> pinned to recorded DOTS_COMMIT $pin (stable)${C_0}"
   else
-    mkdir -p "$(dirname "$DOTS_CACHE")"
-    git clone --depth=1 "$DOTS_REPO" "$DOTS_CACHE" || die "dots clone failed"
+    # Edge: track upstream HEAD (the pre-#27 behaviour). Depth-1 is sufficient.
+    if [[ -d "$DOTS_CACHE/.git" ]]; then
+      git -C "$DOTS_CACHE" fetch --depth=1 origin && \
+      git -C "$DOTS_CACHE" reset --hard origin/HEAD || die "dots fetch failed"
+    else
+      mkdir -p "$(dirname "$DOTS_CACHE")"
+      git clone --depth=1 "$DOTS_REPO" "$DOTS_CACHE" || die "dots clone failed"
+    fi
   fi
   # Upstream's own updater: respects custom/, backs up changed files. `--force`
   # is end-4's non-interactive switch (sets ask=false — confirm nothing); the old
@@ -121,7 +189,7 @@ cmd_update() {
   # getopt. `--skip-allgreeting` drops the irrelevant AGS-deprecation banner.
   ( cd "$DOTS_CACHE" && ./setup install --force --skip-allgreeting ) \
     || die "upstream setup failed — see output above"
-  ok "dots updated to $(git -C "$DOTS_CACHE" rev-parse --short HEAD)"
+  ok "dots updated to $(git -C "$DOTS_CACHE" rev-parse --short HEAD) (channel=$active)"
 }
 
 cmd_venv() {

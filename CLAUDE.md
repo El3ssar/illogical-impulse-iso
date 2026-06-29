@@ -148,6 +148,10 @@ build/ out/                    # generated
 | ISO-build chroot logic | `scripts/chroot.sh` |
 | Post-install / bootloader / verify logic | `scripts/runtime/ii-*` |
 | Add an iictl subcommand (drop-in) | `scripts/runtime-lib/iictl.d/<cmd>` (exec; `source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"` + a `#help:` line) → staged to `/usr/local/lib/ii/iictl.d/` |
+| Update channels (stable=pinned `DOTS_COMMIT` / edge=HEAD) | `cmd_update` in `scripts/runtime/iictl` (edits LOCAL to that built-in) + `CHANNEL=stable` in the `scripts/prepare.d/70-assets.sh` release stamp; the stable pin is the stamp's `DOTS_COMMIT`, bumped via `just update` — `scripts/validate.sh` asserts stamp pin == submodule HEAD (anti-rot) |
+| Add a one-time migration (Omarchy-style) | a baked `overlay/airootfs/usr/share/illogical-impulse/migrations/NNNN-name.sh` (sourced by the `iictl migrate` drop-in; reversible via the shared mutators; applied high-water mark in `$XDG_STATE_HOME/illogical-impulse/migrations.applied`) — see that dir's README |
+| Edit the offline quickstart (`iictl docs`) | `overlay/airootfs/usr/share/illogical-impulse/docs/quickstart.md` (printed by the `iictl docs` drop-in) |
+| Export/import a whole reversible setup | `iictl config export/import` (drop-in `scripts/runtime-lib/iictl.d/config`) — bundles the ledger TSV + `*.choice` files (tar/awk/cut, no jq), replays through the per-verb engines |
 | Give a domain an interactive configurator (TUI) | the domain's `iictl.d/<cmd>` emits `--spec` (the 3-control chooser contract: `choice`/`list`/`toggle`; see BLUEPRINT §"iictl chooser contract") + a `#spec:` header; the baked `iictl-tui` (ratatui) renders it via `iictl tweak <domain>`. The renderer mutates nothing — it shells back to the domain's `iictl` verbs, so the ledger still owns reversibility. |
 | Change/extend the `iictl-tui` renderer | `overlay/aur-pkgbuilds/iictl-tui/crate/` (Rust/ratatui; built by prebuild → `[ii-extra]`, baked via `packages/base.list`) |
 | Pipeline step | `scripts/prepare.d/NN-*.sh` |

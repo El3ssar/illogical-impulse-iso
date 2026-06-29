@@ -439,6 +439,23 @@ update vm smoke preview nspawn test-revert clean nuke assets image docked`.
 `require_new_commits` in distro.toml) and exits 0/1 — CI-consumable. After
 a bump: `just prepare && just validate`, build, VM-test, commit the pin.
 
+**Update channels + the stable pin (#27).** The installed system has a channel,
+a single line in the distro-owned `/etc/illogical-impulse/release` stamp:
+`CHANNEL=stable` (default) or `edge`. `iictl update` (stable) checks out the
+recorded `DOTS_COMMIT` exactly before driving upstream's `./setup`; `--channel
+edge` tracks upstream HEAD and persists `CHANNEL=edge` (reversible — switching
+back restores the pin). **The stable pin lives in the release stamp**:
+`70-assets.sh` stamps `DOTS_COMMIT = git -C $DOTS rev-parse --short HEAD`, so a
+`just update` submodule bump automatically advances the next build's pin — the
+recorded pin can never rot away from the submodule, and `validate.sh` asserts
+the two agree at build time (the anti-rot guard). Channel switches are
+ledger-recorded for `iictl revert-all`. Companion verbs: `iictl migrate` runs
+baked one-time `migrations/NNNN-*.sh` (idempotent via an applied high-water
+mark), `iictl docs` prints the baked offline quickstart, and `iictl config
+export/import` serialises the ledger + choices to a portable bundle (tar/awk,
+no jq) replayed through the per-verb engines — the net-new reproducible-setup
+edge over an irreproducible `curl|bash`.
+
 Implemented in `.github/workflows/release.yml`: daily cron runs the
 `--check` gate → bumps the pin (committed by github-actions[bot]) → `just
 docked` (AUR cache via actions/cache on `.ii-cache` through II_CACHE_DIR) →

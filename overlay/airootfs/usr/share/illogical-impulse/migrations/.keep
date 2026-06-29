@@ -1,0 +1,4 @@
+Keeps the baked migrations dir in the squashfs even when empty. Distro-owned
+(/usr/share/illogical-impulse/migrations/), a sibling of the iictl survive-path
+and untouched by ii-verify's /usr/local/lib/ii purge. See README in this dir for
+the NNNN-name.sh convention; `iictl migrate` runs them once each, in order.
