@@ -1237,18 +1237,26 @@ if [[ -d "$_SKD" ]]; then
 else
   _v_warn "overlay/skel-distro missing — THEME-01a skipped"
 fi
-# (b) we must NOT ship/edit matugen config or add a distro [templates.*] block
-# (anywhere in overlay/ — airootfs or skel). Upstream owns matugen entirely.
+# (b) we must NOT ship/edit UPSTREAM's matugen config or add a distro
+# [templates.*] block to it (~/.config/matugen is rsync --delete'd). The distro's
+# OWN STANDALONE feeder config (#26) legitimately uses [templates.*] — but it
+# lives in the UNOWNED ~/.config/illogical-impulse-theming/ namespace, never under
+# a matugen path, and is invoked standalone (`matugen --config <ours>`), so it is
+# never wiped on update. So flag [templates.*] ONLY when it lands on a matugen
+# path (the wipe trap); the theming namespace is the sanctioned exception.
 _th_matugen=0
 while IFS= read -r _mf; do
   _v_fail "distro ships/edits a matugen config.toml ('${_mf#"$OVERLAY"/}') — ~/.config/matugen is rsync --delete'd; drive colours via switchwall.sh, never matugen config (THEME-01b)"
   _th_matugen=$((_th_matugen+1))
 done < <(find "$OVERLAY" -type f -path '*/matugen/config.toml' 2>/dev/null)
-if grep -rqsF '[templates.' "$OVERLAY" 2>/dev/null; then
-  _v_fail "a distro file introduces a '[templates.' matugen block under overlay/ — forbidden (matugen is rsync --delete'd) (THEME-01b)"
-  _th_matugen=$((_th_matugen+1))
-fi
-(( _th_matugen == 0 )) && _v_ok "no distro matugen config / [templates.*] block (colours driven via switchwall.sh only) (THEME-01b)"
+# a [templates.*] block under an upstream matugen path is the wipe trap.
+while IFS= read -r _tf; do
+  if grep -qsF '[templates.' "$_tf" 2>/dev/null; then
+    _v_fail "a distro file introduces a '[templates.' block on the matugen path '${_tf#"$OVERLAY"/}' — forbidden (matugen is rsync --delete'd) (THEME-01b)"
+    _th_matugen=$((_th_matugen+1))
+  fi
+done < <(find "$OVERLAY" -type f -path '*/matugen/*' 2>/dev/null)
+(( _th_matugen == 0 )) && _v_ok "no distro matugen config / matugen-path [templates.*] block (colours driven via switchwall.sh; the standalone feeder config is exempt) (THEME-01b)"
 # (c) every baked flavor seed parses + declares a valid #RRGGBB seed.
 _THEMES="$AIROOTFS/usr/share/illogical-impulse/themes"
 if [[ -d "$_THEMES" ]]; then
@@ -1311,6 +1319,188 @@ if [[ -f "$_SKEL_EXECS" ]] && grep -qF 'theme-recolor' "$_SKEL_EXECS"; then
   _v_fail "the recolour-watcher fence ('theme-recolor') is baked into skel execs.lua — it must be OFF by default (opt-in via 'iictl theme watch enable') (THEME-01d)"
 else
   _v_ok "recolour watcher is off by default (no theme-recolor fence baked into skel execs.lua) (THEME-01d)"
+fi
+
+step "theming coherence (GTK/icon/cursor + wallpaper pack + feeder + plymouth) (#26)"
+# THEME-COHERENCE (#26 / PROPOSAL §9): the four additive theming layers on top of
+# upstream's matugen engine. Each guard encodes an Iron-Law / reversibility trap:
+#   (a) NO overlay/skel-distro file may write gtk-3.0/gtk.css or gtk-4.0/gtk.css —
+#       those are matugen's OWN output (rsync --delete'd on `iictl update`).
+#       Coherence uses the ORTHOGONAL gtk-3.0/settings.ini + ~/.icons/default.
+#   (b) the coherence settings.ini + index.theme exist and reference the baked
+#       coherence packages (adw-gtk3 / Papirus / Bibata) — the layer is inert
+#       without them.
+#   (c) the wallpaper pack.list is FETCH-ONLY, has the 3-or-4-column shape, and
+#       EVERY entry carries a 64-hex sha256 (an unverifiable fetch is a bug).
+#   (d) the feeder execs.lua fence, if baked into skel, is sentinel-fenced AND
+#       disabled-by-default (commented), so the feeder is dormant until opt-in.
+#   (e) `plymouth` appears in NO baked package list (the black-screen guard,
+#       CLAUDE.md §6) — it is installed ONLINE by `iictl theme plymouth`, never
+#       baked, and the toggle regenerates BOTH mkinitcpio presets.
+_TC_SKD="$OVERLAY/skel-distro"
+
+# (a) matugen-owned colour CSS must never be baked into skel.
+_tc_css=0
+for _cssp in ".config/gtk-3.0/gtk.css" ".config/gtk-4.0/gtk.css"; do
+  if [[ -e "$_TC_SKD/$_cssp" ]]; then
+    _v_fail "skel-distro bakes '$_cssp' — matugen OWNS that colour CSS (rsync --delete'd); use gtk-3.0/settings.ini for the theme/icon/cursor NAMES instead (#26a)"
+    _tc_css=$((_tc_css+1))
+  fi
+done
+# also refuse a distro file writing gtk.css anywhere under overlay/ (airootfs too).
+while IFS= read -r _gf; do
+  _v_fail "distro writes '${_gf#"$OVERLAY"/}' — gtk-3.0/gtk.css & gtk-4.0/gtk.css are matugen-owned; never bake them (#26a)"
+  _tc_css=$((_tc_css+1))
+done < <(find "$OVERLAY" -type f \( -path '*/gtk-3.0/gtk.css' -o -path '*/gtk-4.0/gtk.css' \) 2>/dev/null)
+(( _tc_css == 0 )) && _v_ok "no distro file writes matugen-owned gtk-3.0/gtk.css or gtk-4.0/gtk.css (coherence is orthogonal) (#26a)"
+
+# (b) coherence settings.ini + index.theme exist and name the baked packages.
+_tc_gtk3="$_TC_SKD/.config/gtk-3.0/settings.ini"
+_tc_gtk4="$_TC_SKD/.config/gtk-4.0/settings.ini"
+_tc_icons="$_TC_SKD/.icons/default/index.theme"
+_tc_coh=0
+for _pair in "$_tc_gtk3:gtk-3.0/settings.ini" "$_tc_gtk4:gtk-4.0/settings.ini"; do
+  _f="${_pair%%:*}"; _n="${_pair##*:}"
+  if [[ ! -f "$_f" ]]; then
+    _v_fail "coherence file missing: skel-distro/$_n (#26b)"; _tc_coh=$((_tc_coh+1)); continue
+  fi
+  grep -q 'gtk-theme-name=adw-gtk3'                 "$_f" || { _v_fail "$_n does not set gtk-theme-name=adw-gtk3 (#26b)"; _tc_coh=$((_tc_coh+1)); }
+  grep -q 'gtk-icon-theme-name=Papirus'            "$_f" || { _v_fail "$_n does not set gtk-icon-theme-name=Papirus* (#26b)"; _tc_coh=$((_tc_coh+1)); }
+  grep -q 'gtk-cursor-theme-name=Bibata'           "$_f" || { _v_fail "$_n does not set gtk-cursor-theme-name=Bibata* (#26b)"; _tc_coh=$((_tc_coh+1)); }
+done
+if [[ -f "$_tc_icons" ]]; then
+  grep -qi 'Inherits=Bibata' "$_tc_icons" || { _v_fail ".icons/default/index.theme does not inherit Bibata (#26b)"; _tc_coh=$((_tc_coh+1)); }
+else
+  _v_fail "coherence file missing: skel-distro/.icons/default/index.theme (#26b)"; _tc_coh=$((_tc_coh+1))
+fi
+# the three coherence packages must be baked (goodies → packages.x86_64).
+for _cp in adw-gtk3 papirus-icon-theme bibata-cursor-theme; do
+  grep -Eq "^\s*${_cp}\s*$" "$PKGLIST" \
+    || { _v_fail "coherence package '$_cp' not baked into packages.x86_64 (goodies.list) (#26b)"; _tc_coh=$((_tc_coh+1)); }
+done
+(( _tc_coh == 0 )) && _v_ok "coherence: settings.ini + index.theme present & name the 3 baked packages (adw-gtk3/Papirus/Bibata) (#26b)"
+
+# (c) wallpaper pack manifest: fetch-only, shape + 64-hex sha256 on every entry.
+_TC_PACK="$AIROOTFS/usr/share/illogical-impulse/wallpapers/pack.list"
+if [[ ! -f "$_TC_PACK" ]]; then
+  _v_fail "wallpaper pack manifest not staged (usr/share/illogical-impulse/wallpapers/pack.list) (#26c)"
+else
+  # no image bytes may ride in the squashfs beside the manifest (fetch-only gate).
+  _tc_baked_imgs=0
+  while IFS= read -r _img; do
+    _v_fail "wallpaper IMAGE baked in the squashfs ('${_img#"$AIROOTFS"/}') — the pack is FETCH-ONLY; only pack.list ships (#26c / ISO-size gate)"
+    _tc_baked_imgs=$((_tc_baked_imgs+1))
+  done < <(find "$AIROOTFS/usr/share/illogical-impulse/wallpapers" -type f \
+             \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) 2>/dev/null)
+  # every non-comment line: >=3 whitespace columns AND column 3 is a 64-hex sha256.
+  if awk 'NF && $1!~/^#/ && (NF<3 || $3!~/^[0-9a-f]{64}$/){bad=1} END{exit bad+0}' "$_TC_PACK"; then
+    _tc_lines="$(grep -Ecv '^\s*(#|$)' "$_TC_PACK")"
+    (( _tc_baked_imgs == 0 )) \
+      && _v_ok "wallpaper pack.list: $_tc_lines fetch-only entries, each with filename+url+64-hex sha256 (#26c)"
+  else
+    _v_fail "wallpaper pack.list has a line lacking 3+ columns or a 64-hex sha256 — every fetch must be integrity-verified (#26c)"
+  fi
+  # the wallpaper plugin must actually verify the sha256 (grep the drop-in).
+  _TC_WP="$AIROOTFS/usr/local/lib/ii/iictl.d/wallpaper"
+  if [[ -f "$_TC_WP" ]]; then
+    grep -qE 'sha256|_sha256' "$_TC_WP" \
+      && _v_ok "iictl.d/wallpaper verifies sha256 on fetch (#26c)" \
+      || _v_fail "iictl.d/wallpaper never checks a sha256 — fetched wallpapers would be unverified (#26c)"
+  else
+    _v_fail "iictl.d/wallpaper drop-in not staged — the wallpaper verb is missing (#26c)"
+  fi
+fi
+
+# (d) feeder fence in skel execs.lua, if present, is sentinel-fenced AND
+# disabled-by-default (the active exec line is a Lua comment). Mirrors the
+# welcome-fence byte-identity check above.
+_TC_EXECS="$AIROOTFS/etc/skel/.config/hypr/custom/execs.lua"
+if [[ -f "$_TC_EXECS" ]] && grep -qF 'theme-feeder' "$_TC_EXECS"; then
+  # it must appear ONLY inside a sentinel fence (open + close markers present).
+  if grep -qxF -- '-- >>> illogical-impulse theme-feeder' "$_TC_EXECS" \
+     && grep -qxF -- '-- <<< illogical-impulse theme-feeder' "$_TC_EXECS"; then
+    # and the exec line inside must be COMMENTED (off by default): no UNCOMMENTED
+    # ii-theme-feeder.sh invocation may be baked. Capture-then-test (never a
+    # `grep | grep -q` pipeline — that SIGPIPEs the producer under pipefail).
+    _tc_feeder_lines="$(grep -E 'ii-theme-feeder\.sh' "$_TC_EXECS")"
+    if grep -qvE '^\s*--' <<<"$_tc_feeder_lines"; then
+      _v_fail "the feeder fence in skel execs.lua has an UNCOMMENTED ii-theme-feeder.sh line — it must be OFF by default (opt-in via 'iictl theme feeder enable') (#26d)"
+    else
+      _v_ok "feeder fence baked in skel execs.lua is sentinel-fenced AND disabled-by-default (commented) (#26d)"
+    fi
+  else
+    _v_fail "skel execs.lua references theme-feeder OUTSIDE a sentinel fence — every distro block must be fenced (#26d)"
+  fi
+else
+  _v_ok "no baked feeder fence in skel execs.lua (dormant until 'iictl theme feeder enable') (#26d)"
+fi
+# the feeder must NEVER write an upstream-owned matugen path — it drives a
+# STANDALONE config in the unowned illogical-impulse-theming namespace. Assert the
+# baked config is NOT under ~/.config/matugen and DOES read the FINISHED colors.json.
+_TC_FEEDER="$_TC_SKD/.config/hypr/custom/scripts/ii-theme-feeder.sh"
+if [[ -f "$_TC_FEEDER" ]]; then
+  _tcf_code="$(grep -vE '^[[:space:]]*#' "$_TC_FEEDER")"
+  grep -qE 'matugen (-q )?(--config|json)' <<<"$_tcf_code" \
+    && _v_ok "feeder hook runs a STANDALONE matugen (json/--config) — never edits upstream's config.toml (#26d)" \
+    || _v_fail "feeder hook does not invoke a standalone matugen (json/--config) — the bridge would be inert (#26d)"
+  # it must read the FINISHED generated colors.json (read-only STATE), not a mid-write file.
+  grep -qE 'generated/colors\.json' <<<"$_tcf_code" \
+    && _v_ok "feeder reads the FINISHED generated/colors.json read-only (avoids the applycolor.sh race) (#26d)" \
+    || _v_warn "feeder hook does not obviously read generated/colors.json — confirm it reads the FINISHED colours (#26d)"
+else
+  _v_fail "feeder hook not baked (skel-distro/.config/hypr/custom/scripts/ii-theme-feeder.sh) (#26d)"
+fi
+# the distro matugen feeder config must NOT live under a matugen path (it is
+# STANDALONE in the unowned theming namespace) — reuse the THEME-01b guard shape.
+if find "$OVERLAY" -type f -path '*illogical-impulse-theming/config.toml' | grep -q .; then
+  _v_ok "feeder matugen config lives in the unowned illogical-impulse-theming namespace (not ~/.config/matugen) (#26d)"
+else
+  _v_warn "no illogical-impulse-theming/config.toml staged — the feeder templates won't render (#26d)"
+fi
+
+# (e) plymouth must be in NO baked package list (black-screen guard, CLAUDE.md §6).
+_tc_ply=0
+for _pl in "$PACKAGES/base.list" "$PACKAGES/goodies.list" "$PACKAGES/installer.list" "$PACKAGES/nvidia.list"; do
+  [[ -f "$_pl" ]] || continue
+  if grep -Ev '^\s*#' "$_pl" 2>/dev/null | grep -Eq '^\s*plymouth\s*$'; then
+    _v_fail "'plymouth' baked in $(basename "$_pl") — Plymouth is OPT-IN ONLY (black-screen risk, CLAUDE.md §6); install it via 'iictl theme plymouth enable' (#26e)"
+    _tc_ply=$((_tc_ply+1))
+  fi
+done
+# and it must not have crept into the built packages.x86_64.
+if grep -Eq '^\s*plymouth\s*$' "$PKGLIST"; then
+  _v_fail "'plymouth' crept into packages.x86_64 — it must NEVER be baked (#26e)"
+  _tc_ply=$((_tc_ply+1))
+fi
+(( _tc_ply == 0 )) && _v_ok "plymouth is in NO baked package list (opt-in only via iictl theme plymouth) (#26e)"
+# the plymouth toggle must regenerate BOTH presets via ii-prepare-bootloader's
+# shared path (no duplicated HOOKS logic) and doctor must flag hook-without-regen.
+_TC_THEME="$AIROOTFS/usr/local/lib/ii/iictl.d/theme"
+if [[ -f "$_TC_THEME" ]]; then
+  _tct_code="$(grep -vE '^[[:space:]]*#' "$_TC_THEME")"
+  grep -qE 'ii_regen_both_presets|ii-prepare-bootloader' <<<"$_tct_code" \
+    && _v_ok "theme plymouth reuses ii-prepare-bootloader's both-preset regen (no duplicated HOOKS logic) (#26e)" \
+    || _v_fail "theme plymouth does not reuse ii-prepare-bootloader's both-preset path (#26e)"
+  grep -qE 'plymouth' <<<"$_tct_code" \
+    && _v_ok "theme plugin provides the plymouth toggle (#26e)" \
+    || _v_fail "theme plugin has no plymouth toggle (#26e)"
+fi
+# ii-prepare-bootloader must expose the reusable both-preset function (lib-only).
+_TC_BOOT="$AIROOTFS/usr/local/bin/ii-prepare-bootloader"
+if [[ -f "$_TC_BOOT" ]]; then
+  grep -qE 'ii_regen_both_presets' "$_TC_BOOT" \
+    && _v_ok "ii-prepare-bootloader exposes ii_regen_both_presets (single both-preset path) (#26e)" \
+    || _v_fail "ii-prepare-bootloader has no reusable ii_regen_both_presets — plymouth would duplicate the preset logic (#26e)"
+  grep -qE 'II_BOOTLOADER_LIB_ONLY' "$_TC_BOOT" \
+    && _v_ok "ii-prepare-bootloader is sourceable lib-only (II_BOOTLOADER_LIB_ONLY) without running the Calamares flow (#26e)" \
+    || _v_fail "ii-prepare-bootloader is not sourceable lib-only — plymouth cannot reuse it safely (#26e)"
+fi
+# revert-all must know the plymouth inverse (restore prior HOOKS + regen both).
+if [[ -f "$RA" ]]; then
+  _ra_code="$(grep -vE '^[[:space:]]*#' "$RA")"
+  grep -qE 'plymouth' <<<"$_ra_code" \
+    && _v_ok "revert-all knows the plymouth inverse (restore prior HOOKS + regen both presets) (#26e)" \
+    || _v_fail "revert-all has no plymouth inverse — 'iictl revert-all' can't undo a plymouth enable (#26e)"
 fi
 
 step "Quickshell widget framework (#20)"

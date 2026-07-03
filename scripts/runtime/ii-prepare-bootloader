@@ -1,17 +1,65 @@
 #!/usr/bin/env bash
 # Calamares shellprocess@copy-kernel hook. Runs INSIDE the installed chroot
 # before the bootloader module. Sets up /boot for the installed system.
+#
+# ── DUAL USE ─────────────────────────────────────────────────────────────────
+# Sourced with II_BOOTLOADER_LIB_ONLY=1 it defines its functions (notably
+# ii_regen_both_presets) WITHOUT running the Calamares flow, so a runtime caller
+# like `iictl theme plymouth` can reuse the SINGLE both-preset regeneration path
+# instead of duplicating the per-kernel preset + `mkinitcpio -P` logic (#26).
 
 set -euo pipefail
 LOG=/var/log/ii-prepare-bootloader.log
-mkdir -p "$(dirname "$LOG")"
-exec 3>&1; exec > >(tee -a "$LOG" >&3); exec 2>&1
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+# When run as the Calamares hook, tee to the log; when SOURCED as a lib, leave the
+# caller's fds alone (no log redirection) so it stays quiet and side-effect-free.
+if [[ "${II_BOOTLOADER_LIB_ONLY:-0}" != 1 ]]; then
+  exec 3>&1; exec > >(tee -a "$LOG" >&3); exec 2>&1
+fi
 log() { echo "[ii-prepare-bootloader] $*"; }
 die() { log "FATAL: $*"; exit 1; }
 # set -e kills silently otherwise — a build was lost to an invisible death.
-trap 'log "FATAL: unexpected error at line $LINENO: $BASH_COMMAND"' ERR
+[[ "${II_BOOTLOADER_LIB_ONLY:-0}" == 1 ]] || trap 'log "FATAL: unexpected error at line $LINENO: $BASH_COMMAND"' ERR
 
 STASH=/usr/share/illogical-impulse/boot-stash
+
+# ── ii_regen_both_presets — the SINGLE both-preset regeneration path ──────────
+# Write a per-kernel preset with PRESETS=('default' 'fallback') for EVERY
+# installed kernel, then run `mkinitcpio -P` (both presets). The Calamares flow
+# calls this after copying kernels + microcode; `iictl theme plymouth` calls it
+# (sourced, lib-only) after adding/removing the plymouth HOOK, so BOTH the
+# default AND fallback initramfs are regenerated on enable and disable (the
+# black-screen guard, CLAUDE.md §6 / audit fix c). Echoes nothing; returns
+# non-zero on failure so the caller can surface it. Sets the global `copied`.
+ii_regen_both_presets() {
+  local d pkgbase
+  shopt -s nullglob; local kver_dirs=( /usr/lib/modules/*/ ); shopt -u nullglob
+  (( ${#kver_dirs[@]} > 0 )) || { log "no kernels in /usr/lib/modules/"; return 1; }
+  install -d -m 0755 /etc/mkinitcpio.d
+  copied=0
+  for d in "${kver_dirs[@]}"; do
+    [[ -f "${d}pkgbase" ]] || continue
+    pkgbase=$(< "${d}pkgbase"); pkgbase="${pkgbase//[$'\t\r\n ']/}"
+    [[ -n "$pkgbase" ]] || { log "empty pkgbase in $d"; return 1; }
+    cat > "/etc/mkinitcpio.d/$pkgbase.preset" <<PRE
+# Written by ii-prepare-bootloader.
+ALL_kver="/boot/vmlinuz-$pkgbase"
+PRESETS=('default' 'fallback')
+default_image="/boot/initramfs-$pkgbase.img"
+fallback_image="/boot/initramfs-$pkgbase-fallback.img"
+fallback_options="-S autodetect"
+PRE
+    # NOT ((copied++)): post-increment of 0 returns 1 and set -e kills the script.
+    copied=$((copied + 1))
+  done
+  (( copied > 0 )) || { log "no kernel presets written"; return 1; }
+  mkinitcpio -P || { ls -la /boot >&2; log "mkinitcpio -P failed"; return 1; }
+  return 0
+}
+
+# Lib-only source (e.g. `iictl theme plymouth`): stop here with the functions
+# defined; do NOT run the Calamares kernel-copy flow below.
+[[ "${II_BOOTLOADER_LIB_ONLY:-0}" == 1 ]] && return 0
 
 log "uname: $(uname -a)"
 
@@ -169,32 +217,21 @@ for f in intel-ucode.img amd-ucode.img; do
                        && log "restored /boot/$f"
 done
 
-# ── copy each kernel + per-kernel preset (default + fallback) ──────────────
+# ── copy each kernel vmlinuz ────────────────────────────────────────────────
 # Upstream mkinitcpio ships PRESETS=('default') with fallback commented out.
-# We always want both — fallback is the rescue image after a broken upgrade.
-install -d -m 0755 /etc/mkinitcpio.d
-copied=0
+# We always want both — fallback is the rescue image after a broken upgrade. The
+# per-kernel preset writing + `mkinitcpio -P` (both presets) is factored into
+# ii_regen_both_presets (the SINGLE both-preset path, reused by iictl plymouth).
 for d in "${kver_dirs[@]}"; do
   pkgbase=$(< "${d}pkgbase"); pkgbase="${pkgbase//[$'\t\r\n ']/}"
   [[ -n "$pkgbase" ]] || die "empty pkgbase in $d"
   install -m 0644 "${d}vmlinuz" "/boot/vmlinuz-$pkgbase"
-  cat > "/etc/mkinitcpio.d/$pkgbase.preset" <<PRE
-# Written by ii-prepare-bootloader.
-ALL_kver="/boot/vmlinuz-$pkgbase"
-PRESETS=('default' 'fallback')
-default_image="/boot/initramfs-$pkgbase.img"
-fallback_image="/boot/initramfs-$pkgbase-fallback.img"
-fallback_options="-S autodetect"
-PRE
-  log "kernel $pkgbase: vmlinuz + preset"
-  # NOT ((copied++)): post-increment of 0 returns 1 and set -e kills the
-  # script silently — exactly how the two-kernel install died.
-  copied=$((copied + 1))
+  log "kernel $pkgbase: vmlinuz copied"
 done
-(( copied > 0 )) || die "no kernels copied"
 
-# ── build initramfs images ─────────────────────────────────────────────────
-mkinitcpio -P || { ls -la /boot >&2; die "mkinitcpio -P failed"; }
+# ── per-kernel presets (default + fallback) + build initramfs images ────────
+ii_regen_both_presets || die "both-preset regeneration failed"
+(( copied > 0 )) || die "no kernels copied"
 
 # ── state file for ii-verify ───────────────────────────────────────────────
 expected=()

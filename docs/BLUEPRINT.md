@@ -147,6 +147,20 @@ of the whole distro rests on respecting their classes. Full table in
   Theming features observe via `FileView` read-only and only call upstream
   public entry points (`switchwall.sh`, `qs ipc`), recording the prior value in
   the ledger so a revert restores it.
+  - **matugen `config.toml` is READ-ONLY (matugen-config-read-only rule, #26).**
+    `~/.config/matugen/config.toml` (with its `[templates.gtk3]`→`gtk-3.0/gtk.css`,
+    `[templates.gtk4]`→`gtk-4.0/gtk.css` etc.) is an `install_dir__sync` file:
+    **NEVER add a distro `[templates.*]` block to it**, and NEVER bake
+    `gtk-3.0/gtk.css` / `gtk-4.0/gtk.css` (matugen's own outputs) — both are wiped
+    on `iictl update`. To recolour tools upstream does not touch (nvim / extra
+    terminals / IDEs), run a **STANDALONE** matugen against upstream's FINISHED
+    output — `matugen json <~/.local/state/quickshell/user/generated/colors.json>
+    --config <our config>` — where *our* config + templates live in the UNOWNED
+    `~/.config/illogical-impulse-theming/` namespace (the feeder bridge, §9). For
+    GTK/icon/cursor coherence use the ORTHOGONAL, matugen-untouched selectors:
+    `gtk-3.0/settings.ini` + `~/.icons/default/index.theme` (theme/icon/cursor
+    *names*, never the color CSS). `validate.sh`'s THEME-01b + `theming coherence`
+    (#26) steps enforce both halves.
 - **reserved, NOT baked** — `packages/optional/*.list`: curated **name-lists**
   installed on demand from the internet by `iictl pack` (official repos + AUR).
   Only the few-KB list rides in the squashfs — never the packages themselves.

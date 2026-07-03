@@ -58,6 +58,26 @@ II_RECOLOR_SCRIPT="${II_RECOLOR_SCRIPT:-$HOME/.config/hypr/custom/scripts/ii-the
 II_EXECS_LUA="${II_EXECS_LUA:-$HOME/.config/hypr/custom/execs.lua}"
 II_WATCH_FENCE="theme-recolor"
 
+# ── Material You FEEDER bridge (#26 / PROPOSAL §9) ────────────────────────────
+# The feeder is the SINGLE owner of the extra-tool recolour hook (audit fix b).
+# It runs a STANDALONE matugen (`matugen json <FINISHED colors.json> --config
+# <OUR config>`) so tools upstream does not recolour (nvim/extra-terminals/IDEs)
+# track the rice palette — never touching upstream's matugen config.toml. The
+# baked hook + our config live in the UNOWNED namespaces below; enable wires the
+# autostart via a SEPARATE sentinel fence (ledger-recorded) from the welcome one.
+II_FEEDER_SCRIPT="${II_FEEDER_SCRIPT:-$HOME/.config/hypr/custom/scripts/ii-theme-feeder.sh}"
+II_FEEDER_CONFIG="${II_FEEDER_CONFIG:-$HOME/.config/illogical-impulse-theming/config.toml}"
+II_FEEDER_FENCE="theme-feeder"
+
+# ── Plymouth opt-in (#26 / PROPOSAL §9; CLAUDE.md §6 black-screen guard) ──────
+# Plymouth is NEVER baked. `iictl theme plymouth enable` installs it online, adds
+# the `plymouth` HOOK to /etc/mkinitcpio.conf, and regenerates BOTH initramfs
+# presets by reusing ii-prepare-bootloader's ii_regen_both_presets (no duplicated
+# HOOKS logic). disable reverses + regenerates both again. The prior HOOKS line is
+# ledger-recorded so revert restores the exact prior initramfs.
+II_MKINITCPIO_CONF="${II_MKINITCPIO_CONF:-/etc/mkinitcpio.conf}"
+II_BOOTLOADER_HELPER="${II_BOOTLOADER_HELPER:-/usr/local/bin/ii-prepare-bootloader}"
+
 # ── flavor seed parsing ──────────────────────────────────────────────────────
 # _theme_get <conf> <key> — echo the value of key=value in a flavor .conf (last
 # wins; comments and blank lines ignored; surrounding whitespace trimmed). Pure
@@ -279,6 +299,145 @@ EOF
   esac
 }
 
+# ── Material You FEEDER bridge — the single extra-tool recolour hook (#26) ─────
+# `iictl theme feeder enable` writes ONE sentinel-fenced block (SEPARATE from the
+# welcome fence) into custom/execs.lua that autostarts the debounced standalone
+# matugen hook, ledger-recorded via the shared mutator. disable strips exactly
+# that fence. The hook reads the FINISHED colors.json read-only and renders our
+# distro templates (nvim/terminal/IDE) — it NEVER edits upstream's matugen
+# config.toml. `run` does a one-shot render now (useful to preview / after enable).
+cmd_feeder() {
+  _not_root
+  case "${1:-status}" in
+    enable|on)
+      [[ -x "$II_FEEDER_SCRIPT" || -f "$II_FEEDER_SCRIPT" ]] \
+        || die "feeder hook missing at $II_FEEDER_SCRIPT (not a full install?)"
+      [[ -f "$II_FEEDER_CONFIG" ]] \
+        || warn "feeder matugen config missing at $II_FEEDER_CONFIG — enabling anyway (render will no-op until it exists)"
+      ii_lua_block_write "$II_EXECS_LUA" "$II_FEEDER_FENCE" <<EOF
+-- Opt-in Material You feeder (iictl theme feeder). Enabled here; disable +
+-- remove this fence with 'iictl theme feeder disable' or 'iictl revert-all'.
+-- Runs a STANDALONE matugen against upstream's FINISHED colors.json (read-only)
+-- + OUR config — never touches upstream's matugen config.toml.
+hl.on("hyprland.start", function()
+    hl.exec_cmd("$II_FEEDER_SCRIPT --watch")
+end)
+EOF
+      ok "feeder enabled (fenced '$II_FEEDER_FENCE' block in custom/execs.lua) — takes effect next Hyprland start"
+      echo "   render now without waiting for a restart: ${C_B}iictl theme feeder run${C_0}"
+      ;;
+    disable|off)
+      ii_lua_block_remove "$II_EXECS_LUA" "$II_FEEDER_FENCE" \
+        && ok "feeder disabled (fenced block stripped — upstream stub restored)" \
+        || warn "could not strip the feeder fence from $II_EXECS_LUA"
+      ;;
+    run|once)
+      [[ -x "$II_FEEDER_SCRIPT" || -f "$II_FEEDER_SCRIPT" ]] \
+        || die "feeder hook missing at $II_FEEDER_SCRIPT (not a full install?)"
+      echo "${C_B}>> rendering extra-tool themes from the current colors.json${C_0}"
+      bash "$II_FEEDER_SCRIPT" --once
+      ok "feeder render complete"
+      ;;
+    status)
+      if [[ -f "$II_EXECS_LUA" ]] && grep -qxF -- "${II_FENCE_OPEN}${II_FEEDER_FENCE}" "$II_EXECS_LUA"; then
+        echo "${C_B}feeder${C_0}: ${C_G}enabled${C_0}"
+      else
+        echo "${C_B}feeder${C_0}: disabled (default)"
+      fi
+      ;;
+    *) die "usage: iictl theme feeder [enable|disable|run|status]" ;;
+  esac
+}
+
+# ── Plymouth opt-in (#26) — NEVER baked; both-preset regen on enable + disable ─
+# _plymouth_hooks_line — echo the current HOOKS=(...) line from mkinitcpio.conf.
+_plymouth_hooks_line() { grep -E '^HOOKS=\(' "$II_MKINITCPIO_CONF" 2>/dev/null | head -n1; }
+# _plymouth_has_hook — true if the HOOKS list contains the plymouth hook.
+_plymouth_has_hook() {
+  local line; line="$(_plymouth_hooks_line)"
+  [[ " $line " == *" plymouth "* || "$line" == *"(plymouth "* || "$line" == *" plymouth)"* ]]
+}
+# _regen_both — reuse ii-prepare-bootloader's SINGLE both-preset path (sourced
+# lib-only). Falls back to a plain `mkinitcpio -P` only if the helper is absent
+# (still both presets, since our presets already declare default+fallback).
+_regen_both() {
+  if [[ -r "$II_BOOTLOADER_HELPER" ]]; then
+    ( II_BOOTLOADER_LIB_ONLY=1; source "$II_BOOTLOADER_HELPER"; ii_regen_both_presets )
+  else
+    _sudo mkinitcpio -P
+  fi
+}
+_sudo() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
+
+cmd_plymouth() {
+  _not_root
+  case "${1:-status}" in
+    enable|on)
+      command -v mkinitcpio >/dev/null 2>&1 || die "mkinitcpio not found — not an installed system?"
+      [[ -f "$II_MKINITCPIO_CONF" ]] || die "no $II_MKINITCPIO_CONF — cannot add the plymouth hook"
+      if _plymouth_has_hook; then
+        warn "plymouth hook already present — nothing to do (regen: iictl theme plymouth regen)"
+        return 0
+      fi
+      # 1. Record the PRIOR HOOKS line so revert restores the exact prior state.
+      local prior; prior="$(_plymouth_hooks_line)"
+      [[ -n "$prior" ]] || die "no HOOKS=(...) line in $II_MKINITCPIO_CONF — refusing to edit blindly"
+      ledger_record plymouth "mkinitcpio-hooks" "$(_ii_pack_tag)" "" "$prior"
+
+      # 2. Install plymouth ONLINE (official repo). Never baked.
+      echo "${C_B}>> installing plymouth${C_0} (online — never baked into the ISO)"
+      if command -v paru >/dev/null 2>&1; then
+        paru -S --needed --noconfirm plymouth || die "plymouth install failed"
+      else
+        _sudo pacman -S --needed --noconfirm plymouth || die "plymouth install failed"
+      fi
+
+      # 3. Insert the `plymouth` HOOK right AFTER `base udev` (mkinitcpio's
+      #    required position for the splash). sed on the recorded HOOKS line only.
+      echo "${C_B}>> adding the plymouth hook to $II_MKINITCPIO_CONF${C_0}"
+      _sudo sed -i -E 's/^(HOOKS=\([^)]*\budev\b)/\1 plymouth/' "$II_MKINITCPIO_CONF" \
+        || die "could not add the plymouth hook"
+      _plymouth_has_hook || { _sudo sed -i "s|^HOOKS=(.*)|$prior|" "$II_MKINITCPIO_CONF"; die "plymouth hook insertion did not take — restored prior HOOKS"; }
+
+      # 4. Regenerate BOTH presets (the black-screen guard, audit fix c).
+      echo "${C_B}>> regenerating BOTH mkinitcpio presets${C_0}"
+      _regen_both || die "mkinitcpio -P failed — plymouth hook added but initramfs NOT regenerated; run: sudo mkinitcpio -P"
+      ok "plymouth enabled — hook added, both presets regenerated. Reboot to see the splash."
+      warn "if you use systemd-boot, add 'splash quiet' to your kernel cmdline for the smoothest result"
+      ;;
+    disable|off)
+      command -v mkinitcpio >/dev/null 2>&1 || die "mkinitcpio not found — not an installed system?"
+      if ! _plymouth_has_hook; then
+        warn "no plymouth hook present — nothing to disable"
+        return 0
+      fi
+      echo "${C_B}>> removing the plymouth hook from $II_MKINITCPIO_CONF${C_0}"
+      _sudo sed -i -E 's/^(HOOKS=\([^)]*)\bplymouth\b ?/\1/; s/ +\)/)/' "$II_MKINITCPIO_CONF" \
+        || die "could not remove the plymouth hook"
+      echo "${C_B}>> regenerating BOTH mkinitcpio presets${C_0}"
+      _regen_both || die "mkinitcpio -P failed — plymouth hook removed but initramfs NOT regenerated; run: sudo mkinitcpio -P"
+      # Prune the plymouth ledger row (its inverse is done). Delegate to the
+      # single replay owner so we never re-implement ledger rewriting here.
+      if command -v iictl >/dev/null 2>&1; then
+        iictl revert-all "mkinitcpio-hooks" >/dev/null 2>&1 || true
+      fi
+      ok "plymouth disabled — hook removed, both presets regenerated. Reboot for a clean boot."
+      ;;
+    regen)
+      echo "${C_B}>> regenerating BOTH mkinitcpio presets${C_0}"
+      _regen_both && ok "both presets regenerated" || die "mkinitcpio -P failed"
+      ;;
+    status)
+      if _plymouth_has_hook; then
+        echo "${C_B}plymouth${C_0}: ${C_G}enabled${C_0} (hook present in $II_MKINITCPIO_CONF)"
+      else
+        echo "${C_B}plymouth${C_0}: disabled (default — never baked)"
+      fi
+      ;;
+    *) die "usage: iictl theme plymouth [enable|disable|regen|status]" ;;
+  esac
+}
+
 # ── doctor surface (per-plugin hook; iictl's revert-all re-runs `iictl doctor`) ─
 # `iictl theme doctor` warns when an accent override is active and soft-fails if
 # switchwall.sh is missing. Wired here (not in the iictl core) so deleting the
@@ -295,6 +454,29 @@ cmd_doctor() {
     warn "accent override active ($active) — wallpaper picks will NOT change the accent until 'iictl theme reset'"
   else
     ok "no accent override (colours follow the wallpaper)"
+  fi
+  # Plymouth hook-without-regen assertion (audit fix c). A `plymouth` HOOK in
+  # mkinitcpio.conf with NO regenerated initramfs behind it is the black-screen
+  # trap CLAUDE.md §6 warns about. Flag when the hook is present but a per-kernel
+  # initramfs image is missing or older than the mkinitcpio.conf edit.
+  if _plymouth_has_hook; then
+    local stale=0 conf_mtime img d pkgbase img_mtime
+    conf_mtime="$(stat -c %Y "$II_MKINITCPIO_CONF" 2>/dev/null || echo 0)"
+    shopt -s nullglob
+    for d in /usr/lib/modules/*/; do
+      [[ -f "${d}pkgbase" ]] || continue
+      pkgbase="$(< "${d}pkgbase")"; pkgbase="${pkgbase//[$'\t\r\n ']/}"
+      img="/boot/initramfs-$pkgbase.img"
+      if [[ ! -f "$img" ]]; then stale=1; continue; fi
+      img_mtime="$(stat -c %Y "$img" 2>/dev/null || echo 0)"
+      (( img_mtime < conf_mtime )) && stale=1
+    done
+    shopt -u nullglob
+    if (( stale )); then
+      bad "plymouth HOOK present but initramfs NOT regenerated (missing/stale) — black-screen risk; run: iictl theme plymouth regen"
+    else
+      ok "plymouth hook present and initramfs regenerated (both presets)"
+    fi
   fi
 }
 
@@ -339,23 +521,33 @@ usage:
   iictl theme gui                  open the QML swatch picker if installed (deferred)
   iictl theme watch [enable|disable|status]
                                    opt-in recolour watcher (OFF by default)
-  iictl theme doctor               accent-override + switchwall.sh health
+  iictl theme feeder [enable|disable|run|status]
+                                   Material You bridge for nvim/extra-terminals/IDEs
+                                   (standalone matugen; OFF by default; #26)
+  iictl theme plymouth [enable|disable|regen|status]
+                                   opt-in boot splash — installs online, regenerates
+                                   BOTH initramfs presets; NEVER baked (#26)
+  iictl theme doctor               accent-override + switchwall.sh + plymouth health
   iictl theme --spec               emit the iictl-tui chooser spec ('iictl tweak theme')
 
 reversible: 'iictl theme reset' (or 'iictl revert-all') restores the empty accent,
-byte-identical to a system on which a flavor was never set.
+byte-identical to a system on which a flavor was never set. The feeder + plymouth
+toggles record ledger inverses; 'iictl revert-all' strips the feeder fence and
+regenerates both presets without plymouth.
 EOF
 }
 
 case "${1:-help}" in
-  list)             shift; cmd_list    "$@" ;;
-  current)          shift; cmd_current "$@" ;;
-  set)              shift; cmd_set     "$@" ;;
-  reset|clear)      shift; cmd_reset   "$@" ;;
-  gui)              shift; cmd_gui     "$@" ;;
-  watch)            shift; cmd_watch   "$@" ;;
-  doctor)           shift; cmd_doctor  "$@" ;;
-  --spec|spec)      shift; cmd_spec    "$@" ;;
+  list)             shift; cmd_list     "$@" ;;
+  current)          shift; cmd_current  "$@" ;;
+  set)              shift; cmd_set      "$@" ;;
+  reset|clear)      shift; cmd_reset    "$@" ;;
+  gui)              shift; cmd_gui      "$@" ;;
+  watch)            shift; cmd_watch    "$@" ;;
+  feeder)           shift; cmd_feeder   "$@" ;;
+  plymouth)         shift; cmd_plymouth "$@" ;;
+  doctor)           shift; cmd_doctor   "$@" ;;
+  --spec|spec)      shift; cmd_spec     "$@" ;;
   help|-h|--help)   cmd_usage ;;
   # the renderer's synthetic "none" pick maps to reset (see cmd_spec apply note).
   *)                die "unknown subcommand: $1 (try: iictl theme help)" ;;
