@@ -1,0 +1,14 @@
+# Illogical Impulse ISO — default cursor pointer (#26 / PROPOSAL §9).
+#
+# The XCursor lookup falls back to ~/.icons/default/index.theme's Inherits= for
+# apps (X11, some GTK/Qt paths) that read the cursor theme from here rather than
+# from gtk-3.0/settings.ini. Pointing it at Bibata makes the cursor coherent
+# everywhere, matching gtk-cursor-theme-name above.
+#
+# UNOWNED seam: upstream ships nothing under ~/.icons. Revert = delete this file
+# (or the whole ~/.icons/default dir) → the cursor falls back to the system
+# default. Pure additive baked skel; no ledger entry.
+[Icon Theme]
+Name=Default
+Comment=Default cursor theme
+Inherits=Bibata-Modern-Classic

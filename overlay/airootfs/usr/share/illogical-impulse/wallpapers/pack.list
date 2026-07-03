@@ -1,0 +1,36 @@
+# Illogical Impulse ISO — curated wallpaper pack manifest (#26 / PROPOSAL §9).
+#
+# FETCH-ONLY: only this few-KB TEXT manifest rides in the squashfs (Pillar 7 /
+# §18 ISO-size gate). The images themselves are NEVER baked — `iictl wallpaper
+# pack` downloads each into ~/Pictures/Wallpapers/showcase/ (where upstream's own
+# switchwall.sh chooser looks: it `cd`s into $PICTURES/Wallpapers/showcase on a
+# bare chooser run), verifies the sha256, and records the fetched set in the
+# ledger so `iictl wallpaper --revert` / `iictl revert-all` delete exactly what
+# was fetched — leaving the one baked default (70-assets.sh) untouched.
+#
+# Format, one entry per line, WHITESPACE-separated (tabs or spaces):
+#
+#     <filename>  <url>  <sha256>  [rev]
+#
+#   filename  destination basename under ~/Pictures/Wallpapers/showcase/. Must
+#             contain no spaces. The `ii-` prefix marks it as a distro-fetched
+#             file for a clean revert; the extension sets the image type.
+#   url       direct download URL. Pinned to an immutable commit SHA so the bytes
+#             (and thus the sha256) are reproducible forever.
+#   sha256    lowercase 64-hex digest of the file. `iictl wallpaper pack` skips
+#             any download whose digest does not match (a clear, non-fatal error).
+#             validate.sh (theming coherence) fails the build if any entry lacks
+#             a 64-hex sha256 — an unverifiable fetch is a bug-class.
+#   rev       OPTIONAL 4th column: the source commit/tag the URL is pinned to
+#             (informational — the sha256 is the real integrity gate).
+#
+# Curated set: seven landscape / abstract wallpapers from JaKooLit/Wallpaper-Bank,
+# pinned to commit c5e1780c29adca428dc4ca2d970bd1a6a09f18f3.
+
+ii-Fantasy-Mountain.png     https://raw.githubusercontent.com/JaKooLit/Wallpaper-Bank/c5e1780c29adca428dc4ca2d970bd1a6a09f18f3/wallpapers/Fantasy-Mountain.png     3755ef3f3288b3f5825ea45df2a756458f5b0981ea21a814dab2070b35941cfb  c5e1780
+ii-Fantasy-Lake1.png        https://raw.githubusercontent.com/JaKooLit/Wallpaper-Bank/c5e1780c29adca428dc4ca2d970bd1a6a09f18f3/wallpapers/Fantasy-Lake1.png        ef4f2437bc03dffc0c14c0dec3e9a71e9fe891687c1c7ecc6565a05cffd1c93d  c5e1780
+ii-Fantasy-Snow-Valley.png  https://raw.githubusercontent.com/JaKooLit/Wallpaper-Bank/c5e1780c29adca428dc4ca2d970bd1a6a09f18f3/wallpapers/Fantasy-Snow-Valley.png  b24eff2e7caf11a9362f59b079ccea3723e9cb892786f9fe121c336fa2302e4f  c5e1780
+ii-Fog-Forest-Everforest.png  https://raw.githubusercontent.com/JaKooLit/Wallpaper-Bank/c5e1780c29adca428dc4ca2d970bd1a6a09f18f3/wallpapers/Fog-Forest-Everforest.png  c10c5623414d737ee6bd13b8cd5d76dcd5c6e745ce3baa8abfb27c20a231826a  c5e1780
+ii-Fantasy-IcyMountain.png  https://raw.githubusercontent.com/JaKooLit/Wallpaper-Bank/c5e1780c29adca428dc4ca2d970bd1a6a09f18f3/wallpapers/Fantasy-IcyMountain.png  548a1c8f397a9360e6947d494e320ceb642474bcfcbcdc1cbcd0e191555ea06f  c5e1780
+ii-Courtside-Sunset.png     https://raw.githubusercontent.com/JaKooLit/Wallpaper-Bank/c5e1780c29adca428dc4ca2d970bd1a6a09f18f3/wallpapers/Courtside-Sunset.png     2bcc67b88184d9d5856ab02ed8d348ec80197ec399374a2cf11038fb064ab78b  c5e1780
+ii-Lake.png                 https://raw.githubusercontent.com/JaKooLit/Wallpaper-Bank/c5e1780c29adca428dc4ca2d970bd1a6a09f18f3/wallpapers/Lake.png                 a9ccbfc5642871502e76d15308aa0c92b4e525e07afa847fdc811590f006f103  c5e1780

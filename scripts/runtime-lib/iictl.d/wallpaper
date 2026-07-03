@@ -1,0 +1,275 @@
+#!/usr/bin/env bash
+#help: wallpaper	set/get the wallpaper, fetch the curated pack, drive video wallpaper (reversible)
+#spec: wallpaper	Wallpaper
+# wallpaper — the iictl wallpaper verb (#26 / PROPOSAL §9). It DRIVES upstream's
+# own wallpaper + Material You pipeline rather than forking it: `set`/`video`
+# shell out to upstream's public entry point
+# `~/.config/quickshell/ii/scripts/colors/switchwall.sh --image <path>` (which
+# also re-runs matugen so the whole rice recolours), and `pack` fetches a curated
+# set of wallpapers into ~/Pictures/Wallpapers/showcase/ — exactly where
+# switchwall.sh's own chooser looks (it `cd`s into $PICTURES/Wallpapers/showcase
+# on a bare chooser run). NO colour logic is duplicated here.
+#
+# Purely ADDITIVE: it writes ONLY into user-owned, upstream-unowned territory —
+# ~/Pictures/Wallpapers/showcase/ (the fetched pack) — plus whatever switchwall.sh
+# itself writes (upstream owns that). It NEVER touches an rsync --delete tree
+# (quickshell/ii, matugen, hypr/hyprland …) nor upstream runtime STATE.
+#
+# Purely REVERSIBLE: the fetched pack is recorded as one kind=path ledger row per
+# file (inverse: rm), so `iictl wallpaper --revert` (and `iictl revert-all`)
+# delete exactly the fetched images, leaving the single baked default (70-assets)
+# and vanilla upstream behaviour intact. `set --image` is upstream's own config
+# write; resetting to a wallpaper-derived accent is `iictl theme reset`.
+
+set -u
+
+# Shared header (colors, ok/bad/warn/die, _not_root, RELEASE_FILE, ledger_*) and
+# the mutator library (ledger_escape_path for the fetched-file rows). Both source
+# ledger.sh themselves; double-source is safe.
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+source "${II_LIB:-/usr/local/lib/ii}/mutator.sh"
+
+# Upstream's public wallpaper/colour entry point — upstream-owned (read-only
+# territory): we only RUN it, never patch it. Resolve under $HOME so a missing
+# path can `die` softly (the upstream-drift guard). Overridable for the unit test.
+SWITCHWALL="${II_SWITCHWALL:-$HOME/.config/quickshell/ii/scripts/colors/switchwall.sh}"
+# The rice config switchwall.sh writes — we only READ the current wallpaper from
+# it (switchwall.sh is the sole writer).
+II_CONFIG_JSON="${II_CONFIG_JSON:-${XDG_CONFIG_HOME:-$HOME/.config}/illogical-impulse/config.json}"
+
+# The curated pack manifest rides in the squashfs as TEXT (fetch-only — the
+# images are NEVER baked). A sibling of the iictl survive-path under /usr/share,
+# untouched by ii-verify's purge. Overridable for the no-root unit test.
+WALLPAPER_SHARE="${II_WALLPAPER_SHARE:-/usr/share/illogical-impulse/wallpapers}"
+PACK_LIST="$WALLPAPER_SHARE/pack.list"
+
+# Where upstream's switchwall.sh chooser looks (and thus where the fetched pack
+# belongs). xdg-user-dir resolves the user's real Pictures dir; fall back to
+# ~/Pictures when xdg-user-dirs is absent.
+_pictures_dir() {
+  local p=""
+  command -v xdg-user-dir >/dev/null 2>&1 && p="$(xdg-user-dir PICTURES 2>/dev/null)"
+  [[ -n "$p" && "$p" != "$HOME" ]] || p="$HOME/Pictures"
+  printf '%s' "$p"
+}
+SHOWCASE_DIR="${II_SHOWCASE_DIR:-$(_pictures_dir)/Wallpapers/showcase}"
+
+# ── drift guard ──────────────────────────────────────────────────────────────
+_need_switchwall() {
+  [[ -x "$SWITCHWALL" ]] || die "upstream switchwall.sh not found/executable at $SWITCHWALL — cannot drive the wallpaper pipeline (upstream path drift? run 'iictl update')"
+}
+
+# ── current wallpaper (READ-ONLY from the rice config) ───────────────────────
+_current_wallpaper() {
+  command -v jq >/dev/null 2>&1 || return 0
+  [[ -f "$II_CONFIG_JSON" ]] || return 0
+  local v; v="$(jq -r '.background.wallpaperPath // ""' "$II_CONFIG_JSON" 2>/dev/null)"
+  [[ "$v" == "null" ]] && v=""
+  printf '%s' "$v"
+}
+
+# ── sha256 verify (offline, no network) ──────────────────────────────────────
+# _sha256 <file> — echo the lowercase 64-hex digest (sha256sum, always present).
+_sha256() { sha256sum "$1" 2>/dev/null | cut -d' ' -f1; }
+
+# ── manifest parsing ─────────────────────────────────────────────────────────
+# _pack_entries — echo each valid manifest line "filename url sha256 [rev]" with
+# whitespace normalized to single spaces. Blank/comment lines dropped; a line
+# without a 64-hex sha256 in column 3 is skipped with a warning (never fetched
+# unverified — mirrors validate.sh's build-time guard at runtime).
+_pack_entries() {
+  [[ -f "$PACK_LIST" ]] || return 0
+  local line fn url sha rev
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    [[ -z "${line//[[:space:]]/}" ]] && continue    # blank
+    [[ "$line" == '#'* ]] && continue               # comment
+    # shellcheck disable=SC2086 -- deliberate word-split on whitespace columns
+    read -r fn url sha rev <<< "$line"
+    [[ -n "$fn" && -n "$url" && -n "$sha" ]] || { warn "malformed pack.list line (needs filename url sha256): $line" >&2; continue; }
+    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || { warn "pack.list entry '$fn' has no 64-hex sha256 — skipping (unverifiable)" >&2; continue; }
+    printf '%s %s %s %s\n' "$fn" "$url" "$sha" "${rev:-}"
+  done < "$PACK_LIST"
+}
+
+# ── subcommands ──────────────────────────────────────────────────────────────
+cmd_get() {
+  local cur; cur="$(_current_wallpaper)"
+  if [[ -n "$cur" ]]; then
+    echo "${C_B}current wallpaper${C_0}: $cur"
+  else
+    echo "${C_B}current wallpaper${C_0}: (unknown — no jq or no rice config yet)"
+  fi
+}
+
+cmd_set() {
+  _not_root
+  local img="${1:-}"
+  [[ -n "$img" ]] || die "usage: iictl wallpaper set <path>"
+  [[ -f "$img" ]] || die "image not found: $img"
+  _need_switchwall
+  echo "${C_B}>> setting wallpaper${C_0} (upstream switchwall.sh --image → recolours the rice)"
+  exec "$SWITCHWALL" --image "$img"
+}
+
+# cmd_video <path> — a video wallpaper is just switchwall.sh --image <video>:
+# upstream's custom/scripts/__restore_video_wallpaper.sh is the mpvpaper seam it
+# drives for a video argument. We only surface it as a first-class verb and
+# soft-warn if the mpvpaper batteries are missing (it is an optional-pack member).
+cmd_video() {
+  _not_root
+  local vid="${1:-}"
+  [[ -n "$vid" ]] || die "usage: iictl wallpaper video <path-to-video>"
+  [[ -f "$vid" ]] || die "video not found: $vid"
+  _need_switchwall
+  command -v mpvpaper >/dev/null 2>&1 \
+    || warn "mpvpaper not installed — video wallpaper needs it (install the 'video-wallpaper' pack: iictl pack install …); trying anyway"
+  echo "${C_B}>> setting video wallpaper${C_0} (upstream switchwall.sh --image → mpvpaper seam)"
+  exec "$SWITCHWALL" --image "$vid"
+}
+
+# cmd_pack — fetch the curated pack into ~/Pictures/Wallpapers/showcase/, verify
+# each sha256, and record every fetched file as a kind=path ledger row so a
+# revert deletes exactly what we fetched. Idempotent: an already-present file
+# with a matching digest is left in place (and NOT re-recorded — the ledger row
+# from the first fetch already owns it). Fetch-only: nothing is baked.
+cmd_pack() {
+  _not_root
+  [[ -f "$PACK_LIST" ]] || die "no wallpaper pack manifest at $PACK_LIST (not a full install?)"
+  command -v curl >/dev/null 2>&1 || die "curl missing — pacman -S curl"
+
+  mkdir -p "$SHOWCASE_DIR" 2>/dev/null || die "cannot create $SHOWCASE_DIR"
+
+  local entries=(); mapfile -t entries < <(_pack_entries)
+  (( ${#entries[@]} > 0 )) || die "wallpaper pack manifest has no valid entries"
+
+  local fetched=0 skipped=0 failed=0 line fn url sha rev dest tmp got
+  local owned=""
+  for line in "${entries[@]}"; do
+    read -r fn url sha rev <<< "$line"
+    dest="$SHOWCASE_DIR/$fn"
+
+    # already present + verified → idempotent skip (do not re-record).
+    if [[ -f "$dest" ]] && [[ "$(_sha256 "$dest")" == "$sha" ]]; then
+      skipped=$((skipped+1))
+      continue
+    fi
+
+    echo "${C_B}>> fetching${C_0} $fn"
+    tmp="$(mktemp "$SHOWCASE_DIR/.ii-wp.XXXXXX")" || { warn "mktemp failed for $fn — skipping"; failed=$((failed+1)); continue; }
+    if ! curl -fsSL --max-time 120 "$url" -o "$tmp" 2>/dev/null || [[ ! -s "$tmp" ]]; then
+      rm -f "$tmp"; warn "download failed: $fn ($url)"; failed=$((failed+1)); continue
+    fi
+    got="$(_sha256 "$tmp")"
+    if [[ "$got" != "$sha" ]]; then
+      rm -f "$tmp"
+      warn "sha256 MISMATCH for $fn — expected $sha, got $got — discarded (not installed)"
+      failed=$((failed+1)); continue
+    fi
+    mv -f "$tmp" "$dest" || { rm -f "$tmp"; warn "could not place $fn"; failed=$((failed+1)); continue; }
+    chmod 0644 "$dest" 2>/dev/null || true
+    owned="${owned:+$owned,}$(ledger_escape_path "$dest")"
+    fetched=$((fetched+1))
+  done
+
+  # Record ONE kind=path row owning every file we fetched THIS run, so a single
+  # `iictl wallpaper --revert` / `iictl revert-all` rm's the whole fetched set and
+  # prunes the row. (Idempotent re-runs record nothing when everything is already
+  # present.) The path/file inverse in revert-all rm's each owned token.
+  if [[ -n "$owned" ]]; then
+    ledger_record path "wallpaper:pack" "" "$owned" "wallpaper pack ($fetched file(s))"
+  fi
+
+  echo
+  if (( fetched > 0 )); then
+    ok "wallpaper pack: $fetched fetched, $skipped already present, $failed failed → $SHOWCASE_DIR"
+    echo "   pick one from upstream's chooser (Super + wallpaper flow), or: iictl wallpaper set '$SHOWCASE_DIR/<name>'"
+  elif (( failed > 0 )); then
+    warn "wallpaper pack: nothing fetched ($skipped already present, $failed failed) — check your network"
+  else
+    ok "wallpaper pack: all $skipped already present (nothing to fetch)"
+  fi
+  (( failed == 0 ))
+}
+
+cmd_list() {
+  local n=0 f
+  echo "${C_B}wallpaper pack manifest${C_0} ($PACK_LIST):"
+  while read -r f _; do
+    [[ -n "$f" ]] || continue
+    local mark="—"
+    [[ -f "$SHOWCASE_DIR/$f" ]] && mark="${C_G}fetched${C_0}"
+    printf '  %s%-30s%s %b\n' "$C_B" "$f" "$C_0" "$mark"
+    n=$((n+1))
+  done < <(_pack_entries)
+  (( n == 0 )) && echo "  (no valid entries)"
+  echo
+  echo "fetch them all: ${C_B}iictl wallpaper pack${C_0}    →  $SHOWCASE_DIR"
+}
+
+# cmd_revert — delete the fetched pack via the single ledger-replay owner
+# (BLUEPRINT §3 "domains must NOT re-implement ledger replay"). The kind=path
+# rows carry target=wallpaper:pack, so the per-feature filter sweeps exactly the
+# fetched files; the baked default (70-assets) is never recorded, so it survives.
+cmd_revert() {
+  _not_root
+  if command -v iictl >/dev/null 2>&1; then
+    exec iictl revert-all "wallpaper:"
+  fi
+  local ra="${II_LIB:-/usr/local/lib/ii}/iictl.d/revert-all"
+  [[ -x "$ra" ]] || die "revert-all engine not found ($ra) — cannot revert the wallpaper pack cleanly"
+  exec "$ra" "wallpaper:"
+}
+
+# cmd_spec — emit the iictl chooser-contract spec for the wallpaper domain (#47).
+# ONE `choice` control: options = every manifest entry (fetched-or-not), apply =
+# `wallpaper set <showcase/%v>`. The iictl-tui renderer draws it and applies a
+# pick by shelling back to `iictl wallpaper set`, so the round-trip mutates
+# nothing new and the ledger still owns reversibility. Dependency-free JSON.
+cmd_spec() {
+  local options='[' first=1 f
+  while read -r f _; do
+    [[ -n "$f" ]] || continue
+    (( first )) || options+=','
+    options+="{\"value\":\"$f\",\"label\":\"$f\"}"
+    first=0
+  done < <(_pack_entries)
+  options+=']'
+  printf '{"domain":"wallpaper","title":"Wallpaper","controls":[{"id":"wallpaper","type":"choice","label":"Curated wallpaper","current":"","options":%s,"apply":["wallpaper","set","%s/%%v"]}]}\n' \
+    "$options" "$SHOWCASE_DIR"
+}
+
+cmd_usage() {
+  cat <<EOF
+${C_B}iictl wallpaper${C_0} — set the wallpaper + fetch the curated pack (additive + reversible)
+
+Drives upstream's own switchwall.sh (which re-runs matugen, so the whole rice
+recolours). The curated pack is fetch-only — the images are never baked; they
+download into ~/Pictures/Wallpapers/showcase/ where upstream's chooser looks, and
+every fetched file is ledger-recorded so a revert removes exactly the fetched set.
+
+usage:
+  iictl wallpaper get               print the current wallpaper (from the rice config)
+  iictl wallpaper set <path>        set it via switchwall.sh --image (recolours live)
+  iictl wallpaper video <path>      set a video wallpaper (upstream mpvpaper seam)
+  iictl wallpaper pack              fetch the curated pack (sha256-verified) → showcase/
+  iictl wallpaper list              list the pack manifest (+ fetched status)
+  iictl wallpaper --revert          delete the fetched pack (baked default remains)
+  iictl wallpaper --spec            emit the iictl-tui chooser spec ('iictl tweak wallpaper')
+
+reversible: 'iictl wallpaper --revert' (or 'iictl revert-all') removes only the
+fetched images; the single baked default and vanilla upstream behaviour remain.
+EOF
+}
+
+case "${1:-help}" in
+  get)              shift; cmd_get    "$@" ;;
+  set)              shift; cmd_set    "$@" ;;
+  video)            shift; cmd_video  "$@" ;;
+  pack)             shift; cmd_pack   "$@" ;;
+  list|ls)          shift; cmd_list   "$@" ;;
+  --revert|revert)  shift; cmd_revert "$@" ;;
+  --spec|spec)      shift; cmd_spec   "$@" ;;
+  help|-h|--help)   cmd_usage ;;
+  *)                die "unknown subcommand: $1 (try: iictl wallpaper help)" ;;
+esac

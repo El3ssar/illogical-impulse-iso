@@ -79,3 +79,14 @@ simple-scan
 snapper
 snap-pac
 flatpak
+
+# Theme coherence (#26 / PROPOSAL §9) — fill the non-color gaps upstream's
+# matugen pipeline leaves open. matugen owns the COLOR css (gtk-3.0/gtk.css);
+# these set the orthogonal widget-theme / icon / cursor NAMES via the unowned
+# gtk-3.0/settings.ini + ~/.icons/default seams (overlay/skel-distro). Small +
+# universal: adw-gtk3 is the canonical Adwaita-shaped GTK theme, Papirus the
+# stock icon set, Bibata (AUR — auto-routed to prebuild by 40-packages.sh) the
+# cursor. NOT plymouth — that is opt-in only (iictl theme plymouth), never baked.
+adw-gtk3
+papirus-icon-theme
+bibata-cursor-theme
