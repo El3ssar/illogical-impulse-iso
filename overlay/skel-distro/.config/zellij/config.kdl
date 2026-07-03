@@ -1,0 +1,63 @@
+// Illogical Impulse — baked zellij config (issue #23).
+//
+// UNOWNED seam: upstream's dots ship NO zellij config, so this file can never
+// collide with an upstream rsync --delete tree and is never `--delete`d. Delete
+// it (or `~/.config/zellij/` entirely) and zellij reverts to its own built-in
+// defaults — the change is fully additive + reversible per the Iron Law.
+//
+// Colour: this config carries only a NEUTRAL, Material-You-leaning theme block.
+// The distro does NOT ship a per-emulator recolour script — upstream's
+// applycolor.sh `apply_anyterm()` already OSC-broadcasts the live Material You
+// palette to every /dev/pts, and the zsh/fish shells `cat` sequences.txt on
+// start, so zellij (running inside any emulator) inherits the terminal palette
+// terminal-agnostically. The `ii` theme below is only the fallback face used
+// before/absent that OSC broadcast; we deliberately keep it muted so it never
+// fights the emulator's own colours.
+
+// ── behaviour ────────────────────────────────────────────────────────────────
+// The dev layout below is the default when you just run `zellij`.
+default_layout "ii"
+
+// Copy a mouse selection straight to the system clipboard (issue #23 ask).
+copy_on_select true
+
+// Keep pane frames + mouse on — the polished, discoverable default.
+pane_frames true
+mouse_mode true
+
+// A generous scrollback for build logs / test output.
+scroll_buffer_size 20000
+
+// Roomier default scrollback dump target and sane session behaviour.
+default_mode "normal"
+// Don't nag on exit; a dev spins sessions up and down constantly.
+on_force_close "quit"
+// Show the startup tips once; power users can flip this off in their own copy.
+show_startup_tips true
+
+// NOTE: we deliberately do NOT `clear-defaults=true` — zellij's default
+// keybinds are excellent and clearing them would be a hostile, non-additive
+// surprise. We keep every upstream-zellij default and layer nothing on top of
+// them here, so muscle memory from a vanilla zellij carries over untouched.
+
+// ── theme (neutral fallback face; live colour arrives via terminal OSC) ──────
+theme "ii"
+themes {
+    // A muted, near-neutral Material-You-leaning face. Uses ANSI-ish tones that
+    // sit quietly under whatever palette the emulator's OSC sequences push, so
+    // switching emulators or recolouring the wallpaper "just works" without a
+    // distro recolour script (upstream's apply_anyterm owns that path).
+    ii {
+        fg "#d7cfcb"
+        bg "#1a1512"
+        black "#221c19"
+        red "#e0897a"
+        green "#a6c48a"
+        yellow "#d8bd82"
+        blue "#93b1c9"
+        magenta "#c4a2c9"
+        cyan "#8fc7bd"
+        white "#ece0dd"
+        orange "#e0a879"
+    }
+}

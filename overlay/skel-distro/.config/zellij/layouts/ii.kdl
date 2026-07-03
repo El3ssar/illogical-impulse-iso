@@ -1,0 +1,45 @@
+// Illogical Impulse — baked zellij dev layout `ii` (issue #23).
+//
+// UNOWNED seam (upstream ships no zellij config), fully additive + reversible:
+// delete this file and zellij falls back to its built-in `default` layout.
+// Referenced by config.kdl's `default_layout "ii"`, and loadable explicitly
+// with `zellij --layout ii`.
+//
+// Shape: a two-tab dev workspace.
+//   • "code"  — a large editor/main pane on top, two side-by-side shells below.
+//   • "run"   — a shell on the left, a logs/watch pane on the right.
+// Every pane starts in your login shell (no hard-coded editor binary), so the
+// layout is emulator- and toolchain-agnostic. Colour tracks the terminal
+// palette via upstream's OSC broadcast — no recolour wiring here.
+
+layout {
+    // Default tab template gives every tab the zellij status/tab bars.
+    default_tab_template {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        children
+        pane size=2 borderless=true {
+            plugin location="zellij:status-bar"
+        }
+    }
+
+    tab name="code" focus=true {
+        // Editor / main work pane — the tall one, focused on entry.
+        pane size="65%" name="editor" focus=true
+        // Two shells side-by-side underneath for builds + a scratch shell.
+        pane split_direction="vertical" {
+            pane name="build"
+            pane name="scratch"
+        }
+    }
+
+    tab name="run" {
+        pane split_direction="vertical" {
+            // A working shell on the left…
+            pane name="shell" size="55%"
+            // …and a logs/watch pane on the right (start a `tail -f` / watcher here).
+            pane name="logs"
+        }
+    }
+}
