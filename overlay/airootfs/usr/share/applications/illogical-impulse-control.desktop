@@ -1,6 +1,6 @@
 [Desktop Entry]
 Name=Control Center
-GenericName=Illogical Impulse Control Center
+GenericName=System Control Center
 Comment=Configure shells, editor, packages, theming and more — every reversible iictl tweak
 Exec=/usr/local/bin/iictl center
 Icon=illogical-impulse

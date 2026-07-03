@@ -32,7 +32,11 @@ import "panes.js" as Registry
 ApplicationWindow {
     id: root
     visible: true
-    title: "Control Center — Illogical Impulse"
+    // Identity is NOT hardcoded: the distro NAME comes from the build-generated
+    // os-release (derived from distro.toml), passed by `iictl center` via the env.
+    // A direct `qs -p` (dev/test) with no env falls back to the brand-neutral name.
+    readonly property string distroName: Quickshell.env("II_DISTRO_NAME") || ""
+    title: "Control Center" + (root.distroName.length ? " — " + root.distroName : "")
     width: 960
     height: 640
     minimumWidth: 760
@@ -203,7 +207,8 @@ ApplicationWindow {
                     onAccepted: root.jumpToResult()
                     onEscaped: root.closeSearch()
                     onUp: root.searchSel = Math.max(0, root.searchSel - 1)
-                    onDown: root.searchSel = Math.min(root.results.length - 1, root.searchSel + 1)
+                    onDown: root.searchSel = root.results.length === 0 ? 0
+                          : Math.min(root.results.length - 1, root.searchSel + 1)
                 }
             }
 

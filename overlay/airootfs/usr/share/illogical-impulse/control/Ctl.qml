@@ -74,8 +74,12 @@ Singleton {
             property var _onOk: null
             property var _onErr: null
             property string _buf: ""
+            property string _errBuf: ""
             command: rp._argv
             stdout: SplitParser { splitMarker: ""; onRead: data => rp._buf += data }
+            // Capture stderr too — iictl writes its real failure reason there, so
+            // the error path can surface an actionable message, not a generic one.
+            stderr: SplitParser { splitMarker: ""; onRead: data => rp._errBuf += data }
             onExited: (code, status) => {
                 if (rp._mode === "text") {
                     if (rp._onOk) rp._onOk(rp._buf);
@@ -89,7 +93,8 @@ Singleton {
                 }
                 if (ok) { if (rp._onOk) rp._onOk(obj); }
                 else if (rp._onErr) {
-                    var msg = rp._buf.trim();
+                    // prefer the stderr diagnostic, then stdout, then a generic note.
+                    var msg = rp._errBuf.trim() || rp._buf.trim();
                     rp._onErr(msg.length ? msg
                         : ("iictl " + (rp._argv[1] || "") + " failed (exit " + code + ")"));
                 }
