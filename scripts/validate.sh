@@ -406,6 +406,126 @@ if [[ -f "$_WAPP" ]]; then
     || _v_fail "iictl.d/webapp does not use ii_lua_block_write — accent rules must be sentinel-fenced via the shared mutator"
 fi
 
+step "terminal/multiplexer chooser (#23, TUI-01)"
+# The iictl tui domain: a baked, UNOWNED zellij config + an iictl.d/tui chooser
+# that overrides the default emulator via a graceful FALLBACK LIST and toggles a
+# multiplexer autostart — all additive + reversible. The generic plugin lint
+# (exec/shebang/bash -n/#help) is asserted in the "iictl.d/ plugin architecture"
+# step; here we add the FEATURE-SPECIFIC bug-class guards.
+_TUI="$_IID/tui"
+if [[ ! -f "$_TUI" ]]; then
+  _v_fail "TUI-01: iictl.d/tui not staged — the terminal/multiplexer chooser is missing"
+else
+  _v_ok "TUI-01: iictl.d/tui staged (generic exec/shebang/bash -n/#help lint runs in the plugin-architecture step)"
+  # Comments stripped so the plugin's own prose (which legitimately NAMES the
+  # forbidden trees + the dropped recolour renderer to warn itself away) can
+  # neither satisfy nor trip the code checks below.
+  _tui_code="$(grep -vE '^[[:space:]]*#' "$_TUI")"
+
+  # (a) GRACEFUL-DEGRADATION bug-class: the terminal= override must be a FALLBACK
+  #     LIST run through upstream's launch_first_available.sh — never a lone
+  #     binary (uninstalling the chosen emulator would then break Super+Return).
+  #     Assert the plugin builds the value through launch_first_available.sh and
+  #     that its fallback-list builder emits MORE THAN ONE quoted entry.
+  grep -q 'launch_first_available.sh' <<<"$_tui_code" \
+    && _v_ok "TUI-01: terminal override runs through upstream's launch_first_available.sh (graceful fallback)" \
+    || _v_fail "TUI-01: iictl.d/tui never references launch_first_available.sh — the override must be a fallback list, not a lone binary"
+  # The builder seeds the list with the chosen command AND appends upstream's
+  # chain — a lone-binary override (no chain append) is the bug we guard against.
+  if grep -q '_UPSTREAM_CHAIN' <<<"$_tui_code" && grep -q '_fallback_list' <<<"$_tui_code"; then
+    _v_ok "TUI-01: iictl.d/tui builds a chosen-first fallback LIST over upstream's chain (uninstall degrades, never breaks Super+Return)"
+  else
+    _v_fail "TUI-01: iictl.d/tui does not append upstream's terminal chain — a lone-binary override breaks Super+Return when the emulator is uninstalled"
+  fi
+
+  # (b) NO-PER-EMULATOR-RECOLOUR bug-class (the whole point of the issue): upstream's
+  #     applycolor.sh apply_anyterm() already OSC-broadcasts Material You to every
+  #     emulator, so this domain must NOT add a second recolour renderer/watcher.
+  #     Forbid an ii-theme-extras.sh helper, any write of upstream's generated
+  #     sequences.txt, and any per-emulator theme-file writer for the emulators
+  #     upstream already recolours (kitty/foot/ghostty/wezterm/alacritty configs).
+  _recolour_bad=0
+  if grep -qE 'ii-theme-extras' <<<"$_tui_code"; then
+    _v_fail "TUI-01: iictl.d/tui references ii-theme-extras — no per-emulator recolour renderer (upstream's apply_anyterm already recolours every emulator)"; _recolour_bad=1
+  fi
+  if grep -qE 'sequences\.txt|generated/terminal' <<<"$_tui_code"; then
+    _v_fail "TUI-01: iictl.d/tui writes/reads upstream's generated sequences.txt — that OSC recolour path is upstream-owned; do not duplicate it"; _recolour_bad=1
+  fi
+  # A per-emulator theme-file WRITE (redirection into an emulator's config) is the
+  # duplicate-recolour smell. Match a `>`/`>>` redirect targeting a known emulator
+  # config path. (The launch override lives in variables.lua, not a theme file.)
+  if grep -qE '>[[:space:]]*"?[^"]*(kitty|foot|ghostty|wezterm|alacritty)[^"]*(theme|colors|\.conf)' <<<"$_tui_code"; then
+    _v_fail "TUI-01: iictl.d/tui writes a per-emulator theme/colour file — redundant with upstream's OSC recolour; drop it"; _recolour_bad=1
+  fi
+  # Also assert NO new distro recolour helper baked under the airootfs share tree.
+  if [[ -e "$AIROOTFS/usr/local/lib/ii/ii-theme-extras.sh" || -e "$AIROOTFS/usr/share/illogical-impulse/ii-theme-extras.sh" ]]; then
+    _v_fail "TUI-01: a per-emulator recolour helper (ii-theme-extras.sh) is baked — upstream's apply_anyterm already covers emulators"; _recolour_bad=1
+  fi
+  (( _recolour_bad == 0 )) && _v_ok "TUI-01: no per-emulator recolour renderer / second sequences.txt watcher added (upstream's apply_anyterm OSC path owns emulator colour)"
+
+  # (c) The terminal override + any fenced write must go through the shared
+  #     ii_lua_block_write mutator into the SANCTIONED custom/variables.lua slot
+  #     only — never a sync-deleted upstream tree.
+  grep -q 'ii_lua_block_write' <<<"$_tui_code" \
+    && _v_ok "TUI-01: the terminal override is written via the shared ii_lua_block_write mutator (sentinel-fenced, ledger-recorded)" \
+    || _v_fail "TUI-01: iictl.d/tui does not use ii_lua_block_write — the override must be sentinel-fenced via the shared mutator"
+  grep -q 'custom/variables.lua' <<<"$_tui_code" \
+    && _v_ok "TUI-01: iictl.d/tui targets the sanctioned custom/variables.lua slot" \
+    || _v_fail "TUI-01: iictl.d/tui never references custom/variables.lua — the override has no sanctioned slot"
+  if grep -qE '(quickshell/ii|hypr/hyprland/variables\.lua|/matugen/|fish/config\.fish|zshrc\.d)' <<<"$_tui_code"; then
+    _v_fail "TUI-01: iictl.d/tui writes into an upstream rsync --delete tree (quickshell/ii, hypr/hyprland/variables.lua, matugen, fish/config.fish, zshrc.d) — never edit an upstream-owned path"
+  else
+    _v_ok "TUI-01: iictl.d/tui touches no sync-deleted upstream tree (override confined to custom/variables.lua; mux drop-ins in unowned seams)"
+  fi
+  # Every mutation must be reversible: the override + the mux drop-ins are ledger-
+  # recorded (ii_lua_block_write records the lua-block row; ledger_record the drops).
+  grep -q 'ledger_record' <<<"$_tui_code" \
+    && _v_ok "TUI-01: iictl.d/tui ledger_records its mux drop-ins (revert-all removes them)" \
+    || _v_fail "TUI-01: iictl.d/tui never calls ledger_record — the mux autostart would be unrevertable"
+fi
+
+# (d) baked, UNOWNED zellij config: config.kdl + the ii layout must ship in
+#     skel-distro AND reach /etc/skel, and must NOT be baked into a sync-deleted
+#     dir. Upstream ships NO zellij config, so ~/.config/zellij is unowned — never
+#     rsync --delete'd. We assert the files land in skel-distro + the staged
+#     /etc/skel, so `useradd -m` delivers them; deleting them reverts to zellij's
+#     own defaults (fully additive).
+_zj_bad=0
+for _zf in .config/zellij/config.kdl .config/zellij/layouts/ii.kdl; do
+  if [[ -f "$OVERLAY/skel-distro/$_zf" ]]; then
+    _v_ok "TUI-01: baked zellij file present in skel-distro ($_zf)"
+  else
+    _v_fail "TUI-01: baked zellij file missing from skel-distro ($_zf)"; _zj_bad=$((_zj_bad+1))
+  fi
+  if [[ -f "$AIROOTFS/etc/skel/$_zf" ]]; then
+    _v_ok "TUI-01: baked zellij file staged into /etc/skel ($_zf) — useradd -m delivers it to the installed user"
+  else
+    _v_fail "TUI-01: baked zellij file did not reach /etc/skel ($_zf) — run just prepare"; _zj_bad=$((_zj_bad+1))
+  fi
+done
+# The zellij config must NOT be an upstream-owned zellij tree (there is none) —
+# guard against a future upstream shipping one silently colliding with our bake.
+if [[ -e "$DOTS/dots/.config/zellij" ]]; then
+  _v_fail "TUI-01: upstream now ships a zellij config — our baked ~/.config/zellij would collide with an rsync --delete tree; move it to a fenced/unowned seam"
+else
+  _v_ok "TUI-01: upstream ships no zellij config — ~/.config/zellij stays an unowned seam our bake owns cleanly"
+fi
+
+# (e) focused offline self-test of the chooser's reversible-state mechanics
+#     (fallback-list shape, idempotent fence, ledger rows, mux drop-ins, strip).
+#     Runs the REAL plugin against a throwaway $HOME (no root, no network, no
+#     package install) — a regression reds the build. Mirrors the nvim self-test.
+_TUI_TEST="$ROOT/tests/tui-chooser.sh"
+if [[ ! -f "$_TUI_TEST" ]]; then
+  _v_fail "TUI-01: tests/tui-chooser.sh missing — the chooser self-test is gone"
+elif ! bash -n "$_TUI_TEST" 2>/dev/null; then
+  _v_fail "TUI-01: tests/tui-chooser.sh has a syntax error"
+elif bash "$_TUI_TEST" >/dev/null 2>&1; then
+  _v_ok "TUI-01: tests/tui-chooser.sh self-test passes (fallback list, idempotent fence, ledger rows, mux drop-ins, revert strip)"
+else
+  _v_fail "TUI-01: tests/tui-chooser.sh self-test FAILED — run it directly to see which assertion broke"
+fi
+
 step "iictl update flags + embedded welcome"
 # Bug-class guards for the 'iictl update --noask' fix + the embedded welcome:
 #   • iictl must NOT pass the dropped '--noask' to upstream ./setup (it now

@@ -1,0 +1,459 @@
+#!/usr/bin/env bash
+#help: tui	choose the terminal emulator + multiplexer (graceful-fallback, reversible)
+#spec: tui	Terminal & multiplexer
+# tui — the iictl terminal-experience chooser (PROPOSAL §10, issue #23). Two
+# reversible knobs plus a status read-out:
+#
+#   term <kitty|ghostty|wezterm|alacritty|foot>
+#     Make <X> the default emulator that Super+Return / the codeEditor/taskManager
+#     binds launch. It writes a sentinel-fenced `terminal=` override into the
+#     EMPTY, PRESERVED ~/.config/hypr/custom/variables.lua slot
+#     (install_dir__ignore_existing — sourced AFTER and WINNING over upstream's
+#     read-only hyprland/variables.lua). The override value is a FALLBACK LIST run
+#     through upstream's own launch_first_available.sh with <X> FIRST, then the
+#     rest of upstream's terminal chain — so uninstalling <X> degrades to the next
+#     available emulator instead of breaking Super+Return. If <X> isn't installed
+#     we offer to install it ONLINE (official repo via pacman, AUR via paru — the
+#     framework pack rules); kitty needs no install (it's baked).
+#
+#   mux <zellij|tmux|none> [--autostart]
+#     Select the multiplexer. CONFIG-ONLY by default (zellij's config is baked;
+#     it does NOT auto-wrap your shell). `--autostart` (or `mux enable <name>`)
+#     writes an UNOWNED, ledger-recorded shell drop-in that launches the mux for
+#     interactive tty login terminals only (skipping ssh / scripts / an existing
+#     mux); `mux none` removes any autostart drop-in.
+#
+#   status   print the current term + mux selection.
+#
+# Purely ADDITIVE + REVERSIBLE. The terminal override is ONE sentinel-fenced
+# block in the SANCTIONED custom/variables.lua slot, written ONLY through the
+# shared ii_lua_block_write mutator (ledger-recorded, kind=lua-block). The mux
+# autostart is an UNOWNED, ii-namespaced shell drop-in in a sanctioned seam
+# (fish conf.d/ii-*.fish, zsh ~/.config/zsh/ii-*.zsh — neither is an upstream
+# rsync --delete path), recorded as a kind=path ledger row. We NEVER touch the
+# rsync --delete'd upstream trees (hypr/hyprland/variables.lua, quickshell/ii,
+# matugen, fish/config.fish, zshrc.d) or the generated/ STATE. We ship NO
+# per-emulator recolour renderer: upstream's applycolor.sh apply_anyterm()
+# already OSC-broadcasts Material You to every emulator, so a newly-chosen
+# ghostty/wezterm/etc inherits colour terminal-agnostically. kitty stays the
+# explicit default. `iictl revert-all` strips the fenced block + removes the
+# drop-in, restoring upstream's launch_first_available chain — vanilla.
+
+set -u
+
+# Shared header (colors, ok/bad/warn/die, _not_root, RELEASE_FILE, ledger_*) and
+# the mutator library (ii_lua_block_write / ii_lua_block_remove — the ONLY
+# sanctioned writer of a sentinel-fenced custom/*.lua block). Both source
+# ledger.sh themselves; double-source is safe.
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+source "${II_LIB:-/usr/local/lib/ii}/mutator.sh"
+
+# ── locations (all overridable for the no-root self-test) ────────────────────
+# The sanctioned, PRESERVED custom/ slot for the terminal override — ONLY via the
+# mutator. Never the rsync --delete'd hypr/hyprland tree.
+VARIABLES_LUA="${II_TUI_VARIABLES_LUA:-$HOME/.config/hypr/custom/variables.lua}"
+# Where zellij's baked config lands (skel-distro → /etc/skel). Used only to
+# report presence in `status`; never rewritten here.
+ZELLIJ_DIR="${II_TUI_ZELLIJ_DIR:-$HOME/.config/zellij}"
+# Upstream's launcher — the SAME script upstream's variables.lua uses. Referenced
+# by path (read-only); we never edit it. Kept relative-to-home so the override
+# resolves identically to upstream's own line.
+LAUNCHER="${II_TUI_LAUNCHER:-~/.config/hypr/hyprland/scripts/launch_first_available.sh}"
+# UNOWNED mux autostart drop-ins (sanctioned seams; neither is an upstream
+# rsync --delete path). fish auto-sources conf.d/*.fish; the zsh one is sourced
+# from the fenced marker documented in status/help (users on zsh source it once).
+MUX_FISH_DROP="${II_TUI_MUX_FISH:-$HOME/.config/fish/conf.d/ii-mux.fish}"
+MUX_ZSH_DROP="${II_TUI_MUX_ZSH:-$HOME/.config/zsh/ii-mux.zsh}"
+
+# Fence name for the terminal override block in custom/variables.lua.
+TERM_FENCE="terminal"
+
+# ── the emulator table ───────────────────────────────────────────────────────
+# For each choosable emulator: the LAUNCH COMMAND (how launch_first_available.sh
+# should invoke it — its first word is the binary it `command -v`-probes) and the
+# PACKAGE to install it. kitty leads with `kitty -1` (single-instance) to mirror
+# upstream's own chain entry. The package classification (official vs AUR) is
+# resolved at RUNTIME via `pacman -Si` (mirrors the pack engine), never hardcoded.
+_term_cmd() {   # _term_cmd <name> → the launch_first_available.sh command string
+  case "$1" in
+    kitty)     printf '%s' 'kitty -1' ;;
+    ghostty)   printf '%s' 'ghostty' ;;
+    wezterm)   printf '%s' 'wezterm' ;;
+    alacritty) printf '%s' 'alacritty' ;;
+    foot)      printf '%s' 'foot' ;;
+    *)         return 1 ;;
+  esac
+}
+_term_pkg() {   # _term_pkg <name> → the pacman/AUR package name
+  case "$1" in
+    kitty)     printf '%s' 'kitty' ;;
+    ghostty)   printf '%s' 'ghostty' ;;
+    wezterm)   printf '%s' 'wezterm' ;;
+    alacritty) printf '%s' 'alacritty' ;;
+    foot)      printf '%s' 'foot' ;;
+    *)         return 1 ;;
+  esac
+}
+_terms() { printf '%s\n' kitty ghostty wezterm alacritty foot; }
+
+# Upstream's terminal fallback chain (verbatim from hyprland/variables.lua). The
+# override reproduces it with the chosen emulator hoisted to the front and any
+# duplicate of the chosen command dropped, so the list is exactly "chosen, then
+# upstream's order" — graceful degradation preserved. Bumping this to track an
+# upstream change is a one-line edit here.
+_UPSTREAM_CHAIN=('foot' 'kitty -1' 'alacritty' 'wezterm' 'konsole' 'kgx' 'uxterm' 'xterm')
+
+# _binary_of <cmd> — the binary word launch_first_available.sh probes (`command
+# -v ${cmd%% *}`): the first whitespace-delimited token.
+_binary_of() { printf '%s' "${1%% *}"; }
+
+# _fallback_list <chosen-cmd> — echo the space-joined, single-quoted fallback
+# list: <chosen-cmd> first, then every upstream-chain entry whose BINARY differs
+# from the chosen binary (so we never list the same emulator twice). This is the
+# exact argv launch_first_available.sh receives — a LIST, never a lone binary.
+_fallback_list() {
+  local chosen="$1" chosen_bin out entry
+  chosen_bin="$(_binary_of "$chosen")"
+  out="'$chosen'"
+  for entry in "${_UPSTREAM_CHAIN[@]}"; do
+    [[ "$(_binary_of "$entry")" == "$chosen_bin" ]] && continue
+    out="$out '$entry'"
+  done
+  printf '%s' "$out"
+}
+
+# ── online install (framework pack rules; mirrors iictl.d/pack) ──────────────
+_sudo() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
+
+# _ensure_paru — bootstrap paru if an AUR emulator is chosen and paru is absent
+# (paru's ISO build is fail-soft). Mirrors iictl.d/pack's bootstrap-or-error.
+_ensure_paru() {
+  command -v paru >/dev/null 2>&1 && return 0
+  warn "paru not found — bootstrapping it from the AUR (needs base-devel + git + network)"
+  command -v git     >/dev/null 2>&1 || die "git missing — install with: sudo pacman -S --needed git base-devel"
+  command -v makepkg >/dev/null 2>&1 || die "base-devel missing — install with: sudo pacman -S --needed base-devel git"
+  local tmp; tmp="$(mktemp -d)" || die "mktemp failed"
+  if ( cd "$tmp" && git clone --depth=1 https://aur.archlinux.org/paru.git \
+         && cd paru && makepkg -si --noconfirm ); then
+    rm -rf "$tmp"
+  else
+    rm -rf "$tmp"
+    die "paru bootstrap failed — install the emulator manually, then retry"
+  fi
+  command -v paru >/dev/null 2>&1 || die "paru still not on PATH after bootstrap"
+}
+
+# _install_pkg <package> — install ONE emulator package online. Official-repo
+# packages go through pacman, AUR through paru (classified at runtime via
+# pacman -Si, exactly like the pack engine). Non-interactive when there is no
+# controlling tty (the welcome-card console path).
+_install_pkg() {
+  local pkg="$1" CONFIRM=()
+  [[ -t 0 ]] || CONFIRM=(--noconfirm)
+  if pacman -Si "$pkg" &>/dev/null; then
+    echo "${C_B}>> installing${C_0} $pkg (official repo)"
+    _sudo pacman -S --needed "${CONFIRM[@]}" "$pkg" \
+      || die "install of '$pkg' failed — the terminal override was NOT written; nothing changed"
+  else
+    echo "${C_B}>> installing${C_0} $pkg (AUR)"
+    _ensure_paru
+    paru -S --needed "${CONFIRM[@]}" "$pkg" \
+      || die "AUR install of '$pkg' failed — the terminal override was NOT written; nothing changed"
+  fi
+}
+
+# _prompt_install <name> <pkg> — offer to install a missing emulator. Returns 0
+# if it is (now) installed, non-zero if the user declined. Auto-yes when there is
+# no controlling tty.
+_prompt_install() {
+  local name="$1" pkg="$2" bin
+  bin="$(_binary_of "$(_term_cmd "$name")")"
+  command -v "$bin" >/dev/null 2>&1 && return 0
+  local ans="y"
+  if [[ -t 0 ]]; then
+    printf '%s is not installed. Install package %s now? [Y/n] ' "$name" "$pkg" >&2
+    read -r ans || ans="n"
+    ans="${ans:-y}"
+  fi
+  case "$ans" in
+    y|Y|yes|YES) _install_pkg "$pkg"; return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# ── read the current selection (for status + spec) ───────────────────────────
+# _fence_present <file> <name> — true if the named fence exists in <file>. The
+# pattern begins with '--', so it MUST be passed via `-e` (else grep parses it as
+# options — the same reason the mutator strips fences with awk, not grep).
+_fence_present() {
+  [[ -f "$1" ]] || return 1
+  grep -qxF -e "-- >>> illogical-impulse $2" "$1" 2>/dev/null
+}
+
+# _current_term — echo the chosen emulator name if our fence is present and names
+# a known emulator, else `default` (upstream's baked chain, kitty-capable order).
+_current_term() {
+  if _fence_present "$VARIABLES_LUA" "$TERM_FENCE"; then
+    local first t name
+    first="$(awk -v fb="-- >>> illogical-impulse $TERM_FENCE" -v fe="-- <<< illogical-impulse $TERM_FENCE" '
+      $0 == fb { inblk=1; next }
+      $0 == fe { inblk=0 }
+      inblk && /terminal[[:space:]]*=/ { print; exit }
+    ' "$VARIABLES_LUA" 2>/dev/null)"
+    # Extract the FIRST 'quoted' launch command, then its binary word.
+    t="${first#*\'}"; t="${t%%\'*}"; t="${t%% *}"
+    for name in $(_terms); do
+      [[ "$(_binary_of "$(_term_cmd "$name")")" == "$t" ]] && { printf '%s' "$name"; return 0; }
+    done
+    printf 'custom'; return 0
+  fi
+  printf 'default'
+}
+
+# _current_mux — echo the mux name recorded in the autostart drop-in, else `none`.
+_current_mux() {
+  local f
+  for f in "$MUX_FISH_DROP" "$MUX_ZSH_DROP"; do
+    if [[ -f "$f" ]]; then
+      local n; n="$(sed -nE 's/^# ii-mux:([a-z]+).*/\1/p' "$f" 2>/dev/null | head -1)"
+      [[ -n "$n" ]] && { printf '%s' "$n"; return 0; }
+    fi
+  done
+  printf 'none'
+}
+
+# ── subcommands ──────────────────────────────────────────────────────────────
+cmd_term() {
+  _not_root
+  local name="${1:-}"
+  [[ -n "$name" ]] || die "usage: iictl tui term <$( _terms | tr '\n' '|' | sed 's/|$//')>"
+  local cmd; cmd="$(_term_cmd "$name")" \
+    || die "unknown terminal '$name' (choose: $(_terms | tr '\n' ' ' | sed 's/ $//'))"
+
+  # The custom/ dir must exist (the rice ships it). Create the slot's parent if a
+  # fresh box lacks it; die softly if hypr itself is absent.
+  local custom_dir; custom_dir="$(dirname "$VARIABLES_LUA")"
+  [[ -d "$custom_dir" ]] || mkdir -p "$custom_dir" 2>/dev/null \
+    || die "no ~/.config/hypr/custom directory — is the Illogical Impulse rice installed?"
+
+  # Offer to install a missing emulator (kitty is baked → always present). If the
+  # user declines, bail WITHOUT writing the override (nothing changed).
+  local pkg; pkg="$(_term_pkg "$name")"
+  if ! _prompt_install "$name" "$pkg"; then
+    warn "'$name' not installed and install declined — leaving the terminal default unchanged"
+    return 0
+  fi
+
+  # Build the fallback list (chosen first + the rest of upstream's chain).
+  local list; list="$(_fallback_list "$cmd")"
+
+  # Ensure the preserved slot exists (upstream ships it as a 1-byte stub, but a
+  # fresh box may lack it — sanctioned to create).
+  [[ -e "$VARIABLES_LUA" ]] || : > "$VARIABLES_LUA" 2>/dev/null || true
+
+  # Write the sentinel-fenced override through the shared mutator (kind=lua-block,
+  # ledger-recorded → revert-all strips it). The value is upstream's OWN launcher
+  # run with our fallback list, so an uninstalled <name> degrades gracefully.
+  if ii_lua_block_write "$VARIABLES_LUA" "$TERM_FENCE" <<LUA
+-- Illogical Impulse terminal override (iictl tui term $name). Wins over
+-- upstream's read-only hyprland/variables.lua because custom/ is sourced last.
+-- FALLBACK LIST via upstream's launch_first_available.sh: $name first, then the
+-- rest of upstream's chain — so uninstalling $name falls through to the next
+-- available emulator instead of breaking Super+Return. Reversible: 'iictl tui
+-- term' rewrites this block; 'iictl revert-all' strips it → upstream's chain.
+terminal = "$LAUNCHER $list"
+LUA
+  then
+    ok "default terminal set to ${C_B}$name${C_0} (fallback list: $list)"
+    echo "  reload Hyprland (or relogin) so Super+Return picks it up."
+  else
+    die "could not write the terminal override into $VARIABLES_LUA"
+  fi
+}
+
+# _mux_launch <name> — the POSIX guard + launch body shared by both shell
+# drop-ins. Interactive tty logins only: skip non-interactive shells (handled by
+# the shell-specific wrapper), an existing mux ($ZELLIJ/$TMUX), a non-tty stdout,
+# and ssh sessions. No-op if the mux binary is missing.
+_mux_posix_body() {
+  local name="$1" run
+  case "$name" in
+    zellij) run='zellij attach --create ii-dev' ;;
+    tmux)   run='tmux new-session -A -s ii-dev' ;;
+  esac
+  cat <<SH
+[ -n "\$ZELLIJ" ] && return 0 2>/dev/null
+[ -n "\$TMUX" ] && return 0 2>/dev/null
+[ -t 1 ] || return 0 2>/dev/null
+[ -n "\$SSH_CONNECTION" ] && return 0 2>/dev/null
+command -v $name >/dev/null 2>&1 || return 0 2>/dev/null
+$run
+SH
+}
+
+# _mux_write_drops <name> — (re)write BOTH unowned shell drop-ins for the chosen
+# mux and record each as a kind=path ledger row. fish auto-sources conf.d/*.fish;
+# the zsh drop-in is documented for the user to `source` from their own rc. Both
+# carry the `# ii-mux:<name>` marker read back by status/_current_mux.
+_mux_write_drops() {
+  local name="$1"
+  # fish: interactive-only guard via `status is-interactive`.
+  mkdir -p "$(dirname "$MUX_FISH_DROP")" 2>/dev/null || true
+  if cat > "$MUX_FISH_DROP" <<FISH
+# ii-mux:$name — Illogical Impulse multiplexer autostart (iictl tui mux $name --autostart).
+# UNOWNED, ii-namespaced fish drop-in (fish auto-sources conf.d/*.fish). Starts
+# $name in interactive tty login terminals only. Reversible: 'iictl tui mux none'
+# or 'iictl revert-all' removes this file.
+if status is-interactive
+    if test -z "\$ZELLIJ"; and test -z "\$TMUX"; and isatty stdout; and test -z "\$SSH_CONNECTION"
+        if type -q $name
+            exec $( [ "$name" = zellij ] && printf '%s' 'zellij attach --create ii-dev' || printf '%s' 'tmux new-session -A -s ii-dev' )
+        end
+    end
+end
+FISH
+  then
+    chmod 0644 "$MUX_FISH_DROP" 2>/dev/null || true
+    ledger_record path "tui:mux" "" "$(ledger_escape_path "$MUX_FISH_DROP")" "iictl tui mux none"
+  else
+    warn "could not write $MUX_FISH_DROP"
+  fi
+  # zsh/bash: POSIX guard; the body is `source`-able from an interactive rc.
+  mkdir -p "$(dirname "$MUX_ZSH_DROP")" 2>/dev/null || true
+  if {
+        printf '# ii-mux:%s — Illogical Impulse multiplexer autostart (iictl tui mux %s --autostart).\n' "$name" "$name"
+        printf '# UNOWNED, ii-namespaced drop-in. Source it from your interactive zsh/bash rc:\n'
+        printf '#   [ -f %s ] && . %s\n' "$MUX_ZSH_DROP" "$MUX_ZSH_DROP"
+        printf '# Starts %s in interactive tty login terminals only. Reversible via\n' "$name"
+        printf "# 'iictl tui mux none' or 'iictl revert-all'.\n"
+        _mux_posix_body "$name"
+      } > "$MUX_ZSH_DROP" 2>/dev/null
+  then
+    chmod 0644 "$MUX_ZSH_DROP" 2>/dev/null || true
+    ledger_record path "tui:mux" "" "$(ledger_escape_path "$MUX_ZSH_DROP")" "iictl tui mux none"
+  else
+    warn "could not write $MUX_ZSH_DROP"
+  fi
+}
+
+# _mux_remove_drops — remove both autostart drop-ins (no-op if absent). The
+# lingering kind=path ledger rows are harmless — revert-all's path inverse rm's an
+# already-gone file idempotently and prunes the row.
+_mux_remove_drops() {
+  rm -f "$MUX_FISH_DROP" "$MUX_ZSH_DROP" 2>/dev/null || true
+}
+
+cmd_mux() {
+  _not_root
+  local name="" autostart=0 a
+  for a in "$@"; do
+    case "$a" in
+      --autostart|enable) autostart=1 ;;
+      -*) die "unknown flag: $a (usage: iictl tui mux <zellij|tmux|none> [--autostart])" ;;
+      *) [[ -z "$name" ]] && name="$a" || die "unexpected argument: $a" ;;
+    esac
+  done
+  [[ -n "$name" ]] || die "usage: iictl tui mux <zellij|tmux|none> [--autostart]"
+
+  case "$name" in
+    none)
+      _mux_remove_drops
+      ok "multiplexer autostart removed — interactive terminals open a plain shell"
+      return 0 ;;
+    zellij|tmux) : ;;
+    *) die "unknown multiplexer '$name' (choose: zellij, tmux, none)" ;;
+  esac
+
+  # Config-only by default: zellij's config is baked (~/.config/zellij); nothing
+  # is written unless --autostart is given.
+  if (( ! autostart )); then
+    if [[ "$name" == zellij && ! -d "$ZELLIJ_DIR" ]]; then
+      warn "no $ZELLIJ_DIR — the baked zellij config is missing (fresh box?); zellij will use its own defaults"
+    fi
+    ok "multiplexer selected: ${C_B}$name${C_0} (config-only — run '$name' yourself, or add --autostart)"
+    echo "  autostart in interactive terminals: iictl tui mux $name --autostart"
+    return 0
+  fi
+
+  # Autostart: swap any existing drop-in for the chosen mux (idempotent) and
+  # write the unowned, ledger-recorded shell drop-ins.
+  _mux_remove_drops
+  _mux_write_drops "$name"
+  ok "multiplexer ${C_B}$name${C_0} will autostart in new interactive terminals"
+  echo "  fish picks it up automatically; zsh/bash: source $MUX_ZSH_DROP from your rc."
+  echo "  disable with: iictl tui mux none"
+}
+
+cmd_status() {
+  local t m; t="$(_current_term)"; m="$(_current_mux)"
+  echo "${C_B}iictl tui${C_0} — terminal experience"
+  printf '  terminal:    %s%s%s' "$C_B" "$t" "$C_0"
+  case "$t" in
+    default) echo "  (upstream's baked launch_first_available chain — kitty-capable)" ;;
+    custom)  echo "  (a custom terminal= override is present in custom/variables.lua)" ;;
+    *)       echo "  (fenced override in custom/variables.lua; fallback list preserved)" ;;
+  esac
+  printf '  multiplexer: %s%s%s' "$C_B" "$m" "$C_0"
+  case "$m" in
+    none) echo "  (no autostart — interactive terminals open a plain shell)" ;;
+    *)    echo "  (autostart drop-in present)" ;;
+  esac
+  if [[ -d "$ZELLIJ_DIR" ]]; then
+    ok "baked zellij config present at $ZELLIJ_DIR (layout: ii)"
+  else
+    warn "no zellij config at $ZELLIJ_DIR"
+  fi
+}
+
+# cmd_spec — emit the #47 chooser contract for `iictl tweak tui`. TWO `choice`
+# controls (term + mux). The renderer applies a pick by shelling the argv back
+# through this plugin (`tui term %v` / `tui mux %v`), so the round-trip drives the
+# TUI with ZERO new mutation paths — the ledger still owns reversibility.
+cmd_spec() {
+  local cur_t cur_m first opts d
+  cur_t="$(_current_term)"; [[ "$cur_t" == custom ]] && cur_t=default
+  cur_m="$(_current_mux)"
+
+  opts=''; first=1
+  for d in $(_terms); do
+    (( first )) || opts+=','
+    opts+="{\"value\":\"$d\",\"label\":\"$d\"}"
+    first=0
+  done
+  local mux_opts='{"value":"zellij","label":"zellij"},{"value":"tmux","label":"tmux"},{"value":"none","label":"none"}'
+
+  printf '{"domain":"tui","title":"Terminal & multiplexer","controls":[{"id":"term","type":"choice","label":"Default terminal","current":"%s","options":[%s],"apply":["tui","term","%%v"]},{"id":"mux","type":"choice","label":"Multiplexer","current":"%s","options":[%s],"apply":["tui","mux","%%v"]}]}\n' \
+    "$cur_t" "$opts" "$cur_m" "$mux_opts"
+}
+
+cmd_usage() {
+  cat <<EOF
+${C_B}iictl tui${C_0} — choose the terminal emulator + multiplexer (additive + reversible)
+
+The default terminal override is a graceful FALLBACK LIST (your pick first, then
+upstream's chain) run through upstream's own launch_first_available.sh, so
+uninstalling your pick falls through instead of breaking Super+Return. kitty is
+the baked default; colour arrives via upstream's OSC broadcast (no distro
+recolour script). The multiplexer is config-only unless you ask for autostart.
+
+usage:
+  iictl tui term <kitty|ghostty|wezterm|alacritty|foot>   set the default emulator (installs if missing)
+  iictl tui mux  <zellij|tmux|none> [--autostart]         select the multiplexer (autostart opt-in)
+  iictl tui status                                        show the current term + mux
+  iictl tui --spec                                        emit the iictl-tui chooser spec
+
+Interactive picker: ${C_B}iictl tweak tui${C_0} (the shared iictl-tui renderer).
+Reversible: 'iictl revert-all' strips the fenced terminal block in
+custom/variables.lua + removes the mux drop-ins, restoring upstream's
+launch_first_available chain.
+EOF
+}
+
+case "${1:-status}" in
+  term)            shift; cmd_term   "$@" ;;
+  mux)             shift; cmd_mux    "$@" ;;
+  status)          shift; cmd_status "$@" ;;
+  --spec|spec)     shift; cmd_spec   "$@" ;;
+  help|-h|--help)  cmd_usage ;;
+  *)               die "unknown subcommand: $1 (try: iictl tui help)" ;;
+esac
