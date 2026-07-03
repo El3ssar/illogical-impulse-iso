@@ -10,6 +10,16 @@
 # bash-completion loads our /usr/share/bash-completion/completions/iictl on the
 # installed system (fish/zsh load their vendor completions natively).
 bash-completion
+# Shell layer (#15) — the baked bits the `iictl shell` chooser needs. fish +
+# starship already arrive as upstream PKGBUILD deps (illogical-impulse-fonts-
+# themes), so they are NOT re-listed here (redundant double-bake). zsh +
+# zsh-completions + zoxide are small, universal, OFFICIAL-repo packages → baked
+# so `iictl shell set zsh` (the flagship switch) is fully OFFLINE. The heavier /
+# AUR-only extras (nushell theming helpers, fizsh, carapace, oh-my-posh) are
+# fetched online on demand via packages/optional/shells.list — never baked.
+zsh
+zsh-completions
+zoxide
 btop
 eza
 bat

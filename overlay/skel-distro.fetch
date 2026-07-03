@@ -24,5 +24,13 @@
 #   .config/fontconfig  .config/starship.toml  .config/hypr/hyprlock.conf
 # Safe (unowned) examples: .config/nvim  .antidote  .config/zsh  .tmux/plugins/tpm
 #
-# Ships comment-only: a no-op until a real consumer (shell layer, editor
-# chooser, …) adds a pinned entry. Mirrors profiles/username/fetch.list.
+# Mirrors profiles/username/fetch.list.
+
+# antidote — the zsh plugin manager the themed ~/.zshrc loads (#15, shell layer).
+# Vendored to the distro-owned ~/.antidote (a "Safe (unowned)" example above), so
+# `iictl update` never wipes it and the guarded `antidote load` in ~/.zshrc works
+# fully OFFLINE on a fresh install (no AUR build cost). Pinned to a release tag
+# (v2.1.0); bump the rev to update. antidote.zsh sits at the repo root, which is
+# exactly what ~/.zshrc sources ($ANTIDOTE_HOME/antidote.zsh).
+.antidote   https://github.com/mattmc3/antidote   4913257e0ae3fee2a77e7189e526fe55b6ff9536
+

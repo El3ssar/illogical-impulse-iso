@@ -1,0 +1,21 @@
+# shells — the offer-only alternative shells + prompt/plugin tooling the
+# `iictl shell` chooser can switch to (PROPOSAL §5). NONE of these is baked into
+# the ISO: `iictl shell set <fizsh|nushell>` and `iictl shell prompt oh-my-posh`
+# install the ONE package they need online on demand (official repos via pacman,
+# AUR via paru), and this curated pack lets a user grab the whole set at once
+# with `iictl pack install shells` — recorded + reversible via the shared engine.
+#
+# The default login shell stays fish and the flagship `iictl shell set zsh` is
+# fully offline (zsh/zsh-completions/zoxide are baked in goodies.list); only these
+# heavier / AUR-only extras are fetched.
+#meta:type shells
+# nushell — a structured-data shell (official repo).
+nushell
+# fizsh — friendly interactive zsh with bundled highlighting/autosuggestions (AUR).
+fizsh
+# carapace — multi-shell completion engine the themed inits wire up when present (AUR).
+carapace-bin
+# oh-my-posh — the opt-in alternative prompt (`iictl shell prompt oh-my-posh`, AUR).
+oh-my-posh
+# zsh-antidote — system-package alternative to the vendored ~/.antidote (AUR).
+zsh-antidote

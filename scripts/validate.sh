@@ -134,6 +134,177 @@ else
   _v_ok "themed self-contained /etc/skel/.bashrc (guarded sequences cat + starship)"
 fi
 
+step "shell layer (iictl shell chooser + themed zsh/fish/nushell) (#15)"
+# The shell layer (#15) is an ADDITIVE, fully reversible opt-in on top of the
+# shipped fish default. Every check here encodes a real bug-class:
+#   • no skel-distro shell file may land in a sync-deleted (install_dir__sync)
+#     path — upstream's updater would wipe it (Iron Law seam guard);
+#   • ~/.zshrc / ~/.zshenv are home-root (unowned), fish enrichment is under
+#     conf.d/ ONLY (the --exclude=conf.d slot);
+#   • the EXACT generated/terminal/sequences.txt literal (WITH the terminal/
+#     subdir) must appear in the themed inits + the drop-in's translator — the
+#     wrong path silently ships an uncolored shell (the #11/#15 no-color class);
+#   • the .zshrc antidote load is GUARDED (no-op when the manifest is absent);
+#   • the iictl.d/shell drop-in is exec + shebang + syntax-clean + #help; it uses
+#     the shared ii_chsh mutator (registers /etc/shells before chsh) and the
+#     shared ledger, and touches NO upstream rsync --delete tree.
+_SHELL_SEQ='generated/terminal/sequences.txt'
+_SKELD="$AIROOTFS/etc/skel"
+
+# (a) Seam guard: NO skel shell file may sit in an upstream sync-deleted path.
+#     .zshrc/.zshenv must be home-root (NOT under zshrc.d/); fish ii-* files must
+#     be under conf.d/ (never config.fish / functions / a bare fish dir file).
+_sh_seam_bad=0
+for _bad in "$_SKELD/.config/zshrc.d/.zshrc" "$_SKELD/.config/zshrc.d/.zshenv"; do
+  [[ -e "$_bad" ]] && { _v_fail "shell file in sync-deleted path: ${_bad#"$AIROOTFS"}"; _sh_seam_bad=1; }
+done
+# Any ii-*.fish the distro ships MUST be under fish/conf.d/ (the excluded slot).
+while IFS= read -r _ff; do
+  [[ -n "$_ff" ]] || continue
+  case "$_ff" in
+    */.config/fish/conf.d/ii-*.fish) : ;;
+    *) _v_fail "distro fish file outside the conf.d/ excluded slot: ${_ff#"$AIROOTFS"}"; _sh_seam_bad=1 ;;
+  esac
+done < <(find "$_SKELD/.config/fish" -type f -name 'ii-*' 2>/dev/null)
+# The distro must NOT ship a config.fish or a zshrc.d file (upstream owns those).
+for _up in "$_SKELD/.config/fish/config.fish.ii" "$_SKELD/.config/zshrc.d/ii-shell.zsh"; do
+  [[ -e "$_up" ]] && { _v_fail "distro wrote an upstream-owned shell path: ${_up#"$AIROOTFS"}"; _sh_seam_bad=1; }
+done
+(( _sh_seam_bad == 0 )) && _v_ok "no skel shell file in a sync-deleted/upstream-owned path (home-root + conf.d/ only)"
+
+# (b) home-root ~/.zshrc + ~/.zshenv exist, are zsh-syntax-clean (zsh -n if
+#     present; else skip — a zshrc is not bash-parseable), and .zshrc guards its
+#     antidote load + carries the EXACT sequences literal.
+_ZRC="$_SKELD/.zshrc"; _ZENV="$_SKELD/.zshenv"
+if [[ ! -s "$_ZRC" ]]; then
+  _v_fail "/etc/skel/.zshrc missing or empty — the themed zsh has no home-root config"
+else
+  if command -v zsh >/dev/null 2>&1; then
+    zsh -n "$_ZRC" 2>/dev/null && _v_ok ".zshrc zsh -n clean" || _v_fail "/etc/skel/.zshrc has a zsh syntax error"
+  else
+    _v_warn "zsh not on host — skipped zsh -n on .zshrc (bash -n would false-fail a zsh file)"
+  fi
+  grep -qE '^[^#]*'"$_SHELL_SEQ" "$_ZRC" \
+    && _v_ok ".zshrc cats the EXACT $_SHELL_SEQ (with terminal/ subdir)" \
+    || _v_fail "/etc/skel/.zshrc missing the guarded $_SHELL_SEQ cat (wrong/old path? theming would no-op)"
+  # antidote load must be GUARDED: an `antidote load` line with no preceding
+  # existence test on the manifest would error on a box with no plugins file.
+  if grep -q 'antidote load' "$_ZRC"; then
+    # The guard: the manifest ($HOME/.config/zsh/ii-plugins.txt) is tested with
+    # -r/-f before any `antidote load` runs (our .zshrc wraps it in an if/-r).
+    if grep -qE '\[\[ +-r +"?\$[_A-Za-z].*ii_plugins|ii-plugins\.txt' "$_ZRC" \
+       && grep -qE 'if .*-r .*antidote|-r "\$_ii_plugins"' "$_ZRC"; then
+      _v_ok ".zshrc guards 'antidote load' on the manifest's existence (no-op when absent)"
+    else
+      _v_fail "/etc/skel/.zshrc 'antidote load' is not guarded on the ii-plugins.txt manifest existence"
+    fi
+  else
+    _v_fail "/etc/skel/.zshrc does not load antidote — the curated plugin bundle won't load"
+  fi
+  # .zshrc must SOURCE zshrc.d read-only (never write it): it loops over the dir
+  # and `source`s each snippet. Assert the read-only source AND that no line
+  # REDIRECTS into zshrc.d (that would be an Iron-Law violation on an rsync
+  # --delete tree). Match the loop/source of the dir, not a literal one-liner.
+  if grep -qE 'zshrc\.d' "$_ZRC" && grep -qE '^[[:space:]]*source ' "$_ZRC"; then
+    if grep -qE '>[[:space:]]*"?[^"]*zshrc\.d' "$_ZRC"; then
+      _v_fail "/etc/skel/.zshrc REDIRECTS into upstream-owned ~/.config/zshrc.d — it may only source it read-only"
+    else
+      _v_ok ".zshrc sources upstream ~/.config/zshrc.d read-only (snippets keep working)"
+    fi
+  else
+    _v_warn ".zshrc does not source zshrc.d — upstream's zsh snippets won't run under our .zshrc"
+  fi
+fi
+[[ -s "$_ZENV" ]] && _v_ok "/etc/skel/.zshenv present (home-root zsh env)" \
+                  || _v_fail "/etc/skel/.zshenv missing — zsh env (XDG/antidote home) unset"
+
+# (c) The curated antidote bundle manifest ships at the ii-owned unowned slot.
+_PL="$_SKELD/.config/zsh/ii-plugins.txt"
+if [[ -s "$_PL" ]]; then
+  # Must carry the curated four (autosuggestions/syntax-highlighting/completions/fzf-tab).
+  _pl_ok=1
+  for _need in zsh-autosuggestions zsh-syntax-highlighting zsh-completions fzf-tab; do
+    grep -q "$_need" "$_PL" || { _v_fail "ii-plugins.txt missing curated plugin: $_need"; _pl_ok=0; }
+  done
+  (( _pl_ok )) && _v_ok "curated antidote bundle (ii-plugins.txt) ships the 4 defaults"
+else
+  _v_fail ".config/zsh/ii-plugins.txt missing — antidote has no curated bundle to load"
+fi
+
+# (d) The baked shell-init templates carry the EXACT sequences literal.
+_SHTPL="$AIROOTFS/usr/share/illogical-impulse/shells"
+if [[ -d "$_SHTPL" ]]; then
+  for _t in zshrc zshenv fizshrc config.nu; do
+    [[ -f "$_SHTPL/$_t" ]] || { _v_fail "shell template missing: shells/$_t"; continue; }
+  done
+  _tpl_seq_bad=0
+  # Every template that THEMES a terminal must reference the exact literal
+  # (zshenv is env-only → exempt).
+  for _t in zshrc fizshrc config.nu; do
+    [[ -f "$_SHTPL/$_t" ]] || continue
+    grep -q "$_SHELL_SEQ" "$_SHTPL/$_t" \
+      || { _v_fail "shells/$_t missing the EXACT $_SHELL_SEQ literal (wrong/old path?)"; _tpl_seq_bad=1; }
+  done
+  (( _tpl_seq_bad == 0 )) && _v_ok "shell templates reference the EXACT $_SHELL_SEQ (with terminal/)"
+else
+  _v_fail "shell-init templates dir missing (usr/share/illogical-impulse/shells) — 'iictl shell set' has no templates"
+fi
+
+# (e) fish enrichment lands in conf.d/ and the theme file uses the exact literal.
+_FTHEME="$_SKELD/.config/fish/conf.d/ii-theme.fish"
+if [[ -f "$_FTHEME" ]]; then
+  grep -q "$_SHELL_SEQ" "$_FTHEME" \
+    && _v_ok "fish conf.d/ii-theme.fish cats the EXACT $_SHELL_SEQ (excluded-from-sync slot)" \
+    || _v_fail "fish conf.d/ii-theme.fish missing the exact $_SHELL_SEQ literal"
+  command -v fish >/dev/null 2>&1 \
+    && { fish -n "$_FTHEME" 2>/dev/null && _v_ok "fish conf.d ii-*.fish syntax clean" \
+                                       || _v_fail "fish conf.d/ii-theme.fish has a syntax error"; }
+else
+  _v_fail "fish conf.d/ii-theme.fish missing — fish theming re-source absent"
+fi
+
+# (f) The iictl.d/shell drop-in: exec/shebang/bash -n/#help are covered by the
+#     generic "iictl.d/ plugin architecture" step; here we assert it EXISTS and
+#     obeys the shell-domain contract — uses ii_chsh (not a raw chsh), records via
+#     the shared ledger, and touches NO upstream rsync --delete tree.
+_SHELL_D="$AIROOTFS/usr/local/lib/ii/iictl.d/shell"
+if [[ ! -f "$_SHELL_D" ]]; then
+  _v_fail "iictl.d/shell not staged (#15) — the shell chooser verb is missing"
+else
+  _sh_ok=1
+  [[ -x "$_SHELL_D" ]] || { _v_fail "iictl.d/shell not executable"; _sh_ok=0; }
+  [[ "$(head -c2 "$_SHELL_D")" == "#!" ]] || { _v_fail "iictl.d/shell has no shebang"; _sh_ok=0; }
+  bash -n "$_SHELL_D" 2>/dev/null || { _v_fail "iictl.d/shell syntax error"; _sh_ok=0; }
+  grep -qE '^#help:[[:space:]]' "$_SHELL_D" || { _v_fail "iictl.d/shell missing #help: header"; _sh_ok=0; }
+  (( _sh_ok )) && _v_ok "iictl.d/shell staged (exec + shebang + bash -n + #help:)"
+  _sh_code="$(grep -vE '^[[:space:]]*#' "$_SHELL_D")"
+  # Must register+chsh via the shared mutator, never a bespoke chsh (so /etc/shells
+  # is populated first — AUR shells fizsh/nushell would otherwise fail chsh).
+  grep -q 'ii_chsh' <<<"$_sh_code" \
+    && _v_ok "iictl.d/shell sets the login shell via the shared ii_chsh mutator" \
+    || _v_fail "iictl.d/shell does not use ii_chsh — /etc/shells won't be registered before chsh (fizsh/nushell fail)"
+  # Must record via the shared ledger (reversibility), not a bespoke writer.
+  grep -q 'ledger_record' <<<"$_sh_code" \
+    && _v_ok "iictl.d/shell records reversible actions via the shared ledger" \
+    || _v_fail "iictl.d/shell never calls ledger_record — its switches would be irreversible"
+  # Must reference the EXACT sequences literal (the nushell translator reads it).
+  grep -q "$_SHELL_SEQ" <<<"$_sh_code" \
+    && _v_ok "iictl.d/shell reads the EXACT $_SHELL_SEQ (nushell translator)" \
+    || _v_fail "iictl.d/shell missing the exact $_SHELL_SEQ literal — nushell theming would no-op"
+  # Must delegate the plugin picker to the #48 manager, not re-implement it.
+  grep -qE 'iictl plugins|iictl.d/plugins|tweak plugins' <<<"$_sh_code" \
+    && _v_ok "iictl.d/shell plugins delegates to the #48 iictl plugins manager (no re-impl)" \
+    || _v_fail "iictl.d/shell does not delegate to 'iictl plugins' — it must reuse the #48 manager"
+  # Bug-class (mirrors the webapp guard): the drop-in must not WRITE an upstream
+  # rsync --delete tree. Comments stripped so the file's own prose naming those
+  # trees (to warn itself away) neither satisfies nor trips the check.
+  if grep -qE '>[[:space:]]*"?[^"]*(quickshell/ii|hypr/hyprland|/matugen/|fish/config\.fish|/zshrc\.d/)' <<<"$_sh_code"; then
+    _v_fail "iictl.d/shell WRITES into an upstream rsync --delete tree — it may only source/cat them read-only"
+  else
+    _v_ok "iictl.d/shell writes no upstream-owned tree (unowned/excluded seams only)"
+  fi
+fi
+
 step "distro identity"
 OSREL="$AIROOTFS/etc/os-release"
 grep -q "^ID=$DISTRO_ID\$"                  "$OSREL" && _v_ok "ID=$DISTRO_ID"   || _v_fail "ID wrong"
