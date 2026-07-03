@@ -1,0 +1,16 @@
+# ii-plugins.txt — Illogical Impulse curated zsh plugin bundle (antidote).
+#
+# The ii-OWNED zsh plugin manifest. `antidote load` (from ~/.zshrc) reads this
+# file directly; `iictl plugins` / `iictl shell plugins` add and remove entries
+# reversibly (ledger-recorded). ~/.config/zsh is an UNOWNED/excluded slot — not
+# an upstream-shipped path and not in upstream's rsync --delete set — so shipping
+# and editing this file never touches an upstream-owned path. Delete it and the
+# guarded `antidote load` in ~/.zshrc no-ops ⇒ vanilla zsh. Contains no PII.
+#
+# One `<user/repo> [annotations]` bundle line per plugin. Add/remove via:
+#   iictl plugins add antidote <user/repo>      (or: iictl tweak plugins)
+#   iictl plugins remove <user/repo>
+zsh-users/zsh-autosuggestions
+zsh-users/zsh-syntax-highlighting
+zsh-users/zsh-completions
+Aloxaf/fzf-tab
