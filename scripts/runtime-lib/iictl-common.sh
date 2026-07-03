@@ -20,7 +20,15 @@
 
 II_LIB="${II_LIB:-/usr/local/lib/ii}"
 
-C_G=$'\e[32m' C_R=$'\e[31m' C_Y=$'\e[33m' C_B=$'\e[1m' C_0=$'\e[0m'
+# Colours are cosmetic: emit them only to a real terminal and honour NO_COLOR
+# (https://no-color.org). Piped/captured output — the Control Center's Ctl reads
+# (`iictl version`/`doctor`), the in-window action consoles, and install logs —
+# then gets clean, ANSI-free text instead of raw ESC sequences (#14).
+if [[ -t 1 && -z ${NO_COLOR:-} ]]; then
+  C_G=$'\e[32m' C_R=$'\e[31m' C_Y=$'\e[33m' C_B=$'\e[1m' C_0=$'\e[0m'
+else
+  C_G='' C_R='' C_Y='' C_B='' C_0=''
+fi
 ok()   { echo "  ${C_G}ok${C_0}   $*"; }
 bad()  { echo "  ${C_R}FAIL${C_0} $*"; }
 warn() { echo "  ${C_Y}warn${C_0} $*"; }

@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#help: center	open the graphical Control Center (the distro configurator GUI)
+# center — launch the standalone Quickshell Control Center (issue #14, the
+# CENTERPIECE): the graphical home for every reversible iictl tweak. It is a
+# standalone `qs -p` config under /usr/share/illogical-impulse/control (the
+# welcome-card seam — ZERO upstream quickshell/ii imports), DISTINCT from
+# upstream's Super+I rice settings, which it complements. Its panes shell out to
+# the per-domain iictl verbs, each of which records its OWN ledger entry — so this
+# drop-in records nothing reversible itself. Deleting the control/ dir + this file
+# removes the Control Center cleanly (a purely additive layer). Survives install
+# via the iictl.d/ survive-path (ii-verify preserves /usr/local/lib/ii).
+set -u
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+
+CONTROL_QML="${CONTROL_QML:-/usr/share/illogical-impulse/control}"
+
+command -v qs >/dev/null 2>&1 || die "quickshell (qs) not found"
+[[ -f "$CONTROL_QML/shell.qml" ]] || die "Control Center not installed at $CONTROL_QML"
+
+# Pass release info + the distro identity through the env (as the welcome card
+# does) so the app reads them via Quickshell.env without re-parsing files. The
+# distro NAME comes from the build-generated os-release (which is itself derived
+# from distro.toml) — so the Control Center's title tracks a rebrand automatically
+# instead of hardcoding an identity string in the QML.
+_ii_name="$(awk -F= '/^NAME=/{gsub(/^"|"$/,"",$2); print $2; exit}' /etc/os-release 2>/dev/null)"
+ISO_RELEASE_VERSION="$(awk -F= '/^ISO_VERSION/{print $2}' "$RELEASE_FILE" 2>/dev/null)" \
+ISO_RELEASE_DOTS="$(awk -F= '/^DOTS_COMMIT/{print $2}' "$RELEASE_FILE" 2>/dev/null)" \
+II_DISTRO_NAME="$_ii_name" \
+  exec qs -p "$CONTROL_QML"

@@ -19,7 +19,11 @@ if [[ -r "$II_LIB/iictl-common.sh" ]]; then
   # shellcheck source=/dev/null
   source "$II_LIB/iictl-common.sh"
 else
-  C_G=$'\e[32m' C_R=$'\e[31m' C_Y=$'\e[33m' C_B=$'\e[1m' C_0=$'\e[0m'
+  if [[ -t 1 && -z ${NO_COLOR:-} ]]; then   # colours only to a TTY / honour NO_COLOR (#14)
+    C_G=$'\e[32m' C_R=$'\e[31m' C_Y=$'\e[33m' C_B=$'\e[1m' C_0=$'\e[0m'
+  else
+    C_G='' C_R='' C_Y='' C_B='' C_0=''
+  fi
   ok()   { echo "  ${C_G}ok${C_0}   $*"; }
   bad()  { echo "  ${C_R}FAIL${C_0} $*"; }
   warn() { echo "  ${C_Y}warn${C_0} $*"; }

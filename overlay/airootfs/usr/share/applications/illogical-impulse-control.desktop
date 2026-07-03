@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Control Center
+GenericName=System Control Center
+Comment=Configure shells, editor, packages, theming and more — every reversible iictl tweak
+Exec=/usr/local/bin/iictl center
+Icon=illogical-impulse
+Terminal=false
+Type=Application
+Categories=System;Settings;
+Keywords=illogical;impulse;control;center;iictl;config;settings;configure;

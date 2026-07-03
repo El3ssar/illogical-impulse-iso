@@ -391,6 +391,23 @@ if [[ -n "$NEW_USER" ]]; then
         HOME="$H" XDG_STATE_HOME="$H/.local/state" \
         bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record lua-block "$HOME/.config/hypr/custom/execs.lua" "" "$(ledger_escape_path "$HOME/.config/hypr/custom/execs.lua")" welcome'
     fi
+    # ── ledger: Control Center keybind fence (issue #14) ──────────────────
+    # SUPER+SHIFT+I / SUPER+ALT+Space open the distro Control Center. The bind
+    # ships as a sentinel-fenced block named `control-center` in the upstream
+    # custom/keybinds.lua slot, baked STATICALLY via overlay/skel-distro →
+    # /etc/skel → useradd -m. Like the welcome fence above it never passes through
+    # ii_lua_block_write, so record the matching `lua-block` row here (AS the new
+    # user, via runuser — never sudo -u, INST-05) so `iictl revert-all`'s lua-block
+    # inverse strips exactly this fence, restoring upstream's stock keybinds.lua
+    # stub byte-for-byte. The `control-center` token must equal the block name in
+    # overlay/skel-distro/.config/hypr/custom/keybinds.lua.
+    KEYB="$H/.config/hypr/custom/keybinds.lua"
+    if [[ -r "$KEYB" && -r /usr/local/lib/ii/ledger.sh ]] \
+       && grep -qxF -- '-- >>> illogical-impulse control-center' "$KEYB"; then
+      try "ledger: control-center keybind fence" runuser -u "$NEW_USER" -- env \
+        HOME="$H" XDG_STATE_HOME="$H/.local/state" \
+        bash -c 'source /usr/local/lib/ii/ledger.sh && ledger_record lua-block "$HOME/.config/hypr/custom/keybinds.lua" "" "$(ledger_escape_path "$HOME/.config/hypr/custom/keybinds.lua")" control-center'
+    fi
   fi
 fi
 

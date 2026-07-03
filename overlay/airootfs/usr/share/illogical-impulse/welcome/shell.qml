@@ -232,6 +232,13 @@ ApplicationWindow {
                 text: "Run a health check"
                 onClicked: root.startRun("Health check", "iictl doctor")
             }
+            // Launch the graphical Control Center (issue #14) — a GUI launch, so
+            // execDetached rather than the embedded console.
+            ActionButton {
+                Layout.fillWidth: true
+                text: "Open the Control Center"
+                onClicked: Quickshell.execDetached(["iictl", "center"])
+            }
         }
 
         Item { Layout.fillHeight: true }

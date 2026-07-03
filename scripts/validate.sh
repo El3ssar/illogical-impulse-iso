@@ -747,10 +747,15 @@ else
   _v_fail "iictl missing from airootfs"
 fi
 if [[ -f "$WELCOME_QML_F" ]]; then
-  if grep -qE '"(kitty|foot|alacritty|wezterm|konsole|xterm)"|execDetached' "$WELCOME_QML_F"; then
-    _v_fail "welcome shell.qml spawns an external terminal — update/doctor must run in the embedded console"
+  # update/doctor must run IN-WINDOW (embedded console) — no terminal spawn. The
+  # ONE sanctioned execDetached is the GUI launch of the Control Center (iictl
+  # center, #14): a sibling app, not a terminal, so strip that line before the
+  # check. Any terminal emulator or other execDetached still fails.
+  _welcome_code="$(grep -vE '^[[:space:]]*//|Quickshell\.execDetached\(\["iictl", *"center"\]\)' "$WELCOME_QML_F")"
+  if grep -qE '"(kitty|foot|alacritty|wezterm|konsole|xterm)"|execDetached' <<<"$_welcome_code"; then
+    _v_fail "welcome shell.qml spawns an external terminal — update/doctor must run in the embedded console (the only allowed execDetached is the #14 Control Center launch)"
   else
-    _v_ok "welcome shell.qml spawns no external terminal"
+    _v_ok "welcome shell.qml spawns no external terminal (update/doctor in-window; the one execDetached is the #14 Control Center launch)"
   fi
   grep -q 'Process' "$WELCOME_QML_F" && grep -q 'SplitParser' "$WELCOME_QML_F" \
     && _v_ok "welcome shell.qml streams actions into an embedded console (Process + SplitParser)" \
@@ -1556,7 +1561,7 @@ fi
 #     standalone seam). Its only local import is the shared ../_lib.
 _DEVDASH_QML="$_WGT_DIR/devdash/shell.qml"
 if [[ -f "$_DEVDASH_QML" ]]; then
-  if grep -Eq 'import[[:space:]]+(qs\.|"[^"]*quickshell/ii)' "$_DEVDASH_QML"; then
+  if grep -Eq 'import[[:space:]]+(qs([[:space:].]|$)|"[^"]*quickshell/ii)' "$_DEVDASH_QML"; then
     _v_fail "devdash/shell.qml imports upstream's quickshell/ii tree — widgets must be standalone (zero qs.* imports) (#20)"
   else
     _v_ok "devdash/shell.qml is standalone (no upstream quickshell/ii import)"
@@ -1724,7 +1729,7 @@ if [[ ! -f "$_PKG_PANE" ]]; then
 else
   # (a) NO import from upstream's quickshell/ii tree (the standalone seam). Same
   #     grep as the widget standalone guard.
-  if grep -Eq 'import[[:space:]]+(qs\.|"[^"]*quickshell/ii)' "$_PKG_PANE"; then
+  if grep -Eq 'import[[:space:]]+(qs([[:space:].]|$)|"[^"]*quickshell/ii)' "$_PKG_PANE"; then
     _v_fail "Packages.qml imports upstream's quickshell/ii tree — the pane must be standalone (zero qs.* imports) so it loads on its own (#30/#14)"
   else
     _v_ok "Packages.qml is standalone (no upstream quickshell/ii import) — qs -p-loadable before #14 lands (#30)"
@@ -1750,6 +1755,173 @@ else
     _v_ok "Packages.qml only READS colors.json (no write path — upstream STATE stays read-only) (#30)"
   fi
 fi
+
+step "iictl Control Center (#14)"
+# The standalone Quickshell Control Center — the GUI home for every reversible
+# iictl tweak (issue #14, the CENTERPIECE). Guards mirror the welcome-card /
+# Packages-pane seam:
+#   (a) STANDALONE — no control/*.qml imports upstream's quickshell/ii tree (the
+#       bug-class guard: coupling to the rice breaks on an upstream redesign and
+#       violates the Iron Law's "survives upstream" contract);
+#   (b) the rail/StackLayout are REGISTRY-driven (panes.js) — the extensibility
+#       contract (adding a pane = one file + one line, no shell edits);
+#   (c) all four launch surfaces are wired (.desktop / iictl.d/center / the
+#       SUPER+SHIFT+I keybind fence / the welcome-card button);
+#   (d) the keybind fence is REVERSIBLE — baked into skel keybinds.lua as a
+#       sentinel fence, ledger-recorded by ii-post-install, and stripping it
+#       yields upstream's stock stub byte-for-byte;
+#   (e) Colors.qml only READS the generated colours STATE (never writes it).
+_CC_DIR="$AIROOTFS/usr/share/illogical-impulse/control"
+_CC_SHELL="$_CC_DIR/shell.qml"
+_CC_REG="$_CC_DIR/panes.js"
+_CC_DESKTOP="$AIROOTFS/usr/share/applications/illogical-impulse-control.desktop"
+_CC_VERB="$AIROOTFS/usr/local/lib/ii/iictl.d/center"
+_CC_KEYB="$AIROOTFS/etc/skel/.config/hypr/custom/keybinds.lua"
+_CC_WELCOME="$AIROOTFS/usr/share/illogical-impulse/welcome/shell.qml"
+_up_keyb="$DOTS/dots/.config/hypr/custom/keybinds.lua"
+
+if [[ ! -f "$_CC_SHELL" ]]; then
+  _v_fail "control/shell.qml not staged (#14) — the Control Center app is missing"
+else
+  # (a) STANDALONE invariant across EVERY control/*.qml (the bug-class guard —
+  #     same grep as the widget / Packages standalone guards).
+  _cc_up=0 _cc_n=0
+  while IFS= read -r -d '' _q; do
+    _cc_n=$((_cc_n+1))
+    if grep -Eq 'import[[:space:]]+(qs([[:space:].]|$)|"[^"]*quickshell/ii)' "$_q"; then
+      _v_fail "control QML imports upstream's quickshell/ii: ${_q#"$AIROOTFS"} — the Control Center must be standalone (#14)"
+      _cc_up=$((_cc_up+1))
+    fi
+  done < <(find "$_CC_DIR" -name '*.qml' -print0)
+  (( _cc_up == 0 )) && _v_ok "$_cc_n control/*.qml file(s): every one is standalone (zero upstream quickshell/ii imports) — survives an upstream rice redesign (#14)"
+
+  # freeform window (mirrors the welcome card, not a rice-internal surface).
+  grep -q 'ApplicationWindow' "$_CC_SHELL" \
+    && _v_ok "control/shell.qml is a freeform ApplicationWindow (distinct from the Super+I rice settings) (#14)" \
+    || _v_fail "control/shell.qml is not an ApplicationWindow — the Control Center must be a freeform window (#14)"
+
+  # (b) REGISTRY-driven rail/stack — the extensibility contract.
+  if [[ -f "$_CC_REG" ]] && grep -q 'panes.js' "$_CC_SHELL" && grep -qE 'Repeater' "$_CC_SHELL"; then
+    _v_ok "control/shell.qml builds the rail + StackLayout from the panes.js registry (adding a pane = 1 file + 1 line) (#14)"
+  else
+    _v_fail "control/shell.qml is not registry-driven (needs panes.js + a Repeater) — the extensibility contract is broken (#14)"
+  fi
+
+  # every registry pane source must resolve to a staged file (no dangling source).
+  if [[ -f "$_CC_REG" ]]; then
+    _cc_missing=0
+    while IFS= read -r _src; do
+      [[ -z "$_src" ]] && continue
+      [[ -f "$_CC_DIR/$_src" ]] || { _v_fail "panes.js references a missing pane: $_src (#14)"; _cc_missing=$((_cc_missing+1)); }
+    done < <(grep -oE 'panes/[A-Za-z0-9_]+\.qml' "$_CC_REG" | sort -u)
+    (( _cc_missing == 0 )) && _v_ok "every panes.js registry source resolves to a staged pane (#14)"
+  fi
+
+  # (e) Colors singleton READS colors.json (re-theme) but NEVER writes that STATE.
+  if [[ -f "$_CC_DIR/Colors.qml" ]]; then
+    grep -q 'generated/colors.json' "$_CC_DIR/Colors.qml" \
+      && _v_ok "control/Colors.qml watches generated/colors.json (live re-theme, static fallback) (#14)" \
+      || _v_fail "control/Colors.qml does not reference generated/colors.json — the app won't re-theme (#14)"
+    if grep -Eq 'writeAdapter|\.write\(|setText|FileViewWriteAdapter' "$_CC_DIR/Colors.qml"; then
+      _v_fail "control/Colors.qml appears to WRITE the colours STATE file — it is upstream-owned, READ-ONLY (#14)"
+    else
+      _v_ok "control/Colors.qml only READS colors.json (upstream STATE stays read-only) (#14)"
+    fi
+  else
+    _v_fail "control/Colors.qml not staged (#14)"
+  fi
+fi
+
+# (c) launch surface 1 — the .desktop (System;Settings;, execs iictl center).
+if [[ -f "$_CC_DESKTOP" ]]; then
+  grep -q 'Exec=/usr/local/bin/iictl center' "$_CC_DESKTOP" \
+    && grep -qE 'Categories=.*System;Settings;' "$_CC_DESKTOP" \
+    && _v_ok "Control Center .desktop launches 'iictl center' under System;Settings; (#14)" \
+    || _v_fail "illogical-impulse-control.desktop missing Exec=iictl center or the System;Settings; category (#14)"
+else
+  _v_fail "Control Center .desktop not staged (#14)"
+fi
+
+# (c) launch surface 2 — the iictl center drop-in (survive-path, execs qs -p).
+if [[ -x "$_CC_VERB" ]]; then
+  _cc_verb_code="$(grep -vE '^[[:space:]]*#' "$_CC_VERB")"
+  grep -q '#help: center' "$_CC_VERB" \
+    && grep -q 'command -v qs' <<<"$_cc_verb_code" \
+    && grep -qE 'exec[[:space:]]+qs[[:space:]]+-p' <<<"$_cc_verb_code" \
+    && _v_ok "iictl.d/center execs 'qs -p' the control dir behind a qs guard, on the survive-path (#14)" \
+    || _v_fail "iictl.d/center missing #help:/qs-guard/exec-qs-p (#14)"
+else
+  _v_fail "iictl.d/center drop-in not staged or not executable (#14)"
+fi
+
+# (c) launch surface 3 — the welcome-card button.
+[[ -f "$_CC_WELCOME" ]] && grep -qE '"iictl",[[:space:]]*"center"' "$_CC_WELCOME" \
+  && _v_ok "welcome card has an 'Open the Control Center' launch button (#14)" \
+  || _v_fail "welcome card has no Control Center launch button (execDetached iictl center) (#14)"
+
+# (c/d) launch surface 4 + REVERSIBILITY — the keybind fence.
+if [[ -f "$_CC_KEYB" ]]; then
+  if grep -qxF -- '-- >>> illogical-impulse control-center' "$_CC_KEYB" \
+     && grep -q 'SUPER+SHIFT+I' "$_CC_KEYB" && grep -q 'iictl center' "$_CC_KEYB"; then
+    _v_ok "skel keybinds.lua has the sentinel-fenced SUPER+SHIFT+I → iictl center bind (#14)"
+  else
+    _v_fail "skel keybinds.lua missing the fenced SUPER+SHIFT+I → iictl center bind (#14)"
+  fi
+  grep -qF 'CTRL+SUPER+ALT+Slash' "$_CC_KEYB" \
+    && _v_ok "skel keybinds.lua preserves upstream's stock edit-keybinds bind (single-file slot) (#14)" \
+    || _v_fail "skel keybinds.lua drops upstream's stock edit-keybinds bind — the single-file slot must reproduce it (#14)"
+  # REVERSIBLE: stripping the CC fence yields upstream's stub byte-for-byte
+  # (same awk strip as the welcome execs.lua check — REV-01 pattern).
+  if [[ -f "$_up_keyb" ]]; then
+    if cmp -s <(awk '/^-- >>> illogical-impulse /{f=1;next} /^-- <<< illogical-impulse /{f=0;next} !f' "$_CC_KEYB") "$_up_keyb"; then
+      _v_ok "stripping the control-center fence from skel keybinds.lua yields upstream's stub byte-for-byte (revert-all restores vanilla) (#14)"
+    else
+      _v_fail "skel keybinds.lua has distro content OUTSIDE the control-center fence — revert-all would not restore upstream's stub (#14)"
+    fi
+  else
+    _v_warn "upstream keybinds.lua stub not found ($_up_keyb) — fence byte-identity check skipped (run git submodule update)"
+  fi
+  # the static skel fence must be ledger-recorded by ii-post-install (REV-01).
+  if grep -Eq 'ledger_record[[:space:]]+lua-block[^#]*custom/keybinds\.lua[^#]*control-center' "$POST_F"; then
+    _v_ok "control-center keybind fence ledger-recorded as 'lua-block' in ii-post-install (revert-all strips it) (#14)"
+  else
+    _v_fail "control-center keybind fence not recorded as a 'lua-block' row in ii-post-install — iictl revert-all can't strip it (static skel fence is unrevertable) (#14)"
+  fi
+  # AUDIT-BEFORE-RESERVE (#20 lesson): the CC-fenced binds must not collide with
+  # any upstream keybind. Normalize both (drop spaces, upper-case) and diff — this
+  # is exactly how #14's stale "SUPER+ALT+Space is unbound" claim was caught
+  # (upstream binds it to Window Float/Tile). A new colliding chord fails here.
+  _up_hyprk="$DOTS/dots/.config/hypr/hyprland/keybinds.lua"
+  if [[ -f "$_up_hyprk" ]]; then
+    _cc_keys="$(awk '/^-- >>> illogical-impulse control-center/{f=1;next} /^-- <<< illogical-impulse control-center/{f=0} f' "$_CC_KEYB" \
+      | grep -oE 'hl\.bind\("[^"]+"' | sed -E 's/^hl\.bind\("//; s/"$//' | tr -d ' \t' | tr '[:lower:]' '[:upper:]')"
+    _up_keys="$(grep -oE 'hl\.bind\("[^"]+"' "$_up_hyprk" | sed -E 's/^hl\.bind\("//; s/"$//' | tr -d ' \t' | tr '[:lower:]' '[:upper:]')"
+    _cc_collide=""
+    while IFS= read -r _k; do
+      [[ -z "$_k" ]] && continue
+      grep -qxF -- "$_k" <<<"$_up_keys" && _cc_collide+="$_k "
+    done <<<"$_cc_keys"
+    if [[ -n "$_cc_collide" ]]; then
+      _v_fail "Control Center keybind(s) collide with an upstream bind: ${_cc_collide}— pick a free chord (audit-before-reserve, #20/#14)"
+    else
+      _v_ok "Control Center keybinds are deconflicted from every upstream bind (audit-before-reserve — no chord collision) (#14)"
+    fi
+  fi
+else
+  _v_fail "skel keybinds.lua not staged (#14) — the SUPER+SHIFT+I launch surface is missing"
+fi
+# ANSI hygiene (#14 review): iictl's colours must be gated on a TTY / NO_COLOR so
+# the Control Center's Ctl reads (`iictl version`/`doctor`, non-TTY) and the
+# in-window consoles render clean text, not raw ESC sequences. An unconditional
+# palette leaks escapes into every non-TTY reader (and makes the consoles'
+# NO_COLOR export a no-op). Guard the shared lib AND the core iictl inline fallback.
+_cc_ansi_ok=1
+for _icf in "$AIROOTFS/usr/local/lib/ii/iictl-common.sh" "$AIROOTFS/usr/local/bin/iictl"; do
+  [[ -f "$_icf" ]] || continue
+  grep -qE '\-t 1' "$_icf" && grep -q 'NO_COLOR' "$_icf" \
+    || { _v_fail "$(basename "$_icf") emits ANSI colours unconditionally — the Control Center version/doctor reads + consoles show raw escapes; gate on [[ -t 1 && -z \${NO_COLOR:-} ]] (#14)"; _cc_ansi_ok=0; }
+done
+(( _cc_ansi_ok )) && _v_ok "iictl colours gated on a TTY / NO_COLOR — clean text in the Control Center reads + in-window consoles (#14)"
 
 step "reversibility round-trip e2e test (TEST-02)"
 # The static checks above assert the reversibility STRUCTURE; the e2e test
