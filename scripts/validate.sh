@@ -1173,6 +1173,103 @@ for _sl in "$AIROOTFS/etc/skel/.config/hypr/custom/execs.lua" "$AIROOTFS/etc/ske
 done
 _v_ok "no widget fence baked into skel custom/*.lua (framework is dormant until 'iictl widget enable')"
 
+step "iictl pkg software manager + Packages pane (#30)"
+# The one-click software manager (#30): the `iictl pkg` engine (the source of
+# truth) + a standalone Packages pane. Bug-classes guarded here:
+#   (a) the pane must import NOTHING from upstream's quickshell/ii tree — it is a
+#       standalone qs -p surface (the welcome-card seam), so it loads on its own
+#       before the #14 registry lands and never couples to the rice.
+#   (b) the protected-set guard must EXIST in the engine — a one-click remove that
+#       could uninstall a boot/login/graphics-critical package (hyprland, the
+#       kernels, greetd, mesa, the NVIDIA driver, iictl…) would brick the box.
+#   (c) LEDGER BOUNDARY: user `iictl pkg` ops are the USER'S OWN packages and must
+#       NOT be written to the distro revert ledger — `iictl revert-all` restores
+#       the vanilla DISTRO and must never uninstall an app the user chose. So the
+#       engine must NEVER call ledger_record (contrast pack/webapp, which do).
+_PKG_PLUGIN="$AIROOTFS/usr/local/lib/ii/iictl.d/pkg"
+_PKG_PANE="$AIROOTFS/usr/share/illogical-impulse/control/panes/Packages.qml"
+if [[ ! -f "$_PKG_PLUGIN" ]]; then
+  _v_fail "iictl.d/pkg not staged (#30) — the software-manager engine is missing"
+else
+  # exec/shebang/bash -n/#help are asserted generically in the plugin-arch step;
+  # here we assert the #30-SPECIFIC contract. Comments stripped so this section's
+  # prose (and the plugin's own header) can't satisfy/trip a grep.
+  _pkg_code="$(grep -vE '^[[:space:]]*#' "$_PKG_PLUGIN")"
+  # (b) protected-set guard: a named allow-list + the --force-system gate + an
+  #     _is_protected check used by remove. All three must be present.
+  _pkg_guard_ok=1
+  grep -q '_is_protected' <<<"$_pkg_code" \
+    || { _v_fail "iictl.d/pkg has no _is_protected check — the protected-set guard is missing (#30)"; _pkg_guard_ok=0; }
+  grep -q -- '--force-system' <<<"$_pkg_code" \
+    || { _v_fail "iictl.d/pkg has no --force-system gate — protected packages could be removed silently (#30)"; _pkg_guard_ok=0; }
+  # the allow-list must literally name the boot/login/graphics-critical packages.
+  for _crit in hyprland greetd mesa; do
+    grep -qw "$_crit" <<<"$_pkg_code" \
+      || { _v_fail "iictl.d/pkg protected set does not name '$_crit' — a one-click remove could brick the box (#30)"; _pkg_guard_ok=0; }
+  done
+  # the NVIDIA driver must be protected too (dynamically, so no false hit on a
+  # nouveau box) — assert the engine consults pacman -Q for an nvidia variant.
+  grep -qE 'nvidia' <<<"$_pkg_code" \
+    || { _v_fail "iictl.d/pkg protected set never considers the NVIDIA driver — its removal must be blocked too (#30)"; _pkg_guard_ok=0; }
+  (( _pkg_guard_ok )) && _v_ok "iictl.d/pkg protected-set guard present (_is_protected + --force-system + names hyprland/greetd/mesa/nvidia) — can't one-click-brick the box (#30)"
+  # (c) THE LEDGER BOUNDARY: the engine must NEVER call ledger_record. User package
+  #     choices are theirs; revert-all must not touch them. (The plugin may write
+  #     its OWN separate history log — that is not ledger_record.)
+  if grep -qw 'ledger_record' <<<"$_pkg_code"; then
+    _v_fail "iictl.d/pkg calls ledger_record — user package ops must NOT enter the distro revert ledger (revert-all would uninstall the user's own apps) (#30)"
+  else
+    _v_ok "iictl.d/pkg never calls ledger_record — user package ops stay out of the revert ledger (revert-all leaves them alone) (#30)"
+  fi
+  # every subcommand the issue names must be dispatched (search/info/install/
+  # remove/list/clean) — a dropped verb would silently shrink the surface.
+  _pkg_verb_miss=0
+  for _verb in search info install remove list clean; do
+    grep -qE "^[[:space:]]*$_verb[|)]|^[[:space:]]*$_verb\)" "$_PKG_PLUGIN" \
+      || grep -qE "cmd_$_verb" <<<"$_pkg_code" \
+      || { _v_fail "iictl.d/pkg does not dispatch the '$_verb' subcommand (#30)"; _pkg_verb_miss=$((_pkg_verb_miss+1)); }
+  done
+  (( _pkg_verb_miss == 0 )) && _v_ok "iictl.d/pkg dispatches search/info/install/remove/list/clean (#30)"
+  # AUR ops must presence-check paru (official-repo ops work without it, AUR
+  # degrades with a clear message) — mirror the pack engine's contract.
+  grep -qE '_have_paru|command -v paru' <<<"$_pkg_code" \
+    && _v_ok "iictl.d/pkg presence-checks paru (official ops work without it; AUR degrades) (#30)" \
+    || _v_fail "iictl.d/pkg never presence-checks paru — AUR ops must degrade gracefully when paru is absent (#30)"
+fi
+# The Packages pane — standalone (zero quickshell/ii imports), themed via a
+# colors.json read (not a hardcoded-only palette), and containing NO package
+# logic (it only shells out to `iictl pkg … --json`).
+if [[ ! -f "$_PKG_PANE" ]]; then
+  _v_fail "control/panes/Packages.qml not staged (#30) — the GUI pane is missing"
+else
+  # (a) NO import from upstream's quickshell/ii tree (the standalone seam). Same
+  #     grep as the widget standalone guard.
+  if grep -Eq 'import[[:space:]]+(qs\.|"[^"]*quickshell/ii)' "$_PKG_PANE"; then
+    _v_fail "Packages.qml imports upstream's quickshell/ii tree — the pane must be standalone (zero qs.* imports) so it loads on its own (#30/#14)"
+  else
+    _v_ok "Packages.qml is standalone (no upstream quickshell/ii import) — qs -p-loadable before #14 lands (#30)"
+  fi
+  # It must actually drive the CLI engine (renders `iictl pkg … --json`), never
+  # re-implement package logic in QML (no direct pacman/paru calls in the pane).
+  grep -q 'iictl' "$_PKG_PANE" && grep -q 'pkg' "$_PKG_PANE" \
+    && _v_ok "Packages.qml drives the CLI engine (shells out to iictl pkg) — no package logic in QML (#30)" \
+    || _v_fail "Packages.qml does not shell out to 'iictl pkg' — the CLI engine is the single source of truth (#30)"
+  if grep -qE '\["(pacman|paru)"|command:[[:space:]]*\[?"?(pacman|paru)' "$_PKG_PANE"; then
+    _v_fail "Packages.qml runs pacman/paru directly — all package logic lives in the iictl pkg engine, the pane only calls it (#30)"
+  else
+    _v_ok "Packages.qml never runs pacman/paru directly (engine-only; the pane is a thin front end) (#30)"
+  fi
+  # It reads the generated colors.json (re-themes with the wallpaper) with a
+  # static fallback, and NEVER writes that upstream-owned STATE file (READ-ONLY).
+  grep -q 'generated/colors.json' "$_PKG_PANE" \
+    && _v_ok "Packages.qml reads the generated colors.json (re-themes with the wallpaper; static fallback) (#30)" \
+    || _v_fail "Packages.qml does not reference generated/colors.json — the pane won't re-theme (#30)"
+  if grep -Eq 'writeAdapter|\.write\(|setText|FileViewWriteAdapter' "$_PKG_PANE"; then
+    _v_fail "Packages.qml appears to WRITE the colours STATE file — it is upstream-owned, READ-ONLY (#30)"
+  else
+    _v_ok "Packages.qml only READS colors.json (no write path — upstream STATE stays read-only) (#30)"
+  fi
+fi
+
 step "reversibility round-trip e2e test (TEST-02)"
 # The static checks above assert the reversibility STRUCTURE; the e2e test
 # (tests/revert-roundtrip.sh + its in-container payload) DEMONSTRATES it — seed
