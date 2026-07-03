@@ -1,15 +1,11 @@
-//@ pragma UseQApplication
-//@ pragma Env QS_NO_RELOAD_POPUP=1
-//@ pragma Env QT_QUICK_CONTROLS_STYLE=Basic
-
-// Illogical Impulse — Control Center "Packages" pane (issue #30).
+// Illogical Impulse — Control Center "Packages" pane (issues #30 + #14).
 //
-// The GUI front end for `iictl pkg` (the one-click software manager). It is
-// DELIBERATELY standalone: its own Quickshell config, plain QtQuick, and ZERO
-// imports from upstream's shell tree (quickshell/ii) — the same seam class as the
-// welcome card. That means it loads on its own with `qs -p Packages.qml` today,
-// and will register into the Control Center pane registry unchanged when #14
-// lands (one panes/*.qml + one registry line, no shell edits — PROPOSAL §11).
+// The GUI front end for `iictl pkg` (the one-click software manager). It has ZERO
+// imports from upstream's shell tree (quickshell/ii) — the same standalone seam
+// class as the welcome card — and is an embeddable Control Center pane (issue #14):
+// the shell registry (control/panes.js) loads it into the StackLayout like any
+// other pane (PROPOSAL §11: one panes/*.qml + one registry line). Deleting the
+// control/ dir removes it with no trace on the rice (Iron Law: reversible).
 //
 // It contains NO package logic: every operation shells out to the CLI engine,
 // which is the single source of truth —
@@ -30,15 +26,8 @@ import QtQuick.Layouts
 import Quickshell
 import Quickshell.Io
 
-ApplicationWindow {
+Item {
     id: root
-    visible: true
-    title: "Packages — Illogical Impulse"
-    width: 720
-    height: 640
-    minimumWidth: 560
-    minimumHeight: 520
-    color: colors.background
 
     // ── theme: read generated/colors.json READ-ONLY, static fallback ─────────
     // Static fallback palette = the welcome card's constants (kept in sync so a
@@ -100,8 +89,11 @@ ApplicationWindow {
     function runQuery(argv) {
         root.loading = true; root.loadError = ""; root.selected = null;
         reader.buffer = "";
-        reader.command = ["iictl", "pkg"].concat(argv).concat(["--json"]);
-        reader.running = true;
+        // exec() atomically STOPS any in-flight read and starts the new one — a
+        // fast tab switch (search→installed) can't clobber the shared buffer or
+        // no-op a still-running Process (reassigning .command mid-run is ignored
+        // and running=true while already true is a no-op). #14 review.
+        reader.exec(["iictl", "pkg"].concat(argv).concat(["--json"]));
     }
     function refresh() {
         if (root.tab === "search") {

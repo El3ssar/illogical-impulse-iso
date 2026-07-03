@@ -1,0 +1,11 @@
+# Illogical Impulse — Control Center config module (issue #14).
+#
+# The root qmldir for the standalone `qs -p control` app. It exposes the two
+# app-wide singletons every pane consumes: Colors (watches upstream's generated
+# colors.json READ-ONLY, static fallback) and Ctl (the one Process wrapper that
+# shells out to `iictl <verb>` — no pane touches the filesystem directly). The
+# design-system component kit lives under _ui/ (its own qmldir); panes live under
+# panes/. Nothing here imports upstream's quickshell/ii tree, so the Control
+# Center survives any upstream rice redesign (same seam class as the welcome card).
+singleton Colors 1.0 Colors.qml
+singleton Ctl 1.0 Ctl.qml

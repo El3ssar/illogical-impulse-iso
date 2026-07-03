@@ -1,0 +1,22 @@
+# Illogical Impulse — Control Center design-system kit (issue #14).
+#
+# The shared, themed component library every pane composes so the whole app is
+# visually consistent and keyboard-accessible by construction. All components read
+# the Colors singleton (from the control root module, imported ".."), so they
+# re-theme live when the wallpaper changes. Nothing here imports upstream's
+# quickshell/ii tree. Adding a component = one file + one line below.
+Icon 1.0 Icon.qml
+Card 1.0 Card.qml
+Section 1.0 Section.qml
+Badge 1.0 Badge.qml
+Spinner 1.0 Spinner.qml
+PillButton 1.0 PillButton.qml
+Toggle 1.0 Toggle.qml
+ListRow 1.0 ListRow.qml
+SearchField 1.0 SearchField.qml
+NavRailButton 1.0 NavRailButton.qml
+EmptyState 1.0 EmptyState.qml
+ErrorState 1.0 ErrorState.qml
+Toast 1.0 Toast.qml
+Console 1.0 Console.qml
+SpecForm 1.0 SpecForm.qml
