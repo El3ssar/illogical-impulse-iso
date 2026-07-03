@@ -19,7 +19,9 @@ jobs:
       image: archlinux:base-devel
     steps:
       - name: Install build dependencies
-        run: pacman -Syu --noconfirm git rsync python archiso just
+        # zsh + fish so the #15 shell-layer lint actually `zsh -n`/`fish -n`s the
+        # baked .zshrc / conf.d files in CI instead of soft-skipping (else vacuous).
+        run: pacman -Syu --noconfirm git rsync python archiso just zsh fish
 
       - name: Checkout (with dots submodule)
         uses: actions/checkout@v5

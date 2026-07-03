@@ -134,6 +134,177 @@ else
   _v_ok "themed self-contained /etc/skel/.bashrc (guarded sequences cat + starship)"
 fi
 
+step "shell layer (iictl shell chooser + themed zsh/fish/nushell) (#15)"
+# The shell layer (#15) is an ADDITIVE, fully reversible opt-in on top of the
+# shipped fish default. Every check here encodes a real bug-class:
+#   • no skel-distro shell file may land in a sync-deleted (install_dir__sync)
+#     path — upstream's updater would wipe it (Iron Law seam guard);
+#   • ~/.zshrc / ~/.zshenv are home-root (unowned), fish enrichment is under
+#     conf.d/ ONLY (the --exclude=conf.d slot);
+#   • the EXACT generated/terminal/sequences.txt literal (WITH the terminal/
+#     subdir) must appear in the themed inits + the drop-in's translator — the
+#     wrong path silently ships an uncolored shell (the #11/#15 no-color class);
+#   • the .zshrc antidote load is GUARDED (no-op when the manifest is absent);
+#   • the iictl.d/shell drop-in is exec + shebang + syntax-clean + #help; it uses
+#     the shared ii_chsh mutator (registers /etc/shells before chsh) and the
+#     shared ledger, and touches NO upstream rsync --delete tree.
+_SHELL_SEQ='generated/terminal/sequences.txt'
+_SKELD="$AIROOTFS/etc/skel"
+
+# (a) Seam guard: NO skel shell file may sit in an upstream sync-deleted path.
+#     .zshrc/.zshenv must be home-root (NOT under zshrc.d/); fish ii-* files must
+#     be under conf.d/ (never config.fish / functions / a bare fish dir file).
+_sh_seam_bad=0
+for _bad in "$_SKELD/.config/zshrc.d/.zshrc" "$_SKELD/.config/zshrc.d/.zshenv"; do
+  [[ -e "$_bad" ]] && { _v_fail "shell file in sync-deleted path: ${_bad#"$AIROOTFS"}"; _sh_seam_bad=1; }
+done
+# Any ii-*.fish the distro ships MUST be under fish/conf.d/ (the excluded slot).
+while IFS= read -r _ff; do
+  [[ -n "$_ff" ]] || continue
+  case "$_ff" in
+    */.config/fish/conf.d/ii-*.fish) : ;;
+    *) _v_fail "distro fish file outside the conf.d/ excluded slot: ${_ff#"$AIROOTFS"}"; _sh_seam_bad=1 ;;
+  esac
+done < <(find "$_SKELD/.config/fish" -type f -name 'ii-*' 2>/dev/null)
+# The distro must NOT ship a config.fish or a zshrc.d file (upstream owns those).
+for _up in "$_SKELD/.config/fish/config.fish.ii" "$_SKELD/.config/zshrc.d/ii-shell.zsh"; do
+  [[ -e "$_up" ]] && { _v_fail "distro wrote an upstream-owned shell path: ${_up#"$AIROOTFS"}"; _sh_seam_bad=1; }
+done
+(( _sh_seam_bad == 0 )) && _v_ok "no skel shell file in a sync-deleted/upstream-owned path (home-root + conf.d/ only)"
+
+# (b) home-root ~/.zshrc + ~/.zshenv exist, are zsh-syntax-clean (zsh -n if
+#     present; else skip — a zshrc is not bash-parseable), and .zshrc guards its
+#     antidote load + carries the EXACT sequences literal.
+_ZRC="$_SKELD/.zshrc"; _ZENV="$_SKELD/.zshenv"
+if [[ ! -s "$_ZRC" ]]; then
+  _v_fail "/etc/skel/.zshrc missing or empty — the themed zsh has no home-root config"
+else
+  if command -v zsh >/dev/null 2>&1; then
+    zsh -n "$_ZRC" 2>/dev/null && _v_ok ".zshrc zsh -n clean" || _v_fail "/etc/skel/.zshrc has a zsh syntax error"
+  else
+    _v_warn "zsh not on host — skipped zsh -n on .zshrc (bash -n would false-fail a zsh file)"
+  fi
+  grep -qE '^[^#]*'"$_SHELL_SEQ" "$_ZRC" \
+    && _v_ok ".zshrc cats the EXACT $_SHELL_SEQ (with terminal/ subdir)" \
+    || _v_fail "/etc/skel/.zshrc missing the guarded $_SHELL_SEQ cat (wrong/old path? theming would no-op)"
+  # antidote load must be GUARDED: an `antidote load` line with no preceding
+  # existence test on the manifest would error on a box with no plugins file.
+  if grep -q 'antidote load' "$_ZRC"; then
+    # The guard: the manifest ($HOME/.config/zsh/ii-plugins.txt) is tested with
+    # -r/-f before any `antidote load` runs (our .zshrc wraps it in an if/-r).
+    if grep -qE '\[\[ +-r +"?\$[_A-Za-z].*ii_plugins|ii-plugins\.txt' "$_ZRC" \
+       && grep -qE 'if .*-r .*antidote|-r "\$_ii_plugins"' "$_ZRC"; then
+      _v_ok ".zshrc guards 'antidote load' on the manifest's existence (no-op when absent)"
+    else
+      _v_fail "/etc/skel/.zshrc 'antidote load' is not guarded on the ii-plugins.txt manifest existence"
+    fi
+  else
+    _v_fail "/etc/skel/.zshrc does not load antidote — the curated plugin bundle won't load"
+  fi
+  # .zshrc must SOURCE zshrc.d read-only (never write it): it loops over the dir
+  # and `source`s each snippet. Assert the read-only source AND that no line
+  # REDIRECTS into zshrc.d (that would be an Iron-Law violation on an rsync
+  # --delete tree). Match the loop/source of the dir, not a literal one-liner.
+  if grep -qE 'zshrc\.d' "$_ZRC" && grep -qE '^[[:space:]]*source ' "$_ZRC"; then
+    if grep -qE '>[[:space:]]*"?[^"]*zshrc\.d' "$_ZRC"; then
+      _v_fail "/etc/skel/.zshrc REDIRECTS into upstream-owned ~/.config/zshrc.d — it may only source it read-only"
+    else
+      _v_ok ".zshrc sources upstream ~/.config/zshrc.d read-only (snippets keep working)"
+    fi
+  else
+    _v_warn ".zshrc does not source zshrc.d — upstream's zsh snippets won't run under our .zshrc"
+  fi
+fi
+[[ -s "$_ZENV" ]] && _v_ok "/etc/skel/.zshenv present (home-root zsh env)" \
+                  || _v_fail "/etc/skel/.zshenv missing — zsh env (XDG/antidote home) unset"
+
+# (c) The curated antidote bundle manifest ships at the ii-owned unowned slot.
+_PL="$_SKELD/.config/zsh/ii-plugins.txt"
+if [[ -s "$_PL" ]]; then
+  # Must carry the curated four (autosuggestions/syntax-highlighting/completions/fzf-tab).
+  _pl_ok=1
+  for _need in zsh-autosuggestions zsh-syntax-highlighting zsh-completions fzf-tab; do
+    grep -q "$_need" "$_PL" || { _v_fail "ii-plugins.txt missing curated plugin: $_need"; _pl_ok=0; }
+  done
+  (( _pl_ok )) && _v_ok "curated antidote bundle (ii-plugins.txt) ships the 4 defaults"
+else
+  _v_fail ".config/zsh/ii-plugins.txt missing — antidote has no curated bundle to load"
+fi
+
+# (d) The baked shell-init templates carry the EXACT sequences literal.
+_SHTPL="$AIROOTFS/usr/share/illogical-impulse/shells"
+if [[ -d "$_SHTPL" ]]; then
+  for _t in zshrc zshenv fizshrc config.nu; do
+    [[ -f "$_SHTPL/$_t" ]] || { _v_fail "shell template missing: shells/$_t"; continue; }
+  done
+  _tpl_seq_bad=0
+  # Every template that THEMES a terminal must reference the exact literal
+  # (zshenv is env-only → exempt).
+  for _t in zshrc fizshrc config.nu; do
+    [[ -f "$_SHTPL/$_t" ]] || continue
+    grep -q "$_SHELL_SEQ" "$_SHTPL/$_t" \
+      || { _v_fail "shells/$_t missing the EXACT $_SHELL_SEQ literal (wrong/old path?)"; _tpl_seq_bad=1; }
+  done
+  (( _tpl_seq_bad == 0 )) && _v_ok "shell templates reference the EXACT $_SHELL_SEQ (with terminal/)"
+else
+  _v_fail "shell-init templates dir missing (usr/share/illogical-impulse/shells) — 'iictl shell set' has no templates"
+fi
+
+# (e) fish enrichment lands in conf.d/ and the theme file uses the exact literal.
+_FTHEME="$_SKELD/.config/fish/conf.d/ii-theme.fish"
+if [[ -f "$_FTHEME" ]]; then
+  grep -q "$_SHELL_SEQ" "$_FTHEME" \
+    && _v_ok "fish conf.d/ii-theme.fish cats the EXACT $_SHELL_SEQ (excluded-from-sync slot)" \
+    || _v_fail "fish conf.d/ii-theme.fish missing the exact $_SHELL_SEQ literal"
+  command -v fish >/dev/null 2>&1 \
+    && { fish -n "$_FTHEME" 2>/dev/null && _v_ok "fish conf.d ii-*.fish syntax clean" \
+                                       || _v_fail "fish conf.d/ii-theme.fish has a syntax error"; }
+else
+  _v_fail "fish conf.d/ii-theme.fish missing — fish theming re-source absent"
+fi
+
+# (f) The iictl.d/shell drop-in: exec/shebang/bash -n/#help are covered by the
+#     generic "iictl.d/ plugin architecture" step; here we assert it EXISTS and
+#     obeys the shell-domain contract — uses ii_chsh (not a raw chsh), records via
+#     the shared ledger, and touches NO upstream rsync --delete tree.
+_SHELL_D="$AIROOTFS/usr/local/lib/ii/iictl.d/shell"
+if [[ ! -f "$_SHELL_D" ]]; then
+  _v_fail "iictl.d/shell not staged (#15) — the shell chooser verb is missing"
+else
+  _sh_ok=1
+  [[ -x "$_SHELL_D" ]] || { _v_fail "iictl.d/shell not executable"; _sh_ok=0; }
+  [[ "$(head -c2 "$_SHELL_D")" == "#!" ]] || { _v_fail "iictl.d/shell has no shebang"; _sh_ok=0; }
+  bash -n "$_SHELL_D" 2>/dev/null || { _v_fail "iictl.d/shell syntax error"; _sh_ok=0; }
+  grep -qE '^#help:[[:space:]]' "$_SHELL_D" || { _v_fail "iictl.d/shell missing #help: header"; _sh_ok=0; }
+  (( _sh_ok )) && _v_ok "iictl.d/shell staged (exec + shebang + bash -n + #help:)"
+  _sh_code="$(grep -vE '^[[:space:]]*#' "$_SHELL_D")"
+  # Must register+chsh via the shared mutator, never a bespoke chsh (so /etc/shells
+  # is populated first — AUR shells fizsh/nushell would otherwise fail chsh).
+  grep -q 'ii_chsh' <<<"$_sh_code" \
+    && _v_ok "iictl.d/shell sets the login shell via the shared ii_chsh mutator" \
+    || _v_fail "iictl.d/shell does not use ii_chsh — /etc/shells won't be registered before chsh (fizsh/nushell fail)"
+  # Must record via the shared ledger (reversibility), not a bespoke writer.
+  grep -q 'ledger_record' <<<"$_sh_code" \
+    && _v_ok "iictl.d/shell records reversible actions via the shared ledger" \
+    || _v_fail "iictl.d/shell never calls ledger_record — its switches would be irreversible"
+  # Must reference the EXACT sequences literal (the nushell translator reads it).
+  grep -q "$_SHELL_SEQ" <<<"$_sh_code" \
+    && _v_ok "iictl.d/shell reads the EXACT $_SHELL_SEQ (nushell translator)" \
+    || _v_fail "iictl.d/shell missing the exact $_SHELL_SEQ literal — nushell theming would no-op"
+  # Must delegate the plugin picker to the #48 manager, not re-implement it.
+  grep -qE 'iictl plugins|iictl.d/plugins|tweak plugins' <<<"$_sh_code" \
+    && _v_ok "iictl.d/shell plugins delegates to the #48 iictl plugins manager (no re-impl)" \
+    || _v_fail "iictl.d/shell does not delegate to 'iictl plugins' — it must reuse the #48 manager"
+  # Bug-class (mirrors the webapp guard): the drop-in must not WRITE an upstream
+  # rsync --delete tree. Comments stripped so the file's own prose naming those
+  # trees (to warn itself away) neither satisfies nor trips the check.
+  if grep -qE '>[[:space:]]*"?[^"]*(quickshell/ii|hypr/hyprland|/matugen/|fish/config\.fish|/zshrc\.d/)' <<<"$_sh_code"; then
+    _v_fail "iictl.d/shell WRITES into an upstream rsync --delete tree — it may only source/cat them read-only"
+  else
+    _v_ok "iictl.d/shell writes no upstream-owned tree (unowned/excluded seams only)"
+  fi
+fi
+
 step "distro identity"
 OSREL="$AIROOTFS/etc/os-release"
 grep -q "^ID=$DISTRO_ID\$"                  "$OSREL" && _v_ok "ID=$DISTRO_ID"   || _v_fail "ID wrong"
@@ -404,6 +575,126 @@ if [[ -f "$_WAPP" ]]; then
   grep -q 'ii_lua_block_write' <<<"$_wapp_code" \
     && _v_ok "iictl.d/webapp fences the accent rule via the shared ii_lua_block_write mutator" \
     || _v_fail "iictl.d/webapp does not use ii_lua_block_write — accent rules must be sentinel-fenced via the shared mutator"
+fi
+
+step "terminal/multiplexer chooser (#23, TUI-01)"
+# The iictl tui domain: a baked, UNOWNED zellij config + an iictl.d/tui chooser
+# that overrides the default emulator via a graceful FALLBACK LIST and toggles a
+# multiplexer autostart — all additive + reversible. The generic plugin lint
+# (exec/shebang/bash -n/#help) is asserted in the "iictl.d/ plugin architecture"
+# step; here we add the FEATURE-SPECIFIC bug-class guards.
+_TUI="$_IID/tui"
+if [[ ! -f "$_TUI" ]]; then
+  _v_fail "TUI-01: iictl.d/tui not staged — the terminal/multiplexer chooser is missing"
+else
+  _v_ok "TUI-01: iictl.d/tui staged (generic exec/shebang/bash -n/#help lint runs in the plugin-architecture step)"
+  # Comments stripped so the plugin's own prose (which legitimately NAMES the
+  # forbidden trees + the dropped recolour renderer to warn itself away) can
+  # neither satisfy nor trip the code checks below.
+  _tui_code="$(grep -vE '^[[:space:]]*#' "$_TUI")"
+
+  # (a) GRACEFUL-DEGRADATION bug-class: the terminal= override must be a FALLBACK
+  #     LIST run through upstream's launch_first_available.sh — never a lone
+  #     binary (uninstalling the chosen emulator would then break Super+Return).
+  #     Assert the plugin builds the value through launch_first_available.sh and
+  #     that its fallback-list builder emits MORE THAN ONE quoted entry.
+  grep -q 'launch_first_available.sh' <<<"$_tui_code" \
+    && _v_ok "TUI-01: terminal override runs through upstream's launch_first_available.sh (graceful fallback)" \
+    || _v_fail "TUI-01: iictl.d/tui never references launch_first_available.sh — the override must be a fallback list, not a lone binary"
+  # The builder seeds the list with the chosen command AND appends upstream's
+  # chain — a lone-binary override (no chain append) is the bug we guard against.
+  if grep -q '_UPSTREAM_CHAIN' <<<"$_tui_code" && grep -q '_fallback_list' <<<"$_tui_code"; then
+    _v_ok "TUI-01: iictl.d/tui builds a chosen-first fallback LIST over upstream's chain (uninstall degrades, never breaks Super+Return)"
+  else
+    _v_fail "TUI-01: iictl.d/tui does not append upstream's terminal chain — a lone-binary override breaks Super+Return when the emulator is uninstalled"
+  fi
+
+  # (b) NO-PER-EMULATOR-RECOLOUR bug-class (the whole point of the issue): upstream's
+  #     applycolor.sh apply_anyterm() already OSC-broadcasts Material You to every
+  #     emulator, so this domain must NOT add a second recolour renderer/watcher.
+  #     Forbid an ii-theme-extras.sh helper, any write of upstream's generated
+  #     sequences.txt, and any per-emulator theme-file writer for the emulators
+  #     upstream already recolours (kitty/foot/ghostty/wezterm/alacritty configs).
+  _recolour_bad=0
+  if grep -qE 'ii-theme-extras' <<<"$_tui_code"; then
+    _v_fail "TUI-01: iictl.d/tui references ii-theme-extras — no per-emulator recolour renderer (upstream's apply_anyterm already recolours every emulator)"; _recolour_bad=1
+  fi
+  if grep -qE 'sequences\.txt|generated/terminal' <<<"$_tui_code"; then
+    _v_fail "TUI-01: iictl.d/tui writes/reads upstream's generated sequences.txt — that OSC recolour path is upstream-owned; do not duplicate it"; _recolour_bad=1
+  fi
+  # A per-emulator theme-file WRITE (redirection into an emulator's config) is the
+  # duplicate-recolour smell. Match a `>`/`>>` redirect targeting a known emulator
+  # config path. (The launch override lives in variables.lua, not a theme file.)
+  if grep -qE '>[[:space:]]*"?[^"]*(kitty|foot|ghostty|wezterm|alacritty)[^"]*(theme|colors|\.conf)' <<<"$_tui_code"; then
+    _v_fail "TUI-01: iictl.d/tui writes a per-emulator theme/colour file — redundant with upstream's OSC recolour; drop it"; _recolour_bad=1
+  fi
+  # Also assert NO new distro recolour helper baked under the airootfs share tree.
+  if [[ -e "$AIROOTFS/usr/local/lib/ii/ii-theme-extras.sh" || -e "$AIROOTFS/usr/share/illogical-impulse/ii-theme-extras.sh" ]]; then
+    _v_fail "TUI-01: a per-emulator recolour helper (ii-theme-extras.sh) is baked — upstream's apply_anyterm already covers emulators"; _recolour_bad=1
+  fi
+  (( _recolour_bad == 0 )) && _v_ok "TUI-01: no per-emulator recolour renderer / second sequences.txt watcher added (upstream's apply_anyterm OSC path owns emulator colour)"
+
+  # (c) The terminal override + any fenced write must go through the shared
+  #     ii_lua_block_write mutator into the SANCTIONED custom/variables.lua slot
+  #     only — never a sync-deleted upstream tree.
+  grep -q 'ii_lua_block_write' <<<"$_tui_code" \
+    && _v_ok "TUI-01: the terminal override is written via the shared ii_lua_block_write mutator (sentinel-fenced, ledger-recorded)" \
+    || _v_fail "TUI-01: iictl.d/tui does not use ii_lua_block_write — the override must be sentinel-fenced via the shared mutator"
+  grep -q 'custom/variables.lua' <<<"$_tui_code" \
+    && _v_ok "TUI-01: iictl.d/tui targets the sanctioned custom/variables.lua slot" \
+    || _v_fail "TUI-01: iictl.d/tui never references custom/variables.lua — the override has no sanctioned slot"
+  if grep -qE '(quickshell/ii|hypr/hyprland/variables\.lua|/matugen/|fish/config\.fish|zshrc\.d)' <<<"$_tui_code"; then
+    _v_fail "TUI-01: iictl.d/tui writes into an upstream rsync --delete tree (quickshell/ii, hypr/hyprland/variables.lua, matugen, fish/config.fish, zshrc.d) — never edit an upstream-owned path"
+  else
+    _v_ok "TUI-01: iictl.d/tui touches no sync-deleted upstream tree (override confined to custom/variables.lua; mux drop-ins in unowned seams)"
+  fi
+  # Every mutation must be reversible: the override + the mux drop-ins are ledger-
+  # recorded (ii_lua_block_write records the lua-block row; ledger_record the drops).
+  grep -q 'ledger_record' <<<"$_tui_code" \
+    && _v_ok "TUI-01: iictl.d/tui ledger_records its mux drop-ins (revert-all removes them)" \
+    || _v_fail "TUI-01: iictl.d/tui never calls ledger_record — the mux autostart would be unrevertable"
+fi
+
+# (d) baked, UNOWNED zellij config: config.kdl + the ii layout must ship in
+#     skel-distro AND reach /etc/skel, and must NOT be baked into a sync-deleted
+#     dir. Upstream ships NO zellij config, so ~/.config/zellij is unowned — never
+#     rsync --delete'd. We assert the files land in skel-distro + the staged
+#     /etc/skel, so `useradd -m` delivers them; deleting them reverts to zellij's
+#     own defaults (fully additive).
+_zj_bad=0
+for _zf in .config/zellij/config.kdl .config/zellij/layouts/ii.kdl; do
+  if [[ -f "$OVERLAY/skel-distro/$_zf" ]]; then
+    _v_ok "TUI-01: baked zellij file present in skel-distro ($_zf)"
+  else
+    _v_fail "TUI-01: baked zellij file missing from skel-distro ($_zf)"; _zj_bad=$((_zj_bad+1))
+  fi
+  if [[ -f "$AIROOTFS/etc/skel/$_zf" ]]; then
+    _v_ok "TUI-01: baked zellij file staged into /etc/skel ($_zf) — useradd -m delivers it to the installed user"
+  else
+    _v_fail "TUI-01: baked zellij file did not reach /etc/skel ($_zf) — run just prepare"; _zj_bad=$((_zj_bad+1))
+  fi
+done
+# The zellij config must NOT be an upstream-owned zellij tree (there is none) —
+# guard against a future upstream shipping one silently colliding with our bake.
+if [[ -e "$DOTS/dots/.config/zellij" ]]; then
+  _v_fail "TUI-01: upstream now ships a zellij config — our baked ~/.config/zellij would collide with an rsync --delete tree; move it to a fenced/unowned seam"
+else
+  _v_ok "TUI-01: upstream ships no zellij config — ~/.config/zellij stays an unowned seam our bake owns cleanly"
+fi
+
+# (e) focused offline self-test of the chooser's reversible-state mechanics
+#     (fallback-list shape, idempotent fence, ledger rows, mux drop-ins, strip).
+#     Runs the REAL plugin against a throwaway $HOME (no root, no network, no
+#     package install) — a regression reds the build. Mirrors the nvim self-test.
+_TUI_TEST="$ROOT/tests/tui-chooser.sh"
+if [[ ! -f "$_TUI_TEST" ]]; then
+  _v_fail "TUI-01: tests/tui-chooser.sh missing — the chooser self-test is gone"
+elif ! bash -n "$_TUI_TEST" 2>/dev/null; then
+  _v_fail "TUI-01: tests/tui-chooser.sh has a syntax error"
+elif bash "$_TUI_TEST" >/dev/null 2>&1; then
+  _v_ok "TUI-01: tests/tui-chooser.sh self-test passes (fallback list, idempotent fence, ledger rows, mux drop-ins, revert strip)"
+else
+  _v_fail "TUI-01: tests/tui-chooser.sh self-test FAILED — run it directly to see which assertion broke"
 fi
 
 step "iictl update flags + embedded welcome"
@@ -946,18 +1237,26 @@ if [[ -d "$_SKD" ]]; then
 else
   _v_warn "overlay/skel-distro missing — THEME-01a skipped"
 fi
-# (b) we must NOT ship/edit matugen config or add a distro [templates.*] block
-# (anywhere in overlay/ — airootfs or skel). Upstream owns matugen entirely.
+# (b) we must NOT ship/edit UPSTREAM's matugen config or add a distro
+# [templates.*] block to it (~/.config/matugen is rsync --delete'd). The distro's
+# OWN STANDALONE feeder config (#26) legitimately uses [templates.*] — but it
+# lives in the UNOWNED ~/.config/illogical-impulse-theming/ namespace, never under
+# a matugen path, and is invoked standalone (`matugen --config <ours>`), so it is
+# never wiped on update. So flag [templates.*] ONLY when it lands on a matugen
+# path (the wipe trap); the theming namespace is the sanctioned exception.
 _th_matugen=0
 while IFS= read -r _mf; do
   _v_fail "distro ships/edits a matugen config.toml ('${_mf#"$OVERLAY"/}') — ~/.config/matugen is rsync --delete'd; drive colours via switchwall.sh, never matugen config (THEME-01b)"
   _th_matugen=$((_th_matugen+1))
 done < <(find "$OVERLAY" -type f -path '*/matugen/config.toml' 2>/dev/null)
-if grep -rqsF '[templates.' "$OVERLAY" 2>/dev/null; then
-  _v_fail "a distro file introduces a '[templates.' matugen block under overlay/ — forbidden (matugen is rsync --delete'd) (THEME-01b)"
-  _th_matugen=$((_th_matugen+1))
-fi
-(( _th_matugen == 0 )) && _v_ok "no distro matugen config / [templates.*] block (colours driven via switchwall.sh only) (THEME-01b)"
+# a [templates.*] block under an upstream matugen path is the wipe trap.
+while IFS= read -r _tf; do
+  if grep -qsF '[templates.' "$_tf" 2>/dev/null; then
+    _v_fail "a distro file introduces a '[templates.' block on the matugen path '${_tf#"$OVERLAY"/}' — forbidden (matugen is rsync --delete'd) (THEME-01b)"
+    _th_matugen=$((_th_matugen+1))
+  fi
+done < <(find "$OVERLAY" -type f -path '*/matugen/*' 2>/dev/null)
+(( _th_matugen == 0 )) && _v_ok "no distro matugen config / matugen-path [templates.*] block (colours driven via switchwall.sh; the standalone feeder config is exempt) (THEME-01b)"
 # (c) every baked flavor seed parses + declares a valid #RRGGBB seed.
 _THEMES="$AIROOTFS/usr/share/illogical-impulse/themes"
 if [[ -d "$_THEMES" ]]; then
@@ -1020,6 +1319,188 @@ if [[ -f "$_SKEL_EXECS" ]] && grep -qF 'theme-recolor' "$_SKEL_EXECS"; then
   _v_fail "the recolour-watcher fence ('theme-recolor') is baked into skel execs.lua — it must be OFF by default (opt-in via 'iictl theme watch enable') (THEME-01d)"
 else
   _v_ok "recolour watcher is off by default (no theme-recolor fence baked into skel execs.lua) (THEME-01d)"
+fi
+
+step "theming coherence (GTK/icon/cursor + wallpaper pack + feeder + plymouth) (#26)"
+# THEME-COHERENCE (#26 / PROPOSAL §9): the four additive theming layers on top of
+# upstream's matugen engine. Each guard encodes an Iron-Law / reversibility trap:
+#   (a) NO overlay/skel-distro file may write gtk-3.0/gtk.css or gtk-4.0/gtk.css —
+#       those are matugen's OWN output (rsync --delete'd on `iictl update`).
+#       Coherence uses the ORTHOGONAL gtk-3.0/settings.ini + ~/.icons/default.
+#   (b) the coherence settings.ini + index.theme exist and reference the baked
+#       coherence packages (adw-gtk3 / Papirus / Bibata) — the layer is inert
+#       without them.
+#   (c) the wallpaper pack.list is FETCH-ONLY, has the 3-or-4-column shape, and
+#       EVERY entry carries a 64-hex sha256 (an unverifiable fetch is a bug).
+#   (d) the feeder execs.lua fence, if baked into skel, is sentinel-fenced AND
+#       disabled-by-default (commented), so the feeder is dormant until opt-in.
+#   (e) `plymouth` appears in NO baked package list (the black-screen guard,
+#       CLAUDE.md §6) — it is installed ONLINE by `iictl theme plymouth`, never
+#       baked, and the toggle regenerates BOTH mkinitcpio presets.
+_TC_SKD="$OVERLAY/skel-distro"
+
+# (a) matugen-owned colour CSS must never be baked into skel.
+_tc_css=0
+for _cssp in ".config/gtk-3.0/gtk.css" ".config/gtk-4.0/gtk.css"; do
+  if [[ -e "$_TC_SKD/$_cssp" ]]; then
+    _v_fail "skel-distro bakes '$_cssp' — matugen OWNS that colour CSS (rsync --delete'd); use gtk-3.0/settings.ini for the theme/icon/cursor NAMES instead (#26a)"
+    _tc_css=$((_tc_css+1))
+  fi
+done
+# also refuse a distro file writing gtk.css anywhere under overlay/ (airootfs too).
+while IFS= read -r _gf; do
+  _v_fail "distro writes '${_gf#"$OVERLAY"/}' — gtk-3.0/gtk.css & gtk-4.0/gtk.css are matugen-owned; never bake them (#26a)"
+  _tc_css=$((_tc_css+1))
+done < <(find "$OVERLAY" -type f \( -path '*/gtk-3.0/gtk.css' -o -path '*/gtk-4.0/gtk.css' \) 2>/dev/null)
+(( _tc_css == 0 )) && _v_ok "no distro file writes matugen-owned gtk-3.0/gtk.css or gtk-4.0/gtk.css (coherence is orthogonal) (#26a)"
+
+# (b) coherence settings.ini + index.theme exist and name the baked packages.
+_tc_gtk3="$_TC_SKD/.config/gtk-3.0/settings.ini"
+_tc_gtk4="$_TC_SKD/.config/gtk-4.0/settings.ini"
+_tc_icons="$_TC_SKD/.icons/default/index.theme"
+_tc_coh=0
+for _pair in "$_tc_gtk3:gtk-3.0/settings.ini" "$_tc_gtk4:gtk-4.0/settings.ini"; do
+  _f="${_pair%%:*}"; _n="${_pair##*:}"
+  if [[ ! -f "$_f" ]]; then
+    _v_fail "coherence file missing: skel-distro/$_n (#26b)"; _tc_coh=$((_tc_coh+1)); continue
+  fi
+  grep -q 'gtk-theme-name=adw-gtk3'                 "$_f" || { _v_fail "$_n does not set gtk-theme-name=adw-gtk3 (#26b)"; _tc_coh=$((_tc_coh+1)); }
+  grep -q 'gtk-icon-theme-name=Papirus'            "$_f" || { _v_fail "$_n does not set gtk-icon-theme-name=Papirus* (#26b)"; _tc_coh=$((_tc_coh+1)); }
+  grep -q 'gtk-cursor-theme-name=Bibata'           "$_f" || { _v_fail "$_n does not set gtk-cursor-theme-name=Bibata* (#26b)"; _tc_coh=$((_tc_coh+1)); }
+done
+if [[ -f "$_tc_icons" ]]; then
+  grep -qi 'Inherits=Bibata' "$_tc_icons" || { _v_fail ".icons/default/index.theme does not inherit Bibata (#26b)"; _tc_coh=$((_tc_coh+1)); }
+else
+  _v_fail "coherence file missing: skel-distro/.icons/default/index.theme (#26b)"; _tc_coh=$((_tc_coh+1))
+fi
+# the three coherence packages must be baked (goodies → packages.x86_64).
+for _cp in adw-gtk3 papirus-icon-theme bibata-cursor-theme; do
+  grep -Eq "^\s*${_cp}\s*$" "$PKGLIST" \
+    || { _v_fail "coherence package '$_cp' not baked into packages.x86_64 (goodies.list) (#26b)"; _tc_coh=$((_tc_coh+1)); }
+done
+(( _tc_coh == 0 )) && _v_ok "coherence: settings.ini + index.theme present & name the 3 baked packages (adw-gtk3/Papirus/Bibata) (#26b)"
+
+# (c) wallpaper pack manifest: fetch-only, shape + 64-hex sha256 on every entry.
+_TC_PACK="$AIROOTFS/usr/share/illogical-impulse/wallpapers/pack.list"
+if [[ ! -f "$_TC_PACK" ]]; then
+  _v_fail "wallpaper pack manifest not staged (usr/share/illogical-impulse/wallpapers/pack.list) (#26c)"
+else
+  # no image bytes may ride in the squashfs beside the manifest (fetch-only gate).
+  _tc_baked_imgs=0
+  while IFS= read -r _img; do
+    _v_fail "wallpaper IMAGE baked in the squashfs ('${_img#"$AIROOTFS"/}') — the pack is FETCH-ONLY; only pack.list ships (#26c / ISO-size gate)"
+    _tc_baked_imgs=$((_tc_baked_imgs+1))
+  done < <(find "$AIROOTFS/usr/share/illogical-impulse/wallpapers" -type f \
+             \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) 2>/dev/null)
+  # every non-comment line: >=3 whitespace columns AND column 3 is a 64-hex sha256.
+  if awk 'NF && $1!~/^#/ && (NF<3 || $3!~/^[0-9a-f]{64}$/){bad=1} END{exit bad+0}' "$_TC_PACK"; then
+    _tc_lines="$(grep -Ecv '^\s*(#|$)' "$_TC_PACK")"
+    (( _tc_baked_imgs == 0 )) \
+      && _v_ok "wallpaper pack.list: $_tc_lines fetch-only entries, each with filename+url+64-hex sha256 (#26c)"
+  else
+    _v_fail "wallpaper pack.list has a line lacking 3+ columns or a 64-hex sha256 — every fetch must be integrity-verified (#26c)"
+  fi
+  # the wallpaper plugin must actually verify the sha256 (grep the drop-in).
+  _TC_WP="$AIROOTFS/usr/local/lib/ii/iictl.d/wallpaper"
+  if [[ -f "$_TC_WP" ]]; then
+    grep -qE 'sha256|_sha256' "$_TC_WP" \
+      && _v_ok "iictl.d/wallpaper verifies sha256 on fetch (#26c)" \
+      || _v_fail "iictl.d/wallpaper never checks a sha256 — fetched wallpapers would be unverified (#26c)"
+  else
+    _v_fail "iictl.d/wallpaper drop-in not staged — the wallpaper verb is missing (#26c)"
+  fi
+fi
+
+# (d) feeder fence in skel execs.lua, if present, is sentinel-fenced AND
+# disabled-by-default (the active exec line is a Lua comment). Mirrors the
+# welcome-fence byte-identity check above.
+_TC_EXECS="$AIROOTFS/etc/skel/.config/hypr/custom/execs.lua"
+if [[ -f "$_TC_EXECS" ]] && grep -qF 'theme-feeder' "$_TC_EXECS"; then
+  # it must appear ONLY inside a sentinel fence (open + close markers present).
+  if grep -qxF -- '-- >>> illogical-impulse theme-feeder' "$_TC_EXECS" \
+     && grep -qxF -- '-- <<< illogical-impulse theme-feeder' "$_TC_EXECS"; then
+    # and the exec line inside must be COMMENTED (off by default): no UNCOMMENTED
+    # ii-theme-feeder.sh invocation may be baked. Capture-then-test (never a
+    # `grep | grep -q` pipeline — that SIGPIPEs the producer under pipefail).
+    _tc_feeder_lines="$(grep -E 'ii-theme-feeder\.sh' "$_TC_EXECS")"
+    if grep -qvE '^\s*--' <<<"$_tc_feeder_lines"; then
+      _v_fail "the feeder fence in skel execs.lua has an UNCOMMENTED ii-theme-feeder.sh line — it must be OFF by default (opt-in via 'iictl theme feeder enable') (#26d)"
+    else
+      _v_ok "feeder fence baked in skel execs.lua is sentinel-fenced AND disabled-by-default (commented) (#26d)"
+    fi
+  else
+    _v_fail "skel execs.lua references theme-feeder OUTSIDE a sentinel fence — every distro block must be fenced (#26d)"
+  fi
+else
+  _v_ok "no baked feeder fence in skel execs.lua (dormant until 'iictl theme feeder enable') (#26d)"
+fi
+# the feeder must NEVER write an upstream-owned matugen path — it drives a
+# STANDALONE config in the unowned illogical-impulse-theming namespace. Assert the
+# baked config is NOT under ~/.config/matugen and DOES read the FINISHED colors.json.
+_TC_FEEDER="$_TC_SKD/.config/hypr/custom/scripts/ii-theme-feeder.sh"
+if [[ -f "$_TC_FEEDER" ]]; then
+  _tcf_code="$(grep -vE '^[[:space:]]*#' "$_TC_FEEDER")"
+  grep -qE 'matugen (-q )?(--config|json)' <<<"$_tcf_code" \
+    && _v_ok "feeder hook runs a STANDALONE matugen (json/--config) — never edits upstream's config.toml (#26d)" \
+    || _v_fail "feeder hook does not invoke a standalone matugen (json/--config) — the bridge would be inert (#26d)"
+  # it must read the FINISHED generated colors.json (read-only STATE), not a mid-write file.
+  grep -qE 'generated/colors\.json' <<<"$_tcf_code" \
+    && _v_ok "feeder reads the FINISHED generated/colors.json read-only (avoids the applycolor.sh race) (#26d)" \
+    || _v_warn "feeder hook does not obviously read generated/colors.json — confirm it reads the FINISHED colours (#26d)"
+else
+  _v_fail "feeder hook not baked (skel-distro/.config/hypr/custom/scripts/ii-theme-feeder.sh) (#26d)"
+fi
+# the distro matugen feeder config must NOT live under a matugen path (it is
+# STANDALONE in the unowned theming namespace) — reuse the THEME-01b guard shape.
+if find "$OVERLAY" -type f -path '*illogical-impulse-theming/config.toml' | grep -q .; then
+  _v_ok "feeder matugen config lives in the unowned illogical-impulse-theming namespace (not ~/.config/matugen) (#26d)"
+else
+  _v_warn "no illogical-impulse-theming/config.toml staged — the feeder templates won't render (#26d)"
+fi
+
+# (e) plymouth must be in NO baked package list (black-screen guard, CLAUDE.md §6).
+_tc_ply=0
+for _pl in "$PACKAGES/base.list" "$PACKAGES/goodies.list" "$PACKAGES/installer.list" "$PACKAGES/nvidia.list"; do
+  [[ -f "$_pl" ]] || continue
+  if grep -Ev '^\s*#' "$_pl" 2>/dev/null | grep -Eq '^\s*plymouth\s*$'; then
+    _v_fail "'plymouth' baked in $(basename "$_pl") — Plymouth is OPT-IN ONLY (black-screen risk, CLAUDE.md §6); install it via 'iictl theme plymouth enable' (#26e)"
+    _tc_ply=$((_tc_ply+1))
+  fi
+done
+# and it must not have crept into the built packages.x86_64.
+if grep -Eq '^\s*plymouth\s*$' "$PKGLIST"; then
+  _v_fail "'plymouth' crept into packages.x86_64 — it must NEVER be baked (#26e)"
+  _tc_ply=$((_tc_ply+1))
+fi
+(( _tc_ply == 0 )) && _v_ok "plymouth is in NO baked package list (opt-in only via iictl theme plymouth) (#26e)"
+# the plymouth toggle must regenerate BOTH presets via ii-prepare-bootloader's
+# shared path (no duplicated HOOKS logic) and doctor must flag hook-without-regen.
+_TC_THEME="$AIROOTFS/usr/local/lib/ii/iictl.d/theme"
+if [[ -f "$_TC_THEME" ]]; then
+  _tct_code="$(grep -vE '^[[:space:]]*#' "$_TC_THEME")"
+  grep -qE 'ii_regen_both_presets|ii-prepare-bootloader' <<<"$_tct_code" \
+    && _v_ok "theme plymouth reuses ii-prepare-bootloader's both-preset regen (no duplicated HOOKS logic) (#26e)" \
+    || _v_fail "theme plymouth does not reuse ii-prepare-bootloader's both-preset path (#26e)"
+  grep -qE 'plymouth' <<<"$_tct_code" \
+    && _v_ok "theme plugin provides the plymouth toggle (#26e)" \
+    || _v_fail "theme plugin has no plymouth toggle (#26e)"
+fi
+# ii-prepare-bootloader must expose the reusable both-preset function (lib-only).
+_TC_BOOT="$AIROOTFS/usr/local/bin/ii-prepare-bootloader"
+if [[ -f "$_TC_BOOT" ]]; then
+  grep -qE 'ii_regen_both_presets' "$_TC_BOOT" \
+    && _v_ok "ii-prepare-bootloader exposes ii_regen_both_presets (single both-preset path) (#26e)" \
+    || _v_fail "ii-prepare-bootloader has no reusable ii_regen_both_presets — plymouth would duplicate the preset logic (#26e)"
+  grep -qE 'II_BOOTLOADER_LIB_ONLY' "$_TC_BOOT" \
+    && _v_ok "ii-prepare-bootloader is sourceable lib-only (II_BOOTLOADER_LIB_ONLY) without running the Calamares flow (#26e)" \
+    || _v_fail "ii-prepare-bootloader is not sourceable lib-only — plymouth cannot reuse it safely (#26e)"
+fi
+# revert-all must know the plymouth inverse (restore prior HOOKS + regen both).
+if [[ -f "$RA" ]]; then
+  _ra_code="$(grep -vE '^[[:space:]]*#' "$RA")"
+  grep -qE 'plymouth' <<<"$_ra_code" \
+    && _v_ok "revert-all knows the plymouth inverse (restore prior HOOKS + regen both presets) (#26e)" \
+    || _v_fail "revert-all has no plymouth inverse — 'iictl revert-all' can't undo a plymouth enable (#26e)"
 fi
 
 step "Quickshell widget framework (#20)"
@@ -1172,6 +1653,103 @@ for _sl in "$AIROOTFS/etc/skel/.config/hypr/custom/execs.lua" "$AIROOTFS/etc/ske
   fi
 done
 _v_ok "no widget fence baked into skel custom/*.lua (framework is dormant until 'iictl widget enable')"
+
+step "iictl pkg software manager + Packages pane (#30)"
+# The one-click software manager (#30): the `iictl pkg` engine (the source of
+# truth) + a standalone Packages pane. Bug-classes guarded here:
+#   (a) the pane must import NOTHING from upstream's quickshell/ii tree — it is a
+#       standalone qs -p surface (the welcome-card seam), so it loads on its own
+#       before the #14 registry lands and never couples to the rice.
+#   (b) the protected-set guard must EXIST in the engine — a one-click remove that
+#       could uninstall a boot/login/graphics-critical package (hyprland, the
+#       kernels, greetd, mesa, the NVIDIA driver, iictl…) would brick the box.
+#   (c) LEDGER BOUNDARY: user `iictl pkg` ops are the USER'S OWN packages and must
+#       NOT be written to the distro revert ledger — `iictl revert-all` restores
+#       the vanilla DISTRO and must never uninstall an app the user chose. So the
+#       engine must NEVER call ledger_record (contrast pack/webapp, which do).
+_PKG_PLUGIN="$AIROOTFS/usr/local/lib/ii/iictl.d/pkg"
+_PKG_PANE="$AIROOTFS/usr/share/illogical-impulse/control/panes/Packages.qml"
+if [[ ! -f "$_PKG_PLUGIN" ]]; then
+  _v_fail "iictl.d/pkg not staged (#30) — the software-manager engine is missing"
+else
+  # exec/shebang/bash -n/#help are asserted generically in the plugin-arch step;
+  # here we assert the #30-SPECIFIC contract. Comments stripped so this section's
+  # prose (and the plugin's own header) can't satisfy/trip a grep.
+  _pkg_code="$(grep -vE '^[[:space:]]*#' "$_PKG_PLUGIN")"
+  # (b) protected-set guard: a named allow-list + the --force-system gate + an
+  #     _is_protected check used by remove. All three must be present.
+  _pkg_guard_ok=1
+  grep -q '_is_protected' <<<"$_pkg_code" \
+    || { _v_fail "iictl.d/pkg has no _is_protected check — the protected-set guard is missing (#30)"; _pkg_guard_ok=0; }
+  grep -q -- '--force-system' <<<"$_pkg_code" \
+    || { _v_fail "iictl.d/pkg has no --force-system gate — protected packages could be removed silently (#30)"; _pkg_guard_ok=0; }
+  # the allow-list must literally name the boot/login/graphics-critical packages.
+  for _crit in hyprland greetd mesa; do
+    grep -qw "$_crit" <<<"$_pkg_code" \
+      || { _v_fail "iictl.d/pkg protected set does not name '$_crit' — a one-click remove could brick the box (#30)"; _pkg_guard_ok=0; }
+  done
+  # the NVIDIA driver must be protected too (dynamically, so no false hit on a
+  # nouveau box) — assert the engine consults pacman -Q for an nvidia variant.
+  grep -qE 'nvidia' <<<"$_pkg_code" \
+    || { _v_fail "iictl.d/pkg protected set never considers the NVIDIA driver — its removal must be blocked too (#30)"; _pkg_guard_ok=0; }
+  (( _pkg_guard_ok )) && _v_ok "iictl.d/pkg protected-set guard present (_is_protected + --force-system + names hyprland/greetd/mesa/nvidia) — can't one-click-brick the box (#30)"
+  # (c) THE LEDGER BOUNDARY: the engine must NEVER call ledger_record. User package
+  #     choices are theirs; revert-all must not touch them. (The plugin may write
+  #     its OWN separate history log — that is not ledger_record.)
+  if grep -qw 'ledger_record' <<<"$_pkg_code"; then
+    _v_fail "iictl.d/pkg calls ledger_record — user package ops must NOT enter the distro revert ledger (revert-all would uninstall the user's own apps) (#30)"
+  else
+    _v_ok "iictl.d/pkg never calls ledger_record — user package ops stay out of the revert ledger (revert-all leaves them alone) (#30)"
+  fi
+  # every subcommand the issue names must be dispatched (search/info/install/
+  # remove/list/clean) — a dropped verb would silently shrink the surface.
+  _pkg_verb_miss=0
+  for _verb in search info install remove list clean; do
+    grep -qE "^[[:space:]]*$_verb[|)]|^[[:space:]]*$_verb\)" "$_PKG_PLUGIN" \
+      || grep -qE "cmd_$_verb" <<<"$_pkg_code" \
+      || { _v_fail "iictl.d/pkg does not dispatch the '$_verb' subcommand (#30)"; _pkg_verb_miss=$((_pkg_verb_miss+1)); }
+  done
+  (( _pkg_verb_miss == 0 )) && _v_ok "iictl.d/pkg dispatches search/info/install/remove/list/clean (#30)"
+  # AUR ops must presence-check paru (official-repo ops work without it, AUR
+  # degrades with a clear message) — mirror the pack engine's contract.
+  grep -qE '_have_paru|command -v paru' <<<"$_pkg_code" \
+    && _v_ok "iictl.d/pkg presence-checks paru (official ops work without it; AUR degrades) (#30)" \
+    || _v_fail "iictl.d/pkg never presence-checks paru — AUR ops must degrade gracefully when paru is absent (#30)"
+fi
+# The Packages pane — standalone (zero quickshell/ii imports), themed via a
+# colors.json read (not a hardcoded-only palette), and containing NO package
+# logic (it only shells out to `iictl pkg … --json`).
+if [[ ! -f "$_PKG_PANE" ]]; then
+  _v_fail "control/panes/Packages.qml not staged (#30) — the GUI pane is missing"
+else
+  # (a) NO import from upstream's quickshell/ii tree (the standalone seam). Same
+  #     grep as the widget standalone guard.
+  if grep -Eq 'import[[:space:]]+(qs\.|"[^"]*quickshell/ii)' "$_PKG_PANE"; then
+    _v_fail "Packages.qml imports upstream's quickshell/ii tree — the pane must be standalone (zero qs.* imports) so it loads on its own (#30/#14)"
+  else
+    _v_ok "Packages.qml is standalone (no upstream quickshell/ii import) — qs -p-loadable before #14 lands (#30)"
+  fi
+  # It must actually drive the CLI engine (renders `iictl pkg … --json`), never
+  # re-implement package logic in QML (no direct pacman/paru calls in the pane).
+  grep -q 'iictl' "$_PKG_PANE" && grep -q 'pkg' "$_PKG_PANE" \
+    && _v_ok "Packages.qml drives the CLI engine (shells out to iictl pkg) — no package logic in QML (#30)" \
+    || _v_fail "Packages.qml does not shell out to 'iictl pkg' — the CLI engine is the single source of truth (#30)"
+  if grep -qE '\["(pacman|paru)"|command:[[:space:]]*\[?"?(pacman|paru)' "$_PKG_PANE"; then
+    _v_fail "Packages.qml runs pacman/paru directly — all package logic lives in the iictl pkg engine, the pane only calls it (#30)"
+  else
+    _v_ok "Packages.qml never runs pacman/paru directly (engine-only; the pane is a thin front end) (#30)"
+  fi
+  # It reads the generated colors.json (re-themes with the wallpaper) with a
+  # static fallback, and NEVER writes that upstream-owned STATE file (READ-ONLY).
+  grep -q 'generated/colors.json' "$_PKG_PANE" \
+    && _v_ok "Packages.qml reads the generated colors.json (re-themes with the wallpaper; static fallback) (#30)" \
+    || _v_fail "Packages.qml does not reference generated/colors.json — the pane won't re-theme (#30)"
+  if grep -Eq 'writeAdapter|\.write\(|setText|FileViewWriteAdapter' "$_PKG_PANE"; then
+    _v_fail "Packages.qml appears to WRITE the colours STATE file — it is upstream-owned, READ-ONLY (#30)"
+  else
+    _v_ok "Packages.qml only READS colors.json (no write path — upstream STATE stays read-only) (#30)"
+  fi
+fi
 
 step "reversibility round-trip e2e test (TEST-02)"
 # The static checks above assert the reversibility STRUCTURE; the e2e test

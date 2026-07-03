@@ -1,0 +1,21 @@
+# ~/.fizsh/.fizshrc — Illogical Impulse Material You theming for fizsh.
+#
+# fizsh (a friendly interactive zsh, AUR) sources ~/.fizsh/.fizshrc for user
+# customization. It already bundles syntax-highlighting + autosuggestions, so
+# this template only adds the rice theming: the upstream-generated Material You
+# terminal sequences (READ-ONLY, EXACT generated/terminal/sequences.txt path)
+# and the starship prompt. Copied by `iictl shell set fizsh` into the UNOWNED
+# ~/.fizsh/.fizshrc if absent — fully reversible (delete it → fizsh's stock
+# behaviour). Contains no identity/PII, writes no upstream-owned path.
+
+# ── Material You palette (READ-ONLY generated sequences) ──────────────────────
+_ii_seq="${XDG_STATE_HOME:-$HOME/.local/state}/quickshell/user/generated/terminal/sequences.txt"
+[[ -f "$_ii_seq" ]] && cat "$_ii_seq"
+unset _ii_seq
+
+# ── Prompt ────────────────────────────────────────────────────────────────────
+command -v starship >/dev/null 2>&1 && eval "$(starship init zsh)"
+
+# ── zoxide / direnv (guarded) ─────────────────────────────────────────────────
+command -v zoxide >/dev/null 2>&1 && eval "$(zoxide init zsh)"
+command -v direnv >/dev/null 2>&1 && eval "$(direnv hook zsh)"

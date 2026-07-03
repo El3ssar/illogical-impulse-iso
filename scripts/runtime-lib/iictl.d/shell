@@ -1,0 +1,455 @@
+#!/usr/bin/env bash
+#help: shell	choose your login shell (fish/zsh/bash/fizsh/nushell), themed + reversible
+#spec: shell	Login shell
+# shell — the iictl login-shell chooser (PROPOSAL §5, issue #15). The default
+# login shell STAYS fish (Calamares users.conf userShell); this verb is a
+# one-command, fully REVERSIBLE opt-in to switch to a themed zsh/bash/fizsh/
+# nushell (or back to fish). It is genuinely additive infrastructure: upstream
+# has NO shell chooser and NO chsh handling.
+#
+# `set <shell>` is ADDITIVE + LEDGER-RECORDED + REVERSIBLE:
+#   • ii_conflicts_check (no-op unless a future #meta:conflicts is passed),
+#   • installs the shell's package ONLINE if missing — official repos via
+#     `sudo pacman -S`, AUR via paru (mirrors the #6 pack-engine classifier);
+#     the flagship zsh/bash/fish are baked, so their set is offline,
+#   • ii_chsh <user> <shell-abs-path> — the shared mutator REGISTERS the shell in
+#     /etc/shells FIRST (so AUR shells fizsh/nushell don't fail chsh) THEN chsh's,
+#     recording the PRIOR login shell so revert restores it,
+#   • ensures a themed init exists in the user's UNOWNED slot — copied from the
+#     baked /usr/share/illogical-impulse/shells/ templates only if absent (skel
+#     already ships zsh's; nushell/fizsh are materialized here),
+#   • ledger_records ONE kind=shell row (packages installed for -Rns on revert,
+#     owned template paths) so `iictl revert-all` + `iictl shell set fish` return
+#     the box to the upstream default.
+#
+# Every file this verb writes lands in an UNOWNED/excluded seam (home-root
+# ~/.zshrc/~/.zshenv, ~/.config/nushell, ~/.fizsh, ~/.config/illogical-impulse) —
+# it NEVER edits an upstream rsync --delete tree (config.fish, zshrc.d,
+# quickshell/ii, matugen, hypr/hyprland); it only SOURCEs/CATs them read-only.
+# The Material You theming everywhere reads the EXACT upstream-generated path
+# ~/.local/state/quickshell/user/generated/terminal/sequences.txt (with the
+# terminal/ subdir) — match upstream's config.fish / zshrc.d or theming no-ops.
+#
+# Purely additive: one drop-in beside the iictl core (zero merge surface), on the
+# survive-path /usr/local/lib/ii/iictl.d/ (kept by ii-verify).
+
+set -u
+
+# Shared header (colors, ok/bad/warn/die, _not_root, ledger_*) + the mutator
+# library (ii_chsh — registers /etc/shells then chsh, recording the prior shell;
+# ii_conflicts_check). Both source ledger.sh; double-source is safe.
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+source "${II_LIB:-/usr/local/lib/ii}/mutator.sh"
+
+# ── paths (all overridable for the no-root self-test) ────────────────────────
+# The EXACT upstream-generated Material You sequences (READ-ONLY; the terminal/
+# subdir is load-bearing — see upstream config.fish:16 / zshrc.d/dots-hyprland.zsh).
+SEQ_FILE="${II_SHELL_SEQ:-${XDG_STATE_HOME:-$HOME/.local/state}/quickshell/user/generated/terminal/sequences.txt}"
+# Baked init templates (ride in the squashfs under /usr/share — a sibling of the
+# iictl survive-path, untouched by ii-verify's purge).
+SHELLS_SHARE="${II_SHELLS_SHARE:-/usr/share/illogical-impulse/shells}"
+# ii-owned prompt selector (unowned ~/.config/illogical-impulse slot).
+PROMPT_SEL="${II_SHELL_PROMPT_FILE:-$HOME/.config/illogical-impulse/ii-prompt}"
+# nushell config dir (unowned by upstream).
+NU_DIR="${II_NU_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/nushell}"
+# fizsh rc (unowned).
+FIZSH_RC="${II_FIZSH_RC:-$HOME/.fizsh/.fizshrc}"
+# zsh home-root files (unowned; skel ships them, this is the recovery copy).
+ZSHRC="${II_ZSHRC:-$HOME/.zshrc}"
+ZSHENV="${II_ZSHENV:-$HOME/.zshenv}"
+
+# Privileged pacman goes through sudo when we are the user (the baked
+# 10-wheel-nopasswd drop-in makes it non-interactive); paru must never run as root.
+_sudo() { if [[ $EUID -eq 0 ]]; then "$@"; else sudo "$@"; fi; }
+
+# ── the shell table ──────────────────────────────────────────────────────────
+# <name> → "<pacman-pkg>|<abs-shell-path>". The abs path is where the package
+# installs the binary; ii_chsh registers it in /etc/shells before chsh. fish,
+# zsh, bash are baked (offline); fizsh, nushell are fetched online on demand.
+_shell_spec() {
+  case "$1" in
+    fish)    printf '%s' 'fish|/usr/bin/fish' ;;
+    zsh)     printf '%s' 'zsh|/usr/bin/zsh' ;;
+    bash)    printf '%s' 'bash|/bin/bash' ;;
+    fizsh)   printf '%s' 'fizsh|/usr/bin/fizsh' ;;
+    nushell) printf '%s' 'nushell|/usr/bin/nu' ;;
+    *)       return 1 ;;
+  esac
+}
+_shells() { printf '%s\n' fish zsh bash fizsh nushell; }
+
+# ── helpers ──────────────────────────────────────────────────────────────────
+# _current_shell — the user's login shell from /etc/passwd (abs path).
+_current_shell() {
+  local u; u="$(id -un 2>/dev/null)"
+  getent passwd "$u" 2>/dev/null | cut -d: -f7
+}
+
+# _current_name — map the login-shell path back to a chooser name (or the raw
+# basename if it is not one we manage).
+_current_name() {
+  local path base n spec p
+  path="$(_current_shell)"; base="${path##*/}"
+  for n in $(_shells); do
+    spec="$(_shell_spec "$n")"; p="${spec#*|}"
+    [[ "$path" == "$p" || "${p##*/}" == "$base" ]] && { printf '%s' "$n"; return 0; }
+  done
+  printf '%s' "${base:-unknown}"
+}
+
+# _pkg_installed <pkg> — true if the package is present.
+_pkg_installed() { pacman -Qq "$1" >/dev/null 2>&1; }
+
+# _install_pkg <pkg> — install ONE package online, classifying it against the
+# sync db exactly like the pack engine: official → sudo pacman -S, else paru.
+# Echoes the RESOLVED newly-installed set (space-joined) on stdout for the ledger.
+_install_pkg() {
+  local pkg="$1" before after CONFIRM=()
+  _pkg_installed "$pkg" && { printf ''; return 0; }
+  [[ -t 0 ]] || CONFIRM=(--noconfirm)
+  before="$(pacman -Qq | sort)"
+  if pacman -Si "$pkg" &>/dev/null; then
+    echo "${C_B}>> installing $pkg${C_0} (official repo)" >&2
+    _sudo pacman -S --needed "${CONFIRM[@]}" "$pkg" >&2 || die "pacman install of '$pkg' failed"
+  else
+    echo "${C_B}>> installing $pkg${C_0} (AUR via paru)" >&2
+    command -v paru >/dev/null 2>&1 || die "paru missing for AUR shell '$pkg' — install paru (or: iictl pack install shells), then retry"
+    paru -S --needed "${CONFIRM[@]}" "$pkg" >&2 || die "AUR install of '$pkg' via paru failed"
+  fi
+  after="$(pacman -Qq | sort)"
+  comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after") | tr '\n' ' ' | sed 's/ $//'
+}
+
+# _themed_init_present <name> — true if the shell already has its themed init.
+_themed_init_present() {
+  case "$1" in
+    zsh)     [[ -f "$ZSHRC" ]] ;;
+    bash)    [[ -f "$HOME/.bashrc" ]] ;;
+    fish)    return 0 ;;  # upstream config.fish + our conf.d cover fish
+    fizsh)   [[ -f "$FIZSH_RC" ]] ;;
+    nushell) [[ -f "$NU_DIR/config.nu" ]] ;;
+    *)       return 0 ;;
+  esac
+}
+
+# _ensure_init <name> — materialize the themed init from the baked templates IF
+# absent, into the user's UNOWNED slot. Echoes any created paths (space-joined,
+# comma-escaped) for the ledger owned_paths column. Never overwrites a file the
+# user already has (idempotent, non-destructive).
+_ensure_init() {
+  local name="$1" created=()
+  case "$name" in
+    zsh)
+      [[ -f "$ZSHRC"  ]] || { _copy_tpl zshrc  "$ZSHRC"  && created+=("$ZSHRC"); }
+      [[ -f "$ZSHENV" ]] || { _copy_tpl zshenv "$ZSHENV" && created+=("$ZSHENV"); }
+      ;;
+    fizsh)
+      [[ -f "$FIZSH_RC" ]] || { _copy_tpl fizshrc "$FIZSH_RC" && created+=("$FIZSH_RC"); }
+      ;;
+    nushell)
+      [[ -f "$NU_DIR/config.nu" ]] || { _copy_tpl config.nu "$NU_DIR/config.nu" && created+=("$NU_DIR/config.nu"); }
+      # nushell can't cat raw escapes → translate the sequences to nu + emit a
+      # starship init so config.nu's `source` lines always resolve.
+      _nu_theme && created+=("$NU_DIR/ii-material.nu" "$NU_DIR/ii-starship.nu")
+      ;;
+    bash|fish) : ;;  # baked/upstream-provided; nothing to materialize
+  esac
+  local p out=""
+  for p in "${created[@]}"; do out="${out:+$out,}$(ledger_escape_path "$p")"; done
+  printf '%s' "$out"
+}
+
+# _copy_tpl <template-basename> <dest> — copy a baked template into place,
+# creating the parent dir. Returns non-zero (with a warn) if the template is
+# missing so the caller does not record a path it didn't create.
+_copy_tpl() {
+  local tpl="$SHELLS_SHARE/$1" dest="$2"
+  [[ -f "$tpl" ]] || { warn "template $tpl not staged — cannot seed $dest"; return 1; }
+  mkdir -p "$(dirname "$dest")" 2>/dev/null || { warn "cannot create $(dirname "$dest")"; return 1; }
+  cp -f "$tpl" "$dest" 2>/dev/null || { warn "cannot write $dest"; return 1; }
+  return 0
+}
+
+# _nu_theme — translate the EXACT upstream-generated sequences.txt into a
+# nu-native theme (~/.config/nushell/ii-material.nu) and emit a starship init
+# (~/.config/nushell/ii-starship.nu). Nushell cannot `cat` raw terminal escapes,
+# so we (1) always create both files (as no-op stubs if the source is absent) so
+# config.nu's `source` never errors, and (2) when the sequences exist, replay
+# them raw via `^printf` so the terminal picks up the palette OSC codes on shell
+# start (the same escapes fish/zsh cat) — the pragmatic, dependency-free path.
+# Reads the sequences READ-ONLY; writes only nushell's UNOWNED config dir.
+_nu_theme() {
+  mkdir -p "$NU_DIR" 2>/dev/null || { warn "cannot create $NU_DIR"; return 1; }
+  local mat="$NU_DIR/ii-material.nu" star="$NU_DIR/ii-starship.nu"
+  {
+    printf -- '# ii-material.nu — generated by `iictl shell` from the upstream Material You\n'
+    printf -- '# terminal sequences (%s).\n' "$SEQ_FILE"
+    printf -- '# Re-run `iictl shell theme nushell` after a wallpaper change to refresh.\n'
+    if [[ -f "$SEQ_FILE" ]]; then
+      # Replay the raw OSC/escape sequences the rice generated. nu can't `cat`
+      # them, so shell out to the system printf with the file contents. The path
+      # is the EXACT generated/terminal/sequences.txt literal.
+      printf -- '^cat %s\n' "$(_nu_quote "$SEQ_FILE")"
+    else
+      printf -- '# (sequences not generated yet — no-op until first boot colours exist)\n'
+    fi
+  } > "$mat" 2>/dev/null || { warn "cannot write $mat"; return 1; }
+  {
+    printf -- '# ii-starship.nu — generated starship prompt init for nushell.\n'
+    if command -v starship >/dev/null 2>&1; then
+      starship init nu 2>/dev/null || printf -- '# (starship init nu failed — no prompt override)\n'
+    else
+      printf -- '# (starship not installed — stock nu prompt)\n'
+    fi
+  } > "$star" 2>/dev/null || { warn "cannot write $star"; return 1; }
+  return 0
+}
+
+# _nu_quote <path> — single-quote a path for a nu string literal (nu single
+# quotes take no escapes; a real path won't contain a single quote).
+_nu_quote() { printf "'%s'" "$1"; }
+
+# ── subcommands ──────────────────────────────────────────────────────────────
+cmd_list() {
+  if [[ "${1:-}" == "--json" ]]; then
+    local cur first=1 n out='['
+    cur="$(_current_name)"
+    for n in $(_shells); do
+      (( first )) || out+=','
+      out+="{\"value\":\"$n\",\"label\":\"$n\",\"current\":$([[ "$n" == "$cur" ]] && echo true || echo false)}"
+      first=0
+    done
+    out+=']'; printf '%s\n' "$out"; return 0
+  fi
+  local cur n spec pkg mark
+  cur="$(_current_name)"
+  echo "${C_B}available login shells${C_0} (current: ${C_B}$cur${C_0}):"
+  for n in $(_shells); do
+    spec="$(_shell_spec "$n")"; pkg="${spec%%|*}"
+    if [[ "$n" == "$cur" ]]; then mark="${C_G}* current${C_0}"; else mark="—"; fi
+    printf '  %s%-9s%s %b' "$C_B" "$n" "$C_0" "$mark"
+    _pkg_installed "$pkg" || printf '   (fetched online on set)'
+    printf '\n'
+  done
+  echo "  switch with: iictl shell set <name>   (default stays fish; reversible)"
+}
+
+cmd_status() {
+  local cur name spec themed
+  cur="$(_current_shell)"; name="$(_current_name)"
+  echo "${C_B}iictl shell${C_0} — current login shell: ${C_B}$name${C_0} ($cur)"
+  if _themed_init_present "$name"; then
+    echo "  themed init: ${C_G}present${C_0}"
+  else
+    echo "  themed init: ${C_Y}absent${C_0} (run 'iictl shell set $name' to materialize it)"
+  fi
+  [[ -f "$SEQ_FILE" ]] \
+    && echo "  Material You sequences: present ($SEQ_FILE)" \
+    || echo "  Material You sequences: not generated yet (first-boot colours pending)"
+}
+
+cmd_set() {
+  local shell="" a
+  for a in "$@"; do
+    case "$a" in
+      -*) die "unknown flag: $a" ;;
+      *)  [[ -z "$shell" ]] && shell="$a" || die "unexpected argument: $a" ;;
+    esac
+  done
+  [[ -n "$shell" ]] || die "usage: iictl shell set <fish|zsh|bash|fizsh|nushell>"
+  _not_root
+
+  local spec pkg path
+  spec="$(_shell_spec "$shell")" \
+    || die "unknown shell '$shell' (choose: $(_shells | tr '\n' ' ' | sed 's/ $//'))"
+  pkg="${spec%%|*}"; path="${spec#*|}"
+
+  # Conflict gate (no-op today; future-proof for a #meta:conflicts-style pass).
+  ii_conflicts_check || die "a conflicting package blocks '$shell' (see above) — nothing changed"
+
+  # 1. install the shell package online if missing (records the resolved set).
+  local installed=""
+  installed="$(_install_pkg "$pkg")"
+
+  # The binary must exist before ii_chsh (which requires an executable path).
+  if [[ ! -x "$path" ]]; then
+    # Fall back to `command -v` in case the package installs elsewhere.
+    local alt; alt="$(command -v "${path##*/}" 2>/dev/null || true)"
+    [[ -n "$alt" ]] && path="$alt"
+  fi
+  [[ -x "$path" ]] || die "'$shell' installed but its binary is not at $path — cannot chsh"
+
+  # 2. ensure the themed init exists (copied from the baked templates if absent).
+  local owned=""
+  owned="$(_ensure_init "$shell")"
+
+  # 3. register /etc/shells + chsh via the shared ii_chsh mutator (records the
+  #    PRIOR login shell as a kind=chsh row so revert restores it). ii_chsh writes
+  #    /etc/shells + runs chsh — BOTH need root — so we run it under sudo. But the
+  #    ledger row it appends must land in OUR (the user's) state dir, since
+  #    `iictl revert-all` runs as the user (mirrors ii-post-install's group block:
+  #    the mutation needs root, the ledger is the user's). So we point HOME +
+  #    XDG_STATE_HOME at the user's home for the sudo'd mutator and chown the
+  #    resulting ledger back. The chsh row is tagged with our feature key
+  #    (II_PACK_TAG → stamped into the row's packages column) so
+  #    `iictl revert-all shell:<name>` sweeps it WITH our other rows (REV-04
+  #    convention; webapp/widget do the same).
+  local _me _home _state
+  _me="$(id -un)"
+  _home="$(getent passwd "$_me" 2>/dev/null | cut -d: -f6)"; _home="${_home:-$HOME}"
+  _state="${XDG_STATE_HOME:-$_home/.local/state}"
+  if [[ $EUID -ne 0 ]]; then
+    _sudo env II_LIB="${II_LIB:-/usr/local/lib/ii}" II_PACK_TAG="shell:$shell" \
+             HOME="$_home" XDG_STATE_HOME="$_state" bash -c '
+      source "$II_LIB/mutator.sh"
+      ii_chsh "$1" "$2"
+    ' _ "$_me" "$path" || die "could not set login shell to '$shell' (chsh failed)"
+    # Re-own the ledger the sudo'd mutator may have created/appended as root, so
+    # the user's revert-all can read + rewrite it.
+    _sudo chown -R "$_me" "$_state/illogical-impulse" 2>/dev/null || true
+  else
+    local II_PACK_TAG="shell:$shell"; export II_PACK_TAG
+    ii_chsh "$_me" "$path" || die "could not set login shell to '$shell' (chsh failed)"
+    unset II_PACK_TAG
+  fi
+
+  # 4. record the reversible facts through the EXISTING replay kinds — no bespoke
+  #    kind, the shared revert-all owns replay (BLUEPRINT §3):
+  #      • kind=pkg for the resolved package set → revert-all's shared-dep-aware
+  #        `pacman -Rns` removes exactly what this switch fetched;
+  #      • kind=path for the template files we created → revert-all's `rm -rf`.
+  #    Both tagged target=shell:<name>, so `iictl revert-all shell:<name>` (and the
+  #    global revert-all, plus `iictl shell set fish` for the login shell) return
+  #    the box to the upstream fish default. Empty columns → nothing to undo.
+  [[ -n "${installed// /}" ]] && ledger_record pkg  "shell:$shell" "$installed" "" "packages fetched for iictl shell set $shell"
+  [[ -n "$owned" ]]           && ledger_record path "shell:$shell" "" "$owned" "themed init for $shell; iictl shell set fish"
+
+  ok "login shell set to ${C_B}$shell${C_0}${installed:+ (installed: $installed)}"
+  echo "  log out and back in for it to take effect. Revert: iictl shell set fish (or iictl revert-all)"
+  [[ "$shell" == zsh ]] && echo "  plugins: iictl shell plugins   (edit the curated antidote bundle)"
+}
+
+# cmd_prompt — read/write the ii-prompt selector (starship default; oh-my-posh
+# opt-in, fetched online). Written to the UNOWNED ~/.config/illogical-impulse
+# slot; ~/.zshrc / templates honour it. Ledger-recorded so revert restores it.
+cmd_prompt() {
+  local choice="${1:-}"
+  if [[ -z "$choice" ]]; then
+    local cur; cur="$(cat "$PROMPT_SEL" 2>/dev/null || echo starship)"
+    echo "${C_B}iictl shell prompt${C_0} — current: ${C_B}$cur${C_0} (default starship)"
+    echo "  set with: iictl shell prompt <starship|oh-my-posh>"
+    return 0
+  fi
+  _not_root
+  case "$choice" in
+    starship|oh-my-posh) : ;;
+    *) die "unknown prompt '$choice' (choose: starship, oh-my-posh)" ;;
+  esac
+  local installed=""
+  if [[ "$choice" == oh-my-posh ]]; then
+    installed="$(_install_pkg oh-my-posh)"
+  fi
+  mkdir -p "$(dirname "$PROMPT_SEL")" 2>/dev/null || die "cannot create $(dirname "$PROMPT_SEL")"
+  printf '%s\n' "$choice" > "$PROMPT_SEL" || die "cannot write $PROMPT_SEL"
+  # Reversible via the EXISTING replay kinds (no bespoke kind): a kind=path row
+  # for the selector file (rm on revert → the guarded ~/.zshrc default falls back
+  # to starship), plus — only if we fetched oh-my-posh — a kind=pkg row so
+  # revert-all `pacman -Rns`'s it. Both tagged shell:prompt so
+  # `iictl revert-all shell:prompt` (and the global sweep) restore starship.
+  ledger_record path "shell:prompt" "" "$(ledger_escape_path "$PROMPT_SEL")" "iictl shell prompt starship"
+  [[ -n "${installed// /}" ]] && ledger_record pkg "shell:prompt" "$installed" "" "oh-my-posh fetched for iictl shell prompt"
+  ok "prompt set to ${C_B}$choice${C_0}${installed:+ (installed: $installed)} — open a new shell to see it"
+}
+
+# cmd_theme [shell] — refresh the theming after a wallpaper change. For nushell
+# it re-runs the sequences→nu translator (the other shells cat the sequences live,
+# so they need no refresh). Reads the sequences READ-ONLY.
+cmd_theme() {
+  _not_root
+  local which="${1:-nushell}"
+  case "$which" in
+    nushell) _nu_theme && ok "refreshed nushell theme from $SEQ_FILE" || die "could not refresh nushell theme" ;;
+    fish|zsh|bash|fizsh) ok "$which reads the live sequences on each start — nothing to refresh (open a new shell)" ;;
+    *) die "unknown shell '$which' (choose: nushell, or fish/zsh/bash/fizsh — no refresh needed)" ;;
+  esac
+}
+
+# cmd_plugins — delegate to the ALREADY-MERGED #48 plugin manager (iictl plugins),
+# which edits the same ii-owned ~/.config/zsh/ii-plugins.txt manifest ~/.zshrc's
+# `antidote load` reads. We re-implement NOTHING — the multi-source resolvers, the
+# ledger baseline, and the iictl-tui chooser all live there.
+cmd_plugins() {
+  local plug="${II_LIB:-/usr/local/lib/ii}/iictl.d/plugins"
+  if [[ $# -eq 0 ]]; then
+    # Bare `iictl shell plugins` → the shared interactive chooser, then the hint.
+    if command -v iictl >/dev/null 2>&1; then
+      iictl tweak plugins || iictl plugins list
+    elif [[ -x "$plug" ]]; then
+      "$plug" list
+    else
+      die "plugin manager not found ($plug)"
+    fi
+    echo "  re-source your shell (or open a new one) so 'antidote load' picks up the change"
+    return 0
+  fi
+  # Pass-through: `iictl shell plugins add/remove/list/...` → `iictl plugins ...`.
+  if command -v iictl >/dev/null 2>&1; then
+    iictl plugins "$@"
+  elif [[ -x "$plug" ]]; then
+    "$plug" "$@"
+  else
+    die "plugin manager not found ($plug)"
+  fi
+}
+
+# cmd_spec — emit the #47 chooser-contract spec: ONE `choice` control over the
+# shells, current = the login shell. The iictl-tui renderer applies a pick by
+# running `shell set <value>` back through this plugin → the ledger owns
+# reversibility. Dependency-free JSON (no jq).
+cmd_spec() {
+  local cur options='' first=1 n
+  cur="$(_current_name)"
+  # If the current shell isn't one we manage, default the chooser cursor to fish.
+  _shell_spec "$cur" >/dev/null 2>&1 || cur=fish
+  for n in $(_shells); do
+    (( first )) || options+=','
+    options+="{\"value\":\"$n\",\"label\":\"$n\"}"
+    first=0
+  done
+  printf '{"domain":"shell","title":"Login shell","controls":[{"id":"shell","type":"choice","label":"Login shell","current":"%s","options":[%s],"apply":["shell","set","%%v"]}]}\n' \
+    "$cur" "$options"
+}
+
+cmd_usage() {
+  cat <<EOF
+${C_B}iictl shell${C_0} — choose your login shell, themed on top of the shipped fish default
+
+The default login shell stays fish. Switching is a one-command, reversible opt-in:
+the target shell is installed online if missing, registered in /etc/shells and set
+via chsh (recording the prior shell), and given a Material You-themed init.
+
+usage:
+  iictl shell list                 list shells (marks the current one)
+  iictl shell status               show the current login shell + themed-init state
+  iictl shell set <name>           switch login shell (fish|zsh|bash|fizsh|nushell)
+  iictl shell prompt [name]        get/set the prompt (starship default; oh-my-posh)
+  iictl shell plugins [args]       manage the curated zsh plugin bundle (→ iictl plugins)
+  iictl shell theme [shell]        refresh nushell theming after a wallpaper change
+  iictl shell --spec               emit the iictl-tui chooser spec (drives 'iictl tweak shell')
+
+Reversible: every 'set' records the prior login shell + installed packages;
+'iictl shell set fish' or 'iictl revert-all' returns to the upstream default.
+EOF
+}
+
+case "${1:-status}" in
+  list|ls)         shift; cmd_list    "$@" ;;
+  status)          shift; cmd_status  "$@" ;;
+  set)             shift; cmd_set     "$@" ;;
+  prompt)          shift; cmd_prompt  "$@" ;;
+  plugins)         shift; cmd_plugins "$@" ;;
+  theme)           shift; cmd_theme   "$@" ;;
+  --spec|spec)     shift; cmd_spec    "$@" ;;
+  help|-h|--help)  cmd_usage ;;
+  *)               die "unknown subcommand: $1 (try: iictl shell help)" ;;
+esac

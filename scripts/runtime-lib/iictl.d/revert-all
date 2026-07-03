@@ -253,6 +253,7 @@ _plan_line() {
                      else
                        printf 'leave wallpaper as-is (no prior recorded)'
                      fi ;;
+    plymouth)        printf 'restore prior mkinitcpio HOOKS (remove plymouth) + regen both presets' ;;
     path|file)       local _pp _pl="" _pq            # decode each owned token for display (REV-05)
                      IFS=',' read -ra _pq <<< "$F_owned"
                      for _pp in "${_pq[@]}"; do
@@ -367,6 +368,31 @@ _revert_row() {
       local sw="${II_SWITCHWALL:-$HOME/.config/quickshell/ii/scripts/colors/switchwall.sh}"
       [[ -x "$sw" ]] || { warn "theme-image: switchwall.sh not found — cannot restore wallpaper (left in place)"; return 1; }
       "$sw" --image "$F_hint" >/dev/null 2>&1 && return 0 || return 1
+      ;;
+    plymouth)           # iictl theme plymouth enable — the inverse restores the
+                        # RECORDED prior HOOKS line (removing the plymouth hook)
+                        # and regenerates BOTH initramfs presets via the SINGLE
+                        # both-preset path (ii-prepare-bootloader, sourced lib-only)
+                        # — the black-screen guard on disable too (#26 audit fix c).
+                        # F_hint is the prior HOOKS=(...) line. Privileged writes go
+                        # through sudo. Soft if mkinitcpio is gone (nothing to do).
+      command -v mkinitcpio >/dev/null 2>&1 || return 0
+      local conf="${II_MKINITCPIO_CONF:-/etc/mkinitcpio.conf}"
+      [[ -f "$conf" ]] || return 0
+      [[ -n "$F_hint" ]] || { warn "plymouth row missing prior HOOKS line — left in place"; return 1; }
+      # Restore the exact prior HOOKS line (idempotent if plymouth already gone).
+      _sudo sed -i "s|^HOOKS=(.*)|$F_hint|" "$conf" \
+        || { warn "plymouth: could not restore prior HOOKS in $conf — left in place"; return 1; }
+      # Regenerate BOTH presets through ii-prepare-bootloader's shared path.
+      local helper="${II_BOOTLOADER_HELPER:-/usr/local/bin/ii-prepare-bootloader}"
+      if [[ -r "$helper" ]]; then
+        _sudo env II_BOOTLOADER_LIB_ONLY=1 bash -c "source '$helper' && ii_regen_both_presets" \
+          && return 0 \
+          || { warn "plymouth: prior HOOKS restored but mkinitcpio -P failed — run: sudo mkinitcpio -P"; return 1; }
+      else
+        _sudo mkinitcpio -P >/dev/null 2>&1 && return 0 \
+          || { warn "plymouth: prior HOOKS restored but mkinitcpio -P failed — run: sudo mkinitcpio -P"; return 1; }
+      fi
       ;;
     path|file)
       # owned_paths is comma-joined of comma-ESCAPED tokens (ledger.sh) → split

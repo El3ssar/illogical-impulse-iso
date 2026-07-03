@@ -18,3 +18,20 @@ hl.on("hyprland.start", function()
     hl.exec_cmd("/usr/local/bin/iictl welcome --auto")
 end)
 -- <<< illogical-impulse welcome
+-- >>> illogical-impulse theme-feeder
+-- ── Illogical Impulse ISO addition — Material You FEEDER (#26) ────────────
+-- OPT-IN and DISABLED by default. The exec line below is COMMENTED so nothing
+-- runs until the user opts in with `iictl theme feeder enable`, which rewrites
+-- THIS fenced block (via the shared ii_lua_block_write mutator, ledger-recorded)
+-- to an ACTIVE exec that launches the debounced recolour hook. `iictl theme
+-- feeder disable` (or `iictl revert-all`) strips the fence again. This is a
+-- SEPARATE fence from the welcome block above; both strip cleanly to upstream's
+-- empty stub, so revert-all restores vanilla byte-for-byte.
+--
+-- The hook runs a STANDALONE matugen against upstream's FINISHED colours.json
+-- (read-only) + OUR separate config — it NEVER touches upstream's matugen
+-- config.toml or any rsync --delete tree.
+-- hl.on("hyprland.start", function()
+--     hl.exec_cmd("$HOME/.config/hypr/custom/scripts/ii-theme-feeder.sh --watch")
+-- end)
+-- <<< illogical-impulse theme-feeder

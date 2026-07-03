@@ -1,0 +1,526 @@
+#!/usr/bin/env bash
+#help: pkg	search/install/remove any official-repo + AUR package (one-click software manager)
+# pkg — the ad-hoc software manager (issue #30, PROPOSAL §7/§11/§12). The Swiss-
+# army-knife surface: search-as-you-type, package details, install, remove, an
+# installed/orphans/updates list, and orphan cleanup — over BOTH the official
+# repos (pacman) and the AUR (paru). It is the general layer that sits ALONGSIDE
+# the curated dev packs (`iictl pack`, #6/#19): packs install predefined bundles;
+# `pkg` installs whatever the user names.
+#
+# LEDGER BOUNDARY (critical — do NOT change this without re-reading the issue):
+#   User-initiated `iictl pkg install/remove` operations manage the USER'S OWN
+#   packages. They are DELIBERATELY *not* recorded in the distro revert ledger
+#   (ledger.sh). `iictl revert-all` restores the *vanilla distro* — it must NEVER
+#   uninstall an app the user chose. Contrast `iictl pack`/`iictl webapp`/the
+#   feature verbs, which DO ledger-record because those are distro-added state.
+#   This plugin therefore NEVER calls ledger_record. (It keeps its own optional,
+#   separate undo history under $XDG_STATE_HOME/illogical-impulse/pkg-history.log
+#   for convenience — that log is not the revert ledger and revert-all ignores it.)
+#
+# PROTECTED SET: a small ii-owned allow-list of boot/login/graphics-critical
+# packages (hyprland, quickshell, greetd, the kernels, pipewire, mesa, the active
+# NVIDIA driver, base, and iictl's own chain). `remove` REFUSES to touch any of
+# them without an explicit --force-system and a loud confirmation — the same
+# "don't brick the box" discipline as the NVIDIA-safety logic. This is the one
+# irreversible mistake the front end must prevent.
+#
+# Purely ADDITIVE: one drop-in beside the iictl core (zero merge surface); paired
+# with control/panes/Packages.qml (a standalone, deletable GUI). Deleting these
+# two files removes the feature with no upstream impact; the user's installed
+# packages are theirs to keep. It touches NO upstream-owned path.
+
+set -u
+
+# Shared header (colors, ok/bad/warn/die, _not_root, RELEASE_FILE). We source it
+# for the helpers ONLY — note we never call ledger_record (see the ledger-boundary
+# note above). It sources ledger.sh, harmlessly; we simply never write to it.
+source "${II_LIB:-/usr/local/lib/ii}/iictl-common.sh"
+
+# Privileged pacman ops go through sudo when we are the user (the baked
+# 10-wheel-nopasswd drop-in / polkit makes that non-interactive). paru and makepkg
+# must NEVER run as root, so AUR ops are invoked directly (no sudo). pkexec is
+# preferred for the GUI path when present and no controlling tty is available.
+_sudo() {
+  if [[ $EUID -eq 0 ]]; then "$@"; return; fi
+  if [[ ! -t 0 ]] && command -v pkexec >/dev/null 2>&1 && [[ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]]; then
+    pkexec "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+# Optional, SEPARATE undo history (NOT the revert ledger). Best-effort; never fatal.
+PKG_HISTORY="${II_PKG_HISTORY:-${XDG_STATE_HOME:-$HOME/.local/state}/illogical-impulse/pkg-history.log}"
+_history() {   # _history <action> <pkg...>
+  local action="$1"; shift || true
+  mkdir -p "$(dirname "$PKG_HISTORY")" 2>/dev/null || return 0
+  printf '%s\t%s\t%s\n' "$(date -u +%FT%TZ)" "$action" "$*" >> "$PKG_HISTORY" 2>/dev/null || true
+}
+
+# ── JSON helpers (dependency-free — no jq; mirrors the pack engine) ─────────────
+_json_escape() { local s="${1:-}"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\t'/ }"; s="${s//$'\n'/ }"; s="${s//$'\r'/ }"; printf '%s' "$s"; }
+
+# ── the protected set (the "don't brick the box" allow-list) ───────────────────
+# A small ii-owned list of packages whose removal would break boot, login, the
+# compositor, audio, graphics, or iictl itself. `remove` blocks any of these
+# without --force-system. The active NVIDIA driver (if installed) is added
+# dynamically so we never hardcode which of the three variants a machine runs.
+# Kept intentionally SHORT + literal (grep-able by validate.sh) — this is a
+# safety rail, not a dependency solver; pacman's own -Rns already refuses to
+# break a hard dependency, this just stops the obvious foot-gun.
+_protected_static() {
+  cat <<'EOF'
+base
+linux
+linux-lts
+linux-zen
+linux-hardened
+linux-firmware
+mkinitcpio
+systemd
+hyprland
+quickshell
+quickshell-git
+greetd
+pipewire
+pipewire-pulse
+wireplumber
+mesa
+sudo
+pacman
+polkit
+iictl
+EOF
+}
+
+# _protected — the static list plus any installed NVIDIA driver variant (added
+# only if actually present, so no false "protected" hit on a nouveau box).
+_protected() {
+  _protected_static
+  local nv
+  for nv in nvidia nvidia-open nvidia-open-dkms nvidia-dkms nvidia-580xx-dkms nvidia-utils; do
+    pacman -Qq "$nv" &>/dev/null && printf '%s\n' "$nv"
+  done
+}
+
+# _is_protected <pkg> — true if <pkg> is in the protected set.
+_is_protected() { _protected | grep -qxF -- "$1"; }
+
+# ── paru presence (bootstrap-or-degrade, mirrors the pack engine's contract) ───
+# Official-repo ops ALWAYS work via pacman. AUR ops require paru; if it is absent
+# we degrade with a clear message rather than failing hard. The GUI reads the
+# `--json` `aur:false` marker to grey out AUR results.
+_have_paru() { command -v paru >/dev/null 2>&1; }
+_require_paru() {   # for an operation that MUST have paru (an AUR install)
+  _have_paru && return 0
+  die "paru not found — AUR operations need it. Install with the pack engine (which bootstraps paru) or: sudo pacman -S --needed base-devel git && git clone https://aur.archlinux.org/paru.git && (cd paru && makepkg -si)"
+}
+
+# ── subcommands ────────────────────────────────────────────────────────────────
+
+# cmd_search <query> [--json] — official (pacman -Ss) + AUR (paru -Ss), merged,
+# de-duped by name (official wins on a tie), each row marked by source. The
+# non-JSON form prints a readable table; --json emits an array the pane renders.
+cmd_search() {
+  local json=0 query=""
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --json) json=1 ;;
+      -*) die "unknown flag: $a" ;;
+      *) [[ -z "$query" ]] && query="$a" || query="$query $a" ;;
+    esac
+  done
+  [[ -n "$query" ]] || die "usage: iictl pkg search <query> [--json]"
+
+  # Parse `pacman -Ss` two-line output into: name<TAB>version<TAB>repo<TAB>desc.
+  # Line 1: "repo/name version [extra]"  Line 2 (indented): the description.
+  _parse_ss() {   # <source-label> ; reads pacman/paru -Ss on stdin
+    local src="$1" line name ver repo desc
+    while IFS= read -r line; do
+      if [[ "$line" == [![:space:]]* ]]; then
+        # header line: repo/name version ...
+        repo="${line%%/*}"
+        local rest="${line#*/}"
+        name="${rest%% *}"
+        ver="${rest#"$name" }"; ver="${ver%% *}"
+        desc=""
+      elif [[ "$line" == [[:space:]]* && -n "${name:-}" ]]; then
+        desc="${line#"${line%%[![:space:]]*}"}"   # ltrim
+        printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$ver" "$repo" "$src" "$desc"
+        name=""   # consume; one desc per header
+      fi
+    done
+  }
+
+  local rows="" official aur
+  official="$(pacman -Ss -- "$query" 2>/dev/null | _parse_ss official || true)"
+  rows="$official"
+  if _have_paru; then
+    # paru -Ss --aur limits to the AUR (official already covered by pacman above).
+    aur="$(paru -Ss --aur -- "$query" 2>/dev/null | _parse_ss aur || true)"
+    [[ -n "$aur" ]] && rows="${rows:+$rows$'\n'}$aur"
+  fi
+
+  # De-dupe by package name — official beats AUR (sort keeps official's row first
+  # because we appended AUR after, and `sort -u -k1,1` after a stable prefix keeps
+  # first occurrence via awk instead, to avoid reordering surprises).
+  local deduped
+  deduped="$(printf '%s\n' "$rows" | awk -F'\t' 'NF>=4 && !seen[$1]++')"
+
+  if (( json )); then
+    local first=1 name ver repo src desc installed
+    printf '['
+    while IFS=$'\t' read -r name ver repo src desc; do
+      [[ -n "$name" ]] || continue
+      installed=false; pacman -Qq "$name" &>/dev/null && installed=true
+      (( first )) || printf ','
+      first=0
+      printf '{"name":"%s","version":"%s","repo":"%s","source":"%s","installed":%s,"protected":%s,"description":"%s"}' \
+        "$(_json_escape "$name")" "$(_json_escape "$ver")" "$(_json_escape "$repo")" \
+        "$(_json_escape "$src")" "$installed" \
+        "$(_is_protected "$name" && echo true || echo false)" \
+        "$(_json_escape "$desc")"
+    done <<< "$deduped"
+    printf ']\n'
+    _have_paru || printf '' >/dev/null   # (aur availability is per-row source; nothing else needed)
+    return 0
+  fi
+
+  if [[ -z "${deduped//[[:space:]]/}" ]]; then
+    echo "${C_B}iictl pkg${C_0}: no matches for '$query'"
+    _have_paru || warn "paru not installed — searched official repos only (AUR skipped)"
+    return 0
+  fi
+  local name ver repo src desc mark
+  while IFS=$'\t' read -r name ver repo src desc; do
+    [[ -n "$name" ]] || continue
+    mark=""; pacman -Qq "$name" &>/dev/null && mark=" ${C_G}[installed]${C_0}"
+    printf '  %s%-28s%s %s%s/%s%s %s%s\n' \
+      "$C_B" "$name" "$C_0" "$C_Y" "$repo" "$C_0" "$mark" "$ver" ""
+    [[ -n "$desc" ]] && printf '      %s\n' "$desc"
+  done <<< "$deduped"
+  _have_paru || echo "  ${C_Y}(paru not installed — AUR results omitted)${C_0}"
+}
+
+# cmd_info <pkg> [--json] — pacman -Si for a repo pkg, paru -Si for an AUR pkg.
+cmd_info() {
+  local json=0 pkg=""
+  local a
+  for a in "$@"; do
+    case "$a" in
+      --json) json=1 ;;
+      -*) die "unknown flag: $a" ;;
+      *) [[ -z "$pkg" ]] && pkg="$a" || die "usage: iictl pkg info <pkg> [--json]" ;;
+    esac
+  done
+  [[ -n "$pkg" ]] || die "usage: iictl pkg info <pkg> [--json]"
+
+  local raw="" source="repo"
+  if pacman -Si "$pkg" &>/dev/null; then
+    raw="$(pacman -Si "$pkg" 2>/dev/null)"; source="repo"
+  elif _have_paru && paru -Si "$pkg" &>/dev/null; then
+    raw="$(paru -Si "$pkg" 2>/dev/null)"; source="aur"
+  elif pacman -Qi "$pkg" &>/dev/null; then
+    raw="$(pacman -Qi "$pkg" 2>/dev/null)"; source="local"
+  else
+    if (( json )); then printf '{"found":false,"name":"%s"}\n' "$(_json_escape "$pkg")"; return 0; fi
+    die "no package '$pkg' in the repos or AUR (and it is not installed)"
+  fi
+
+  if (( json )); then
+    # Emit the useful "Field : value" pairs pacman prints as flat JSON. Field
+    # names are stable ASCII; we lowercase+underscore them. Dependency-free.
+    local field val
+    printf '{"found":true,"source":"%s"' "$(_json_escape "$source")"
+    printf ',"installed":%s' "$(pacman -Qq "$pkg" &>/dev/null && echo true || echo false)"
+    printf ',"protected":%s' "$(_is_protected "$pkg" && echo true || echo false)"
+    while IFS= read -r line; do
+      [[ "$line" == *:* ]] || continue
+      field="${line%%:*}"; val="${line#*:}"
+      field="${field%"${field##*[![:space:]]}"}"                # rtrim key
+      val="${val#"${val%%[![:space:]]*}"}"                      # ltrim value
+      [[ -n "$field" ]] || continue
+      field="$(printf '%s' "$field" | tr '[:upper:] ' '[:lower:]_')"
+      printf ',"%s":"%s"' "$(_json_escape "$field")" "$(_json_escape "$val")"
+    done <<< "$raw"
+    printf '}\n'
+    return 0
+  fi
+  printf '%s\n' "$raw"
+}
+
+# cmd_install <pkg...> — repo members via `pacman -S --needed`, AUR members via
+# `paru -S`. Classifies each name against the sync db at runtime (mirrors the pack
+# engine). Streams progress. NOT ledger-recorded (the user's own packages).
+cmd_install() {
+  local pkgs=() a
+  for a in "$@"; do
+    case "$a" in
+      --json) : ;;   # install streams to the terminal; --json is accepted + ignored
+      -*) die "unknown flag: $a" ;;
+      *) pkgs+=("$a") ;;
+    esac
+  done
+  (( ${#pkgs[@]} > 0 )) || die "usage: iictl pkg install <pkg> [pkg...]"
+  _not_root
+
+  local official=() aur=() p
+  for p in "${pkgs[@]}"; do
+    if pacman -Si "$p" &>/dev/null; then official+=("$p")
+    else aur+=("$p"); fi
+  done
+  (( ${#aur[@]} > 0 )) && _require_paru
+
+  # No controlling terminal (welcome-card / pane console) → non-interactive.
+  local CONFIRM=(); [[ -t 0 ]] || CONFIRM=(--noconfirm)
+
+  if (( ${#official[@]} > 0 )); then
+    echo "${C_B}>> installing (official)${C_0} ${official[*]}"
+    _sudo pacman -S --needed "${CONFIRM[@]}" "${official[@]}" \
+      || die "official-repo install failed for: ${official[*]}"
+  fi
+  if (( ${#aur[@]} > 0 )); then
+    echo "${C_B}>> installing (AUR)${C_0} ${aur[*]}"
+    paru -S --needed "${CONFIRM[@]}" "${aur[@]}" \
+      || die "AUR install via paru failed for: ${aur[*]}"
+  fi
+  _history install "${pkgs[*]}"
+  ok "installed: ${pkgs[*]}  (your own packages — not recorded in the distro revert ledger)"
+}
+
+# cmd_remove <pkg...> [--force-system] — `pacman -Rns` (orphan-aware). BLOCKS any
+# protected-set member unless --force-system is given AND (interactively) a loud
+# confirmation is typed. NOT ledger-recorded.
+cmd_remove() {
+  local pkgs=() force=0 a
+  for a in "$@"; do
+    case "$a" in
+      --force-system) force=1 ;;
+      --json) : ;;
+      -*) die "unknown flag: $a" ;;
+      *) pkgs+=("$a") ;;
+    esac
+  done
+  (( ${#pkgs[@]} > 0 )) || die "usage: iictl pkg remove <pkg> [pkg...] [--force-system]"
+  _not_root
+
+  # Protected-set gate — the one irreversible mistake we refuse to make blind.
+  local blocked=() p
+  for p in "${pkgs[@]}"; do
+    _is_protected "$p" && blocked+=("$p")
+  done
+  if (( ${#blocked[@]} > 0 )); then
+    if (( ! force )); then
+      bad "refusing to remove system-critical package(s): ${blocked[*]}"
+      echo "  These are on the protected set (boot / login / compositor / audio / graphics / iictl)." >&2
+      echo "  Removing them can BRICK the box. If you truly mean it, re-run with ${C_B}--force-system${C_0}." >&2
+      die "protected-set guard blocked the removal (nothing changed)"
+    fi
+    # --force-system given: still make the user look at what they are doing.
+    warn "--force-system: about to remove PROTECTED package(s): ${blocked[*]}"
+    if [[ -t 0 ]]; then
+      printf '  Type %sYES%s to confirm you understand this can break booting/login: ' "$C_R" "$C_0" >&2
+      local reply; read -r reply || reply=""
+      [[ "$reply" == "YES" ]] || die "not confirmed — aborting (nothing changed)"
+    else
+      warn "no controlling terminal — proceeding on --force-system alone (the GUI must have already confirmed)"
+    fi
+  fi
+
+  local CONFIRM=(); [[ -t 0 ]] || CONFIRM=(--noconfirm)
+  echo "${C_B}>> removing${C_0} ${pkgs[*]} (with unneeded dependencies)"
+  _sudo pacman -Rns "${CONFIRM[@]}" "${pkgs[@]}" \
+    || die "removal failed — pacman refused (a dependency may still be required; see the message above)"
+  _history remove "${pkgs[*]}"
+  ok "removed: ${pkgs[*]}"
+}
+
+# cmd_list [what] [--json] — explicit (pacman -Qe), orphans (pacman -Qtdq),
+# updates (checkupdates + paru -Qua). Default: explicit.
+cmd_list() {
+  local what="explicit" json=0 a
+  for a in "$@"; do
+    case "$a" in
+      --json) json=1 ;;
+      explicit|installed|orphans|updates) what="$a" ;;
+      -*) die "unknown flag: $a" ;;
+      *) die "unknown list target '$a' (explicit|orphans|updates)" ;;
+    esac
+  done
+  [[ "$what" == installed ]] && what=explicit
+
+  case "$what" in
+    explicit)
+      # name<TAB>version, explicitly-installed only.
+      local data; data="$(pacman -Qe 2>/dev/null || true)"
+      if (( json )); then
+        local first=1 name ver
+        printf '['
+        while read -r name ver; do
+          [[ -n "$name" ]] || continue
+          (( first )) || printf ','
+          first=0
+          printf '{"name":"%s","version":"%s","protected":%s}' \
+            "$(_json_escape "$name")" "$(_json_escape "$ver")" \
+            "$(_is_protected "$name" && echo true || echo false)"
+        done <<< "$data"
+        printf ']\n'
+      else
+        echo "${C_B}explicitly-installed packages${C_0}:"
+        printf '%s\n' "$data" | sed 's/^/  /'
+      fi
+      ;;
+    orphans)
+      # -Qtdq: unrequired (orphan) packages, quiet (names only).
+      local orphans; orphans="$(pacman -Qtdq 2>/dev/null || true)"
+      if (( json )); then
+        printf '['
+        local first=1 n
+        while read -r n; do
+          [[ -n "$n" ]] || continue
+          (( first )) || printf ','; first=0
+          printf '{"name":"%s"}' "$(_json_escape "$n")"
+        done <<< "$orphans"
+        printf ']\n'
+      else
+        if [[ -z "${orphans//[[:space:]]/}" ]]; then
+          echo "${C_B}orphans${C_0}: none (no unrequired dependencies)"
+        else
+          echo "${C_B}orphaned packages${C_0} (unrequired deps — remove with: iictl pkg clean):"
+          printf '%s\n' "$orphans" | sed 's/^/  /'
+        fi
+      fi
+      ;;
+    updates)
+      # checkupdates covers the official repos (safe, no db lock); paru -Qua the AUR.
+      local repo_up="" aur_up=""
+      command -v checkupdates >/dev/null 2>&1 \
+        && repo_up="$(checkupdates 2>/dev/null || true)"
+      _have_paru && aur_up="$(paru -Qua 2>/dev/null || true)"
+      if (( json )); then
+        # each line: "name old -> new"; emit name/new_version/source.
+        printf '['
+        local first=1 name rest newv
+        _emit_up() {   # <source-label> ; reads "name old -> new" lines on stdin
+          local src="$1" line
+          while IFS= read -r line; do
+            [[ -n "${line//[[:space:]]/}" ]] || continue
+            name="${line%% *}"
+            newv="${line##* }"
+            (( first )) || printf ','; first=0
+            printf '{"name":"%s","new_version":"%s","source":"%s"}' \
+              "$(_json_escape "$name")" "$(_json_escape "$newv")" "$src"
+          done
+        }
+        _emit_up official <<< "$repo_up"
+        _emit_up aur      <<< "$aur_up"
+        printf ']\n'
+      else
+        if [[ -z "${repo_up//[[:space:]]/}" && -z "${aur_up//[[:space:]]/}" ]]; then
+          echo "${C_B}updates${C_0}: system is up to date"
+        else
+          echo "${C_B}available updates${C_0}:"
+          [[ -n "${repo_up//[[:space:]]/}" ]] && printf '%s\n' "$repo_up" | sed 's/^/  official  /'
+          [[ -n "${aur_up//[[:space:]]/}" ]]  && printf '%s\n' "$aur_up"  | sed 's/^/  aur       /'
+          echo "  apply with: ${C_B}iictl update --system${C_0}"
+        fi
+        command -v checkupdates >/dev/null 2>&1 || warn "checkupdates (pacman-contrib) absent — official update list may be incomplete"
+        _have_paru || warn "paru absent — AUR updates not checked"
+      fi
+      ;;
+  esac
+}
+
+# cmd_clean [--json] [--yes] — remove orphaned (unrequired) packages, with
+# confirmation. Orphans are never protected by definition (nothing requires
+# them), but we still run the pacman -Rns which refuses to break a live dep.
+cmd_clean() {
+  local json=0 yes=0 a
+  for a in "$@"; do
+    case "$a" in
+      --json) json=1 ;;
+      --yes|-y) yes=1 ;;
+      -*) die "unknown flag: $a" ;;
+      *) die "unexpected argument: $a" ;;
+    esac
+  done
+  _not_root
+  local orphans; orphans="$(pacman -Qtdq 2>/dev/null || true)"
+  if [[ -z "${orphans//[[:space:]]/}" ]]; then
+    if (( json )); then printf '{"removed":[],"count":0}\n'; else ok "no orphans to clean"; fi
+    return 0
+  fi
+  local list; mapfile -t list <<< "$orphans"
+  if (( json )); then
+    # The GUI confirms in its own dialog then calls with --yes; a bare --json
+    # (no --yes) just reports what WOULD be removed.
+    if (( ! yes )); then
+      local first=1 n
+      printf '{"would_remove":['
+      for n in "${list[@]}"; do [[ -n "$n" ]] || continue; (( first )) || printf ','; first=0; printf '"%s"' "$(_json_escape "$n")"; done
+      printf '],"count":%d}\n' "${#list[@]}"
+      return 0
+    fi
+  else
+    echo "${C_B}orphans to remove${C_0} (${#list[@]}):"
+    printf '%s\n' "${list[@]}" | sed 's/^/  /'
+    if (( ! yes )) && [[ -t 0 ]]; then
+      printf 'Remove these orphaned packages? [y/N] ' >&2
+      local reply; read -r reply || reply=""
+      [[ "$reply" =~ ^[Yy] ]] || { echo "aborted (nothing changed)"; return 0; }
+    fi
+  fi
+  local CONFIRM=(); [[ -t 0 ]] || CONFIRM=(--noconfirm)
+  _sudo pacman -Rns "${CONFIRM[@]}" "${list[@]}" \
+    || die "orphan cleanup failed (see pacman's message above)"
+  _history clean "${list[*]}"
+  if (( json )); then
+    local first=1 n
+    printf '{"removed":['
+    for n in "${list[@]}"; do [[ -n "$n" ]] || continue; (( first )) || printf ','; first=0; printf '"%s"' "$(_json_escape "$n")"; done
+    printf '],"count":%d}\n' "${#list[@]}"
+  else
+    ok "cleaned ${#list[@]} orphan(s)"
+  fi
+}
+
+cmd_usage() {
+  cat <<EOF
+${C_B}iictl pkg${C_0} — one-click software manager (official repos + AUR)
+
+Search, install, and remove ANY package from the official repos (pacman) and the
+AUR (paru). The general, ad-hoc layer alongside the curated dev packs
+(iictl pack). Every subcommand supports --json (the Control Center Packages pane
+renders that output). Official-repo ops always work; AUR ops need paru and
+degrade with a clear message if it is absent.
+
+usage:
+  iictl pkg search <query> [--json]        search official + AUR, merged, source-marked
+  iictl pkg info   <pkg>   [--json]         package details (repo or AUR)
+  iictl pkg install <pkg…>                  install (official via pacman, AUR via paru)
+  iictl pkg remove  <pkg…> [--force-system] remove + unneeded deps (protected set blocked)
+  iictl pkg list [explicit|orphans|updates] [--json]
+  iictl pkg clean [--yes]                   remove orphaned (unrequired) packages
+
+Reversibility: your package choices are YOUR OWN — 'iictl pkg' does NOT write to
+the distro revert ledger, so 'iictl revert-all' NEVER uninstalls what you chose.
+(A separate, informational history is kept at:
+  ${XDG_STATE_HOME:-\$HOME/.local/state}/illogical-impulse/pkg-history.log)
+
+The protected set (hyprland, quickshell, greetd, the kernels, pipewire, mesa, the
+NVIDIA driver, base, iictl…) is blocked from 'remove' without --force-system so a
+one-click can't brick the box.
+EOF
+}
+
+case "${1:-help}" in
+  search)          shift; cmd_search  "$@" ;;
+  info)            shift; cmd_info    "$@" ;;
+  install|add)     shift; cmd_install "$@" ;;
+  remove|rm)       shift; cmd_remove  "$@" ;;
+  list|ls)         shift; cmd_list    "$@" ;;
+  clean)           shift; cmd_clean   "$@" ;;
+  help|-h|--help)  cmd_usage ;;
+  *)               die "unknown subcommand: ${1} (try: iictl pkg help)" ;;
+esac

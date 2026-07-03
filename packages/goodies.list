@@ -10,6 +10,16 @@
 # bash-completion loads our /usr/share/bash-completion/completions/iictl on the
 # installed system (fish/zsh load their vendor completions natively).
 bash-completion
+# Shell layer (#15) — the baked bits the `iictl shell` chooser needs. fish +
+# starship already arrive as upstream PKGBUILD deps (illogical-impulse-fonts-
+# themes), so they are NOT re-listed here (redundant double-bake). zsh +
+# zsh-completions + zoxide are small, universal, OFFICIAL-repo packages → baked
+# so `iictl shell set zsh` (the flagship switch) is fully OFFLINE. The heavier /
+# AUR-only extras (nushell theming helpers, fizsh, carapace, oh-my-posh) are
+# fetched online on demand via packages/optional/shells.list — never baked.
+zsh
+zsh-completions
+zoxide
 btop
 eza
 bat
@@ -79,3 +89,14 @@ simple-scan
 snapper
 snap-pac
 flatpak
+
+# Theme coherence (#26 / PROPOSAL §9) — fill the non-color gaps upstream's
+# matugen pipeline leaves open. matugen owns the COLOR css (gtk-3.0/gtk.css);
+# these set the orthogonal widget-theme / icon / cursor NAMES via the unowned
+# gtk-3.0/settings.ini + ~/.icons/default seams (overlay/skel-distro). Small +
+# universal: adw-gtk3 is the canonical Adwaita-shaped GTK theme, Papirus the
+# stock icon set, Bibata (AUR — auto-routed to prebuild by 40-packages.sh) the
+# cursor. NOT plymouth — that is opt-in only (iictl theme plymouth), never baked.
+adw-gtk3
+papirus-icon-theme
+bibata-cursor-theme

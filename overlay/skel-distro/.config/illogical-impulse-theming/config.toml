@@ -1,0 +1,47 @@
+# Illogical Impulse ISO — STANDALONE matugen feeder config (#26 / PROPOSAL §9).
+#
+# ── THIS IS NOT UPSTREAM'S MATUGEN CONFIG ──────────────────────────────────────
+# Upstream owns ~/.config/matugen/config.toml (an rsync --delete path — wiped on
+# `iictl update`). We NEVER add [templates.*] there. Instead this is a SEPARATE
+# config in the UNOWNED ~/.config/illogical-impulse-theming/ namespace, invoked
+# STANDALONE by ii-theme-feeder.sh as:
+#
+#     matugen json <FINISHED colors.json> --config <this file>
+#
+# The `json` subcommand reads upstream's ALREADY-GENERATED flat colour map
+# (~/.local/state/quickshell/user/generated/colors.json — upstream runtime STATE,
+# read-only) and renders the templates below straight from those hexes. It
+# recomputes NOTHING and touches NO upstream-owned path — it only writes into the
+# distro-owned unowned files under output_path (which are the seams the extra
+# tools upstream does not recolour consume).
+#
+# Reversible: the feeder is OFF by default (iictl theme feeder enable wires it in
+# via one sentinel-fenced custom/execs.lua line + a ledger row). Disabling strips
+# the fence; the generated output files are the tools' own config seams. Deleting
+# this dir returns to vanilla — upstream's config.toml never saw us.
+
+[config]
+version_check = false
+
+# Neovim: a lua colour module the user's nvim config can `require()` to theme
+# beyond what upstream recolours. Lands in the UNOWNED ~/.config/nvim seam (the
+# nvim chooser's baked default is an empty ~/.config/nvim — see #17). A distro
+# nvim distro or the user's own config opts into it; nothing forces it.
+[templates.nvim]
+input_path = '~/.config/illogical-impulse-theming/templates/nvim/ii-material.lua'
+output_path = '~/.config/nvim/lua/ii-material.lua'
+
+# Extra terminals (non-kitty — upstream themes kitty). A generic 16-colour
+# fragment terminals like foot/alacritty/wezterm can source/include. Lands in the
+# UNOWNED theming namespace so no terminal's own upstream-owned config is edited;
+# the terminal/TUI domain (#23) points its includes at this file.
+[templates.terminal]
+input_path = '~/.config/illogical-impulse-theming/templates/terminal/colors.ini'
+output_path = '~/.config/illogical-impulse-theming/generated/terminal-colors.ini'
+
+# IDE colour fragment (VS Code / Cursor / JetBrains): a small JSON of the core
+# Material roles an editor extension or settings sync can read. UNOWNED namespace;
+# the editor domain (§6) consumes it, this issue only ships the feeder template.
+[templates.ide]
+input_path = '~/.config/illogical-impulse-theming/templates/ide/ii-material.json'
+output_path = '~/.config/illogical-impulse-theming/generated/ide-material.json'
