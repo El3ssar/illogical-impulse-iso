@@ -249,6 +249,7 @@ The four test tiers, cheapest first:
 | 2 | `just nspawn` | CLI/script logic (`iictl`, ledger, packs, services) | seconds (warm cache) |
 | 3 | `just validate` | static audit of the assembled profile | seconds, no root |
 | 4 | `just build` + `just vm`/`just smoke` | real session, install, bootloader, packages | ~20–40 min |
+| 4+ | `just build && just smoke --full` | the merge gate: boot probe + in-guest `iictl doctor`, `qs -p` load check per standalone config, an ONLINE pack install/remove round-trip, and `revert-all` idempotency back to a clean baseline | +~10 min (needs KVM + networking) |
 
 Iteration costs: package-list or skel changes need a full `just build` (~20–40
 min, AUR cache warm); pure Calamares/branding config too — everything rides
@@ -263,6 +264,27 @@ base, removable with `just nspawn --clean`). `just nspawn 'iictl doctor'` runs
 one command and exits. Run `just prepare` first so `build/` holds the runtime
 layer. Reserve the full `just build` + `just vm` boot for changes that actually
 touch the session, install flow, bootloader, or package set.
+
+**The functional merge gate — `just build && just smoke --full`.** Plain `just
+smoke` boots the newest ISO headless and probes the framebuffer for ≥16 distinct
+colours (greetd → Hyprland → Quickshell reached — the release-CI gate, unchanged
+by `--full`). Adding `--full` then drives the booted live system through a
+guest command channel (the baked tty2 autologin-root rescue shell + a throwaway
+`II_PAYLOAD`/`II_RESULT` vfat pair — nothing extra baked into the ISO) and runs,
+in order: **stage 2** `iictl doctor` (exit 0); **stage 3** a `qs -p` load check
+for every standalone `shell.qml` under `/usr/share/illogical-impulse` (welcome,
+control, widgets/* — discovered by glob); **stage 4** an ONLINE `iictl pack
+install`/`remove` round-trip of the small `demo` pack plus a negative control (a
+pack pointed at a nonexistent package must fail loudly); and **stage 5**
+`iictl revert-all` idempotency — the post-revert state must equal the clean
+baseline captured before any install, and a second `revert-all` must be a clean
+no-op. This is where the additive+reversible guarantee is *executed* rather than
+asserted on paper (what `just validate` cannot do). Prereqs: a KVM-capable host
+(writable `/dev/kvm`), OVMF (`edk2-ovmf`), and **networking** (stage 4 installs
+from the public mirrors + AUR — `[ii-extra]` does not survive install). Budget
+~15 min; on a KVM-less box it fails fast (`SMOKE_ALLOW_TCG=1` to force the slow
+TCG path). It is a local / release-pipeline gate — never the per-PR
+`validate.yml` container, which has no KVM.
 
 ## 9. On the installed system: iictl
 

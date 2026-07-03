@@ -37,9 +37,14 @@ vm *args:
     ./scripts/vm.sh {{args}}
 
 # headless smoke of the newest ISO (used by the release CI).
-#   just smoke               live-ISO boot probe (scripts/smoke.sh)
+#   just smoke               live-ISO boot probe only (scripts/smoke.sh — release CI)
+#   just smoke --full        boot probe + post-boot battery (doctor · qs-load · pack · revert-all)
+#   just smoke --build       bake a fresh ISO first, then the boot probe
+#   just smoke --build --full bake fresh, then the whole functional battery (merge gate)
 #   just smoke --installed   unattended install → boot the installed disk (TEST-01)
-# `--installed` routes to the heavier install smoke; everything else is the live probe.
+# `--installed` routes to the heavier install smoke; everything else (incl. --full
+# and --build) is the live smoke, which stays boot-only when given no flags — so
+# the release CI's plain `just smoke` invocation is byte-for-byte unchanged.
 smoke *args:
     #!/usr/bin/env bash
     set -euo pipefail

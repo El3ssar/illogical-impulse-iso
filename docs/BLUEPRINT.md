@@ -493,8 +493,36 @@ update vm smoke preview nspawn test-revert clean nuke assets image docked`.
   inline in their own `validate.sh` steps — see the file header for the map.
 - `just vm [--disk|--installed|--fresh-disk]` — the manual boot gate; `just
   smoke` is the headless QEMU colour-probe the release CI runs.
+- **`just smoke --full`** (issue #18) — the FUNCTIONAL merge/release gate.
+  Stage 1 is the same boot-only colour-diversity probe release CI runs
+  (unchanged — plain `just smoke` still runs ONLY stage 1). `--full` then boots
+  the live ISO with a user-mode NIC + two labelled vfat disks (`II_PAYLOAD` ro,
+  `II_RESULT` rw — the same throwaway-disk convention as `install-smoke.sh`),
+  switches to the baked tty2 autologin-root rescue shell over QMP keystrokes,
+  and runs an in-guest assertion payload (generated at runtime, NOT baked) as
+  `liveuser`:
+  - **stage 2** — `iictl doctor` golden path (exit 0);
+  - **stage 3** — `qs -p <path>` load check for EVERY standalone `shell.qml`
+    under `/usr/share/illogical-impulse` (welcome, control, widgets/* …),
+    globbed not hardcoded — any QML load/parse error fails;
+  - **stage 4** — an ONLINE `iictl pack install/remove` round-trip of the small
+    `demo` pack (`sl`+`cowsay`) plus a NEGATIVE control (a pack pointed at a
+    nonexistent package must fail loudly) — needs networking, since packs
+    install from the public mirrors + AUR (`[ii-extra]` does not survive
+    install);
+  - **stage 5** — `iictl revert-all` idempotency: assert the post-revert
+    manifest (sorted `pacman -Qq` + the ledger + owned paths) equals the
+    captured clean baseline, then a second `revert-all` is a clean no-op — the
+    Iron Law's reversibility bug-class executed as a test.
+  Test-only: it touches NO airootfs/overlay/skel/upstream path (reversible by
+  deleting the harness diff). Prereqs: KVM (writable `/dev/kvm`) + OVMF; it
+  FAILS FAST if `/dev/kvm` is absent (CI-03; `SMOKE_ALLOW_TCG=1` to force TCG).
+  Runtime ~15 min on KVM (an online pack fetch dominates). Local merge gate:
+  `just build && just smoke --full`. It is a LOCAL / release-pipeline step —
+  never wired into the QEMU-less per-PR `validate.yml` container.
 - `.github/workflows/validate.yml` — prepare+validate in an
-  `archlinux:base-devel` container on push/PR.
+  `archlinux:base-devel` container on push/PR. Static lint per PR; the
+  functional smoke above is the complementary merge/release gate.
 
 ## 7. Update & release flow
 
