@@ -54,7 +54,6 @@ base-devel
 git
 neovim
 code
-cursor-bin
 rustup
 uv
 docker
