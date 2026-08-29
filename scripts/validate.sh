@@ -396,7 +396,7 @@ fi
 step "batteries + nvidia auto-detect"
 # No selection screen: defaults are baked. Spot-check that the flagship
 # goodies actually made it into packages.x86_64.
-for p in brave-bin vlc linux-lts onlyoffice-bin neovim docker snapper flatpak \
+for p in zed vlc linux-lts onlyoffice-bin neovim docker snapper flatpak \
          github-cli git-delta direnv just mise distrobox noto-fonts-emoji \
          cups cups-pdf bluez-utils sane simple-scan; do
   grep -Eq "^\s*${p}\s*$" "$PKGLIST" && _v_ok "baked: $p" || _v_fail "goodie missing from packages.x86_64: $p"
@@ -430,7 +430,7 @@ GOODIES="$PACKAGES/goodies.list"
 # addition, add it here; to add a heavy one, move it to packages/optional.
 _budget_allow=(
   btop eza bat ripgrep ripgrep-all repgrep fd fzf skim zellij 7zip lazygit
-  brave-bin vlc kdeconnect strawberry linux-lts linux-lts-headers
+  zed vlc kdeconnect strawberry linux-lts linux-lts-headers
   onlyoffice-bin inkscape gimp obs-studio
   base-devel git neovim code cursor-bin rustup uv docker docker-compose podman claude-code
   github-cli git-delta direnv just mise distrobox noto-fonts-emoji
