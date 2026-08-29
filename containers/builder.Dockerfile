@@ -23,7 +23,7 @@ FROM archlinux:base-devel
 # bump it deliberately after re-confirming the hook survives. The mkiso.sh +
 # validate.sh BUILD-05 guard re-checks the *installed* mkarchiso at build time,
 # so a drift past this pin (or a manual host bump) fails LOUDLY, not silently.
-ARG ARCHISO_PIN=88-1
+ARG ARCHISO_PIN=89-1
 
 RUN pacman -Syu --noconfirm \
       "archiso=${ARCHISO_PIN}" just rsync python git curl \
