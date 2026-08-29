@@ -1,0 +1,29 @@
+# ai-extras — community-curated opt-in AI + comms stack (FETCHED-ONLINE, never
+# baked). A small, opinionated bundle of third-party agentic dev tools + a
+# Discord client that don't fit the ai-dev pack (which is intentionally narrow
+# around local LLM serving) and that we don't want to force on every user.
+#
+# Members:
+#   - opencode-bin      (AUR)  The AI coding agent built for the terminal.
+#                             Sibling to claude-code, which is already baked.
+#   - antigravity-cli   (AUR)  Google's agentic dev platform CLI companion.
+#                             Sibling to antigravity-ide (also AUR; not listed
+#                             here — pick one or the other, not both).
+#   - vesktop           (AUR)  A Vencord-based Discord desktop client with
+#                             better Wayland support than the web client.
+#
+# All three are AUR packages, so the pack engine's pre-existing AUR pipeline
+# (paru bootstrap, /usr/bin/paru) handles them — no local PKGBUILD override
+# needed. There is no install-time hardware-conditional logic in this pack
+# (unlike ai-dev's ollama GPU detection), so no post-add hook is required:
+# the members install as plain packages, and `iictl pack remove ai-extras`
+# -Rns's exactly the resolved set.
+#
+# This pack is fully OFFLINE-FREE: it requires network at install time. That
+# matches the design pivot from PR #42 (PROPOSAL §4 Pillar 1): heavy/opinionated
+# tools go to the FETCHED-ONLINE tier, never baked, never stashed.
+#
+#meta:type dev
+opencode-bin
+antigravity-cli
+vesktop
